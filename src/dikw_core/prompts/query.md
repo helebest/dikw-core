@@ -9,12 +9,16 @@ You have been given top retrieved excerpts (from D, K, or W — marked per excer
 
 Rules:
 1. Cite each claim inline with the excerpt number in square brackets, e.g. "Karpathy favours deterministic scoping [#2]."
-2. If the excerpts do not contain enough information, say so briefly and stop — do not invent.
-3. Keep the answer tight: one short paragraph unless the question explicitly asks for detail.
-4. Do not mention the layer labels or excerpt numbers except inside citation brackets.
+2. If an **OPERATING PRINCIPLE** below is applicable, apply it and cite it with its bracket tag, e.g. ``[W1]``.
+3. If the excerpts do not contain enough information, say so briefly and stop — do not invent.
+4. Keep the answer tight: one short paragraph unless the question explicitly asks for detail.
+5. Do not mention the layer labels or bracket tags except inside citation brackets.
 
 QUESTION:
 {question}
+
+OPERATING PRINCIPLES currently approved in this wiki (apply when relevant):
+{wisdom}
 
 EXCERPTS:
 {excerpts}

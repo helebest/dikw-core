@@ -1,8 +1,8 @@
 """MCP server for dikw-core.
 
-Phase 0-2 tools:
+Phase 0-3 tools:
   * ``core.status`` — counts across DIKW layers.
-  * ``core.query`` — natural-language question -> cited answer.
+  * ``core.query`` — natural-language question -> cited answer (with wisdom).
   * ``admin.ingest`` — run the ingest pipeline.
   * ``admin.lint`` — run the K-layer hygiene checker.
   * ``doc.search`` — hybrid search returning ranked hits (no LLM call).
@@ -10,9 +10,10 @@ Phase 0-2 tools:
   * ``wiki.synthesize`` — turn source docs into K-layer wiki pages.
   * ``wiki.list`` — list on-disk wiki pages with titles + types.
   * ``wiki.get`` — read a wiki page back with front-matter.
-
-Tool groups mirror the reference projects' shape, keeping room for
-``wisdom.*`` in Phase 3.
+  * ``wisdom.distill`` — propose W-layer candidates from the K layer.
+  * ``wisdom.list`` — list wisdom items filtered by status.
+  * ``wisdom.approve`` — approve a candidate (candidate -> approved).
+  * ``wisdom.reject`` — reject a candidate (-> archived).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from . import api
 from .info.search import HybridSearcher
 from .knowledge.wiki import read_page
 from .providers import build_embedder
-from .schemas import Layer
+from .schemas import Layer, WisdomStatus
 from .storage import build_storage
 
 
@@ -167,6 +168,63 @@ async def build_server() -> Any:
                     "additionalProperties": False,
                 },
             ),
+            Tool(
+                name="wisdom.distill",
+                description=(
+                    "Propose W-layer candidates (principles / lessons / patterns) "
+                    "from the current K-layer wiki. Each candidate must cite at "
+                    "least two pieces of evidence."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "batch": {"type": "integer", "default": 8},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="wisdom.list",
+                description="List wisdom items filtered by status (candidate / approved / archived).",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["candidate", "approved", "archived"],
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="wisdom.approve",
+                description="Approve a candidate wisdom item by id (W-xxxxxx).",
+                inputSchema={
+                    "type": "object",
+                    "required": ["item_id"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "item_id": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="wisdom.reject",
+                description="Reject a candidate wisdom item — archives it and drops the candidate file.",
+                inputSchema={
+                    "type": "object",
+                    "required": ["item_id"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "item_id": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -291,6 +349,73 @@ async def build_server() -> Any:
                 ],
             }
             return [TextContent(type="text", text=json.dumps(lint_payload, indent=2))]
+
+        if name == "wisdom.distill":
+            wiki_path = arguments.get("path", ".")
+            batch = int(arguments.get("batch", 8))
+            distill_report = await api.distill(wiki_path, pages_per_call=batch)
+            return [
+                TextContent(
+                    type="text", text=json.dumps(distill_report.__dict__, indent=2)
+                )
+            ]
+
+        if name == "wisdom.list":
+            wiki_path = arguments.get("path", ".")
+            cfg, root = api.load_wiki(wiki_path)
+            storage = build_storage(cfg.storage, root=root)
+            await storage.connect()
+            await storage.migrate()
+            try:
+                status_arg = arguments.get("status")
+                status_filter = WisdomStatus(status_arg) if status_arg else None
+                items = await storage.list_wisdom(status=status_filter)
+            finally:
+                await storage.close()
+            wisdom_payload: list[dict[str, Any]] = [
+                {
+                    "item_id": i.item_id,
+                    "kind": i.kind.value,
+                    "status": i.status.value,
+                    "title": i.title,
+                    "confidence": i.confidence,
+                    "approved_ts": i.approved_ts,
+                }
+                for i in items
+            ]
+            return [TextContent(type="text", text=json.dumps(wisdom_payload, indent=2))]
+
+        if name == "wisdom.approve":
+            wiki_path = arguments.get("path", ".")
+            approve_result = await api.approve_wisdom(arguments["item_id"], wiki_path)
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "item_id": approve_result.item_id,
+                            "new_status": approve_result.new_status.value,
+                        },
+                        indent=2,
+                    ),
+                )
+            ]
+
+        if name == "wisdom.reject":
+            wiki_path = arguments.get("path", ".")
+            reject_result = await api.reject_wisdom(arguments["item_id"], wiki_path)
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "item_id": reject_result.item_id,
+                            "new_status": reject_result.new_status.value,
+                        },
+                        indent=2,
+                    ),
+                )
+            ]
 
         raise ValueError(f"unknown tool: {name}")
 

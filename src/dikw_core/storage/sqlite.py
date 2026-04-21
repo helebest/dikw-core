@@ -482,16 +482,58 @@ class SQLiteStorage:
 
         return await asyncio.to_thread(_run)
 
-    async def set_wisdom_status(self, item_id: str, status: WisdomStatus) -> None:
+    async def set_wisdom_status(
+        self,
+        item_id: str,
+        status: WisdomStatus,
+        *,
+        approved_ts: float | None = None,
+    ) -> None:
         def _run() -> None:
             conn = self._require_conn()
             with conn:
-                conn.execute(
-                    "UPDATE wisdom_items SET status = ? WHERE item_id = ?",
-                    (status.value, item_id),
-                )
+                if approved_ts is None:
+                    conn.execute(
+                        "UPDATE wisdom_items SET status = ? WHERE item_id = ?",
+                        (status.value, item_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE wisdom_items SET status = ?, approved_ts = ? "
+                        "WHERE item_id = ?",
+                        (status.value, approved_ts, item_id),
+                    )
 
         await asyncio.to_thread(_run)
+
+    async def get_wisdom(self, item_id: str) -> WisdomItem | None:
+        def _run() -> WisdomItem | None:
+            conn = self._require_conn()
+            row = conn.execute(
+                "SELECT * FROM wisdom_items WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            return _row_to_wisdom(row) if row is not None else None
+
+        return await asyncio.to_thread(_run)
+
+    async def get_wisdom_evidence(self, item_id: str) -> list[WisdomEvidence]:
+        def _run() -> list[WisdomEvidence]:
+            conn = self._require_conn()
+            rows = conn.execute(
+                "SELECT doc_id, excerpt, line FROM wisdom_evidence "
+                "WHERE item_id = ? ORDER BY rowid ASC",
+                (item_id,),
+            ).fetchall()
+            return [
+                WisdomEvidence(
+                    doc_id=r["doc_id"],
+                    excerpt=r["excerpt"],
+                    line=int(r["line"]) if r["line"] is not None else None,
+                )
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_run)
 
     # ---- diagnostics -----------------------------------------------------
 

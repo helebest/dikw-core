@@ -120,7 +120,21 @@ class Storage(Protocol):
         status: WisdomStatus | None = None,
         kind: WisdomKind | None = None,
     ) -> list[WisdomItem]: ...
-    async def set_wisdom_status(self, item_id: str, status: WisdomStatus) -> None: ...
+    async def set_wisdom_status(
+        self,
+        item_id: str,
+        status: WisdomStatus,
+        *,
+        approved_ts: float | None = None,
+    ) -> None:
+        """Update a wisdom item's status. Pass ``approved_ts`` to stamp approvals."""
+        ...
+
+    async def get_wisdom_evidence(self, item_id: str) -> list[WisdomEvidence]:
+        """Return evidence rows attached to ``item_id`` in insert order."""
+        ...
+
+    async def get_wisdom(self, item_id: str) -> WisdomItem | None: ...
 
     # ---- diagnostics -----------------------------------------------------
 

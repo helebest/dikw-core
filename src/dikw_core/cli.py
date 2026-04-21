@@ -1,7 +1,7 @@
 """``dikw`` CLI — thin wrapper around ``dikw_core.api``.
 
-Phase 0-2 commands: ``version``, ``init``, ``status``, ``ingest``, ``query``,
-``synth``, ``lint``, ``mcp``.
+Phase 0-3 commands: ``version``, ``init``, ``status``, ``ingest``, ``query``,
+``synth``, ``lint``, ``distill``, ``review``, ``mcp``.
 """
 
 from __future__ import annotations
@@ -242,6 +242,106 @@ def lint_cmd(
         )
     console.print(table)
     raise typer.Exit(code=1)
+
+
+@app.command("distill")
+def distill_cmd(
+    path: Annotated[
+        Path, typer.Option("--path", "-p", help="A path inside the wiki.")
+    ] = Path("."),
+    pages_per_call: Annotated[
+        int,
+        typer.Option(
+            "--batch",
+            help="How many K-layer pages to pack into one distill LLM call.",
+        ),
+    ] = 8,
+) -> None:
+    """Propose W-layer candidates from the current K-layer wiki."""
+    try:
+        report = asyncio.run(api.distill(path, pages_per_call=pages_per_call))
+    except FileNotFoundError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+
+    table = Table(title="dikw distill", show_header=True, header_style="bold")
+    table.add_column("metric", justify="left")
+    table.add_column("count", justify="right")
+    table.add_row("K pages read", str(report.pages_read))
+    table.add_row("candidates added", str(report.candidates_added))
+    table.add_row("rejected (invariant)", str(report.rejected))
+    table.add_row("errors", str(report.errors))
+    console.print(table)
+    if report.candidates_added:
+        console.print(
+            "Review with [cyan]dikw review list[/cyan] / "
+            "[cyan]dikw review approve <id>[/cyan]."
+        )
+
+
+review_app = typer.Typer(help="Review wisdom candidates.", no_args_is_help=True)
+app.add_typer(review_app, name="review")
+
+
+@review_app.command("list")
+def review_list_cmd(
+    path: Annotated[
+        Path, typer.Option("--path", "-p", help="A path inside the wiki.")
+    ] = Path("."),
+) -> None:
+    """List candidate W-layer items awaiting review."""
+    try:
+        items = asyncio.run(api.list_candidates(path))
+    except FileNotFoundError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+
+    if not items:
+        console.print("[green]no candidates[/green]")
+        return
+
+    table = Table(title="wisdom candidates", show_header=True, header_style="bold")
+    table.add_column("id")
+    table.add_column("kind")
+    table.add_column("conf", justify="right")
+    table.add_column("title")
+    for item in items:
+        table.add_row(
+            item.item_id, item.kind.value, f"{item.confidence:.2f}", item.title
+        )
+    console.print(table)
+
+
+@review_app.command("approve")
+def review_approve_cmd(
+    item_id: Annotated[str, typer.Argument(help="Wisdom item id (W-xxxxxx).")],
+    path: Annotated[
+        Path, typer.Option("--path", "-p", help="A path inside the wiki.")
+    ] = Path("."),
+) -> None:
+    """Approve a candidate — promote it to approved and refresh the aggregate."""
+    try:
+        result = asyncio.run(api.approve_wisdom(item_id, path))
+    except (FileNotFoundError, api.ReviewError) as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+    console.print(f"[green]{result.item_id} -> {result.new_status.value}[/green]")
+
+
+@review_app.command("reject")
+def review_reject_cmd(
+    item_id: Annotated[str, typer.Argument(help="Wisdom item id (W-xxxxxx).")],
+    path: Annotated[
+        Path, typer.Option("--path", "-p", help="A path inside the wiki.")
+    ] = Path("."),
+) -> None:
+    """Reject a candidate — archive it and drop the candidate file."""
+    try:
+        result = asyncio.run(api.reject_wisdom(item_id, path))
+    except (FileNotFoundError, api.ReviewError) as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+    console.print(f"[yellow]{result.item_id} -> {result.new_status.value}[/yellow]")
 
 
 @app.command("mcp")

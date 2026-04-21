@@ -10,7 +10,7 @@ from .openai_compat import OpenAICompatEmbeddings, OpenAICompatLLM
 
 def build_llm(config: ProviderConfig) -> LLMProvider:
     if config.llm == "anthropic":
-        return AnthropicLLM()
+        return AnthropicLLM(base_url=config.llm_base_url)
     if config.llm == "openai_compat":
         return OpenAICompatLLM(base_url=config.llm_base_url)
     raise ProviderError(f"unknown LLM provider: {config.llm!r}")

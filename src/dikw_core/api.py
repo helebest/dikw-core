@@ -22,6 +22,7 @@ Phase 0 surface (``init_wiki``, ``status``) stays unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,14 +75,17 @@ from .wisdom.review import reject as _reject_item
 
 __all__ = [
     "AppliedWisdomRef",
+    "CheckReport",
     "Citation",
     "DistillReport",
     "IngestReport",
+    "ProbeResult",
     "QueryResult",
     "ReviewError",
     "ReviewResult",
     "SynthReport",
     "approve_wisdom",
+    "check_providers",
     "distill",
     "find_config",
     "ingest",
@@ -193,6 +197,25 @@ class QueryResult(BaseModel):
     applied_wisdom: list[AppliedWisdomRef] = []
 
 
+class ProbeResult(BaseModel):
+    """One leg of a ``check`` — either the LLM or the embedding endpoint."""
+
+    ok: bool
+    target: str  # the configured endpoint (or "(provider default)")
+    detail: str  # on success: timing + basic stats; on failure: error message
+
+
+class CheckReport(BaseModel):
+    """Result of ``check_providers`` — per-leg connectivity probes."""
+
+    llm: ProbeResult
+    embed: ProbeResult
+
+    @property
+    def ok(self) -> bool:
+        return self.llm.ok and self.embed.ok
+
+
 # ---- wiki scaffolding (Phase 0) -----------------------------------------
 
 
@@ -245,6 +268,72 @@ async def status(path: str | Path | None = None) -> StorageCounts:
         return await storage.counts()
     finally:
         await storage.close()
+
+
+# ---- verifiable config tool ---------------------------------------------
+
+
+async def _probe_llm(
+    llm: LLMProvider, model: str, target: str
+) -> ProbeResult:
+    started = time.perf_counter()
+    try:
+        resp = await llm.complete(
+            system="You are a connectivity check. Reply with just: OK",
+            user="ping",
+            model=model,
+            max_tokens=4,
+            temperature=0.0,
+        )
+    except Exception as e:  # provider exceptions are intentionally heterogeneous
+        return ProbeResult(ok=False, target=target, detail=f"{type(e).__name__}: {e}")
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    input_tok = int((resp.usage or {}).get("input_tokens", 0))
+    return ProbeResult(
+        ok=True,
+        target=target,
+        detail=f"{elapsed_ms}ms, {input_tok} input tokens",
+    )
+
+
+async def _probe_embed(
+    embedder: EmbeddingProvider, model: str, target: str
+) -> ProbeResult:
+    started = time.perf_counter()
+    try:
+        vectors = await embedder.embed(["ping"], model=model)
+    except Exception as e:
+        return ProbeResult(ok=False, target=target, detail=f"{type(e).__name__}: {e}")
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    dim = len(vectors[0]) if vectors else 0
+    return ProbeResult(ok=True, target=target, detail=f"{elapsed_ms}ms, dim={dim}")
+
+
+async def check_providers(
+    path: str | Path | None = None,
+    *,
+    llm: LLMProvider | None = None,
+    embedder: EmbeddingProvider | None = None,
+) -> CheckReport:
+    """Ping the configured LLM and embedding providers.
+
+    ``llm`` and ``embedder`` are injectable for tests; production callers
+    leave them ``None`` and the factory builds them from ``provider:`` in
+    ``dikw.yml``. The two legs are probed in parallel and each reports its
+    own result — an LLM failure does not short-circuit the embedding probe.
+    """
+    cfg, _root = load_wiki(path)
+    llm_inst = llm if llm is not None else build_llm(cfg.provider)
+    embed_inst = embedder if embedder is not None else build_embedder(cfg.provider)
+
+    llm_target = cfg.provider.llm_base_url or "(provider default)"
+    embed_target = cfg.provider.embedding_base_url
+
+    llm_probe, embed_probe = await asyncio.gather(
+        _probe_llm(llm_inst, cfg.provider.llm_model, llm_target),
+        _probe_embed(embed_inst, cfg.provider.embedding_model, embed_target),
+    )
+    return CheckReport(llm=llm_probe, embed=embed_probe)
 
 
 # ---- Phase 1: ingest -----------------------------------------------------

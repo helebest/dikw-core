@@ -37,7 +37,9 @@ from .config import (
     find_config,
     load_config,
 )
-from .data.backends.markdown import ParsedMarkdown, content_hash, parse_file
+from .data.backends import UnsupportedFormat, parse_any
+from .data.backends.base import ParsedDocument
+from .data.backends.markdown import content_hash
 from .data.sources import iter_source_files
 from .info.chunk import chunk_markdown
 from .info.embed import ChunkToEmbed, embed_chunks
@@ -269,7 +271,12 @@ async def ingest(
         to_embed: list[ChunkToEmbed] = []
 
         for abs_path, logical_path in iter_source_files(cfg.sources, root=root):
-            parsed = parse_file(abs_path, rel_path=logical_path)
+            try:
+                parsed = parse_any(abs_path, rel_path=logical_path)
+            except UnsupportedFormat:
+                # User's glob swept up a file we can't parse; skip quietly so
+                # mixed-glob directories don't explode the run.
+                continue
             doc_id = _doc_id_for(Layer.SOURCE, logical_path)
             existing = await storage.get_document(doc_id)
 
@@ -323,7 +330,7 @@ async def ingest(
         await storage.close()
 
 
-def _to_document(parsed: ParsedMarkdown, *, doc_id: str) -> DocumentRecord:
+def _to_document(parsed: ParsedDocument, *, doc_id: str) -> DocumentRecord:
     return DocumentRecord(
         doc_id=doc_id,
         path=parsed.path,
@@ -547,12 +554,11 @@ def _read_source_body(root: Path, doc: DocumentRecord) -> str | None:
     abs_path = (root / doc.path).resolve()
     if not abs_path.is_file():
         return None
-    # sources/... lives on disk as plain markdown with optional front-matter; we
-    # want the body ``parse_file`` produced (front-matter stripped). Re-parsing
-    # is cheap for the sizes Phase 2 targets.
+    # Route through the backend registry so HTML (and future) sources flow
+    # through synth the same way markdown does.
     try:
-        parsed = parse_file(abs_path, rel_path=doc.path)
-    except OSError:
+        parsed = parse_any(abs_path, rel_path=doc.path)
+    except (OSError, UnsupportedFormat):
         return None
     return parsed.body
 

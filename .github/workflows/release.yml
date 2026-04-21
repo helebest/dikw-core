@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write   # required for PyPI trusted publishing
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Verify tag matches pyproject version
+        run: |
+          set -e
+          tag_version="${GITHUB_REF_NAME#v}"
+          pyproject_version=$(uv run --no-project python -c \
+            "import tomllib,sys;print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+          if [ "$tag_version" != "$pyproject_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match pyproject version $pyproject_version" >&2
+            exit 1
+          fi
+
+      - name: Run test gate before releasing
+        run: |
+          uv sync --all-extras
+          uv run ruff check .
+          uv run mypy src
+          uv run pytest -q
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI (trusted publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/dikw-core
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1

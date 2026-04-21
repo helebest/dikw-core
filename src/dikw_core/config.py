@@ -111,12 +111,19 @@ def find_config(start: str | Path) -> Path | None:
 
 
 def default_config(description: str = "A dikw-core knowledge base") -> DikwConfig:
-    """Return a DikwConfig populated with sensible defaults for `dikw init`."""
+    """Return a DikwConfig populated with sensible defaults for `dikw init`.
+
+    Two source entries ship out of the box — one per built-in backend — so a
+    fresh wiki picks up both markdown and HTML sources without extra config.
+    """
     return DikwConfig(
         provider=ProviderConfig(),
         storage=SQLiteStorageConfig(),
         schema=SchemaConfig(description=description),
-        sources=[SourceConfig(path="./sources")],
+        sources=[
+            SourceConfig(path="./sources", pattern="**/*.md"),
+            SourceConfig(path="./sources", pattern="**/*.html"),
+        ],
     )
 
 

@@ -28,15 +28,21 @@ def _resolve_api_key(explicit: str | None) -> str:
 
 
 class AnthropicLLM:
-    def __init__(self, *, api_key: str | None = None) -> None:
+    def __init__(self, *, api_key: str | None = None, base_url: str | None = None) -> None:
         self._api_key_explicit = api_key
+        self._base_url = base_url
         self._client_cache: AsyncAnthropic | None = None
 
     def _get_client(self) -> AsyncAnthropic:
         if self._client_cache is None:
             from anthropic import AsyncAnthropic
 
-            self._client_cache = AsyncAnthropic(api_key=_resolve_api_key(self._api_key_explicit))
+            kwargs: dict[str, Any] = {
+                "api_key": _resolve_api_key(self._api_key_explicit),
+            }
+            if self._base_url is not None:
+                kwargs["base_url"] = self._base_url
+            self._client_cache = AsyncAnthropic(**kwargs)
         return self._client_cache
 
     async def complete(

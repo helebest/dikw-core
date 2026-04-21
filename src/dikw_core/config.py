@@ -22,7 +22,10 @@ class ProviderConfig(BaseModel):
     # The OpenAI-compat base URL is used for BOTH `openai_compat` LLM calls and
     # for embeddings when the LLM provider is Anthropic (which has no embeddings API).
     embedding_base_url: str = "https://api.openai.com/v1"
-    llm_base_url: str | None = None  # only meaningful when llm == "openai_compat"
+    # Used by both "anthropic" and "openai_compat" LLM providers. For anthropic,
+    # points the Anthropic SDK at an Anthropic-protocol-compatible endpoint
+    # (e.g., MiniMax's Anthropic surface). Leave null to use the provider default.
+    llm_base_url: str | None = None
 
 
 class SQLiteStorageConfig(BaseModel):

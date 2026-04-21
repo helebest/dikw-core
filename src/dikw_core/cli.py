@@ -88,6 +88,38 @@ def status_cmd(
         console.print(f"last wiki_log ts: [dim]{counts.last_wiki_log_ts}[/dim]")
 
 
+@app.command("check")
+def check_cmd(
+    path: Annotated[
+        Path,
+        typer.Option(
+            "--path",
+            "-p",
+            help="A path inside the wiki; dikw walks up to find dikw.yml.",
+        ),
+    ] = Path("."),
+) -> None:
+    """Verify the configured LLM + embedding providers by pinging each endpoint."""
+    try:
+        report = asyncio.run(api.check_providers(path))
+    except FileNotFoundError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+
+    table = Table(title="dikw check", show_header=True, header_style="bold")
+    table.add_column("provider", justify="left")
+    table.add_column("target", justify="left")
+    table.add_column("status", justify="left")
+    table.add_column("detail", justify="left")
+    for label, probe in (("LLM", report.llm), ("Embedding", report.embed)):
+        status = "[green]✓ OK[/green]" if probe.ok else "[red]✗ FAIL[/red]"
+        table.add_row(label, probe.target, status, probe.detail)
+    console.print(table)
+
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
 @app.command("ingest")
 def ingest_cmd(
     path: Annotated[

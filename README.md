@@ -56,6 +56,7 @@ Approved design doc: [`docs/design.md`](./docs/design.md).
 | `dikw review {list,approve,reject}` | drive the candidate -> approved / archived state machine             |
 | `dikw mcp [--stdio]`        | launch the MCP server (exposes the engine to Claude Code / Claude Desktop)    |
 | `dikw status`               | counts across DIKW layers                                                     |
+| `dikw check`                | ping the configured LLM + embedding endpoints to verify `dikw.yml` + keys     |
 
 ## Providers
 
@@ -65,16 +66,51 @@ Configured via `dikw.yml`:
 provider:
   llm: anthropic                # or: openai_compat
   llm_model: claude-sonnet-4-6
-  llm_base_url: null            # set for openai_compat (Azure, Ollama, vLLM, DeepSeek, …)
+  llm_base_url: null            # set for any Anthropic-protocol-compatible endpoint
   embedding: openai_compat
   embedding_model: text-embedding-3-small
   embedding_base_url: https://api.openai.com/v1
 ```
 
 - `anthropic` → uses the `anthropic` async SDK with `cache_control` on the
-  system prompt, so repeated synth/query calls hit the prompt cache.
+  system prompt, so repeated synth/query calls hit the prompt cache. Set
+  `llm_base_url` to retarget the SDK at any Anthropic-compatible endpoint
+  (e.g., MiniMax); leave null for api.anthropic.com.
 - `openai_compat` → uses the `openai` async SDK against any base URL that
-  speaks the OpenAI HTTP surface.
+  speaks the OpenAI HTTP surface (Azure, Ollama, vLLM, DeepSeek, MiniMax, …).
+
+### Using MiniMax (Anthropic-compatible)
+
+MiniMax exposes both an Anthropic-compatible endpoint (for LLM calls) and
+an OpenAI-compatible endpoint (for embeddings). Fill these in by hand —
+dikw-core never auto-detects vendor URLs:
+
+```yaml
+provider:
+  llm: anthropic
+  llm_model: <MiniMax Anthropic-compatible model name>
+  llm_base_url: <MiniMax Anthropic endpoint, e.g. https://api.minimaxi.com/anthropic>
+  embedding: openai_compat
+  embedding_model: <MiniMax embedding model>
+  embedding_base_url: <MiniMax OpenAI-compatible endpoint, e.g. https://api.minimaxi.com/v1>
+```
+
+Env vars (both SDKs read their own — same key, two names is the norm):
+
+```bash
+export ANTHROPIC_API_KEY=<your-MiniMax-key>
+export OPENAI_API_KEY=<your-MiniMax-key>
+```
+
+Verify connectivity **before** running ingest/query:
+
+```bash
+uv run dikw check
+```
+
+`dikw check` pings each provider with one tiny request and prints a status
+table with endpoint, latency, and (for LLM) input-token count. Exit code
+is 0 on success and 1 on any failure — scriptable in CI or a shell one-liner.
 
 ## Source formats
 

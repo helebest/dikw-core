@@ -119,6 +119,45 @@ provider:
   embedding_base_url: https://api.openai.com/v1
 ```
 
+`llm_base_url` works for both `anthropic` and `openai_compat`. With
+`llm: anthropic` it retargets the official `anthropic` SDK at any
+Anthropic-protocol-compatible endpoint (e.g., MiniMax), keeping the
+`cache_control` benefit on the system prompt.
+
+### Example: MiniMax (Anthropic-compatible LLM + OpenAI-compatible embeddings)
+
+dikw-core never auto-detects vendor endpoints — fill these in by hand:
+
+```yaml
+provider:
+  llm: anthropic
+  llm_model: <MiniMax Anthropic-compatible model name>
+  llm_base_url: <MiniMax Anthropic endpoint>
+  embedding: openai_compat
+  embedding_model: <MiniMax embedding model>
+  embedding_base_url: <MiniMax OpenAI-compatible endpoint>
+```
+
+Export **both** env vars (each SDK reads its own; same MiniMax key is fine):
+
+```bash
+export ANTHROPIC_API_KEY=<your-MiniMax-key>
+export OPENAI_API_KEY=<your-MiniMax-key>
+```
+
+### Verify your provider config
+
+After editing `dikw.yml` and exporting the env vars, run:
+
+```bash
+uv run dikw check
+```
+
+This pings each provider with one tiny request and prints a status table
+— endpoint, latency, and (for LLM) input-token count. Exit code is 0 on
+success, 1 on any failure. Do this *before* running `dikw ingest` on a
+real corpus so a misconfigured endpoint doesn't burn a full embedding run.
+
 ## Pluggable storage
 
 Three backends ship; switch by editing `storage.backend` in `dikw.yml`:

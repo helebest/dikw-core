@@ -82,17 +82,15 @@ class PostgresStorage:
         finally:
             await boot.close()
 
-        async def _configure(conn: AsyncConnection) -> None:
-            from pgvector.psycopg import register_vector_async
-
-            await register_vector_async(conn)
+        # pgvector types flow through explicit ``::vector`` casts in the SQL
+        # so we don't need a type-registration configure hook here — the
+        # extension only needs to exist (which we guaranteed above).
 
         self._pool = AsyncConnectionPool(
             conninfo=self._dsn,
             min_size=1,
             max_size=self._pool_size,
             kwargs={"autocommit": False},
-            configure=_configure,
             open=False,
         )
         await self._pool.open()
@@ -237,9 +235,10 @@ class PostgresStorage:
                         (row.chunk_id, row.model),
                     )
                     await cur.execute(
-                        "INSERT INTO chunks_vec(chunk_id, embedding) VALUES (%s, %s) "
+                        "INSERT INTO chunks_vec(chunk_id, embedding) "
+                        "VALUES (%s, %s::vector) "
                         "ON CONFLICT (chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding",
-                        (row.chunk_id, row.embedding),
+                        (row.chunk_id, list(row.embedding)),
                     )
             await conn.commit()
 
@@ -308,11 +307,11 @@ class PostgresStorage:
             )
 
         sql = (
-            "SELECT cv.chunk_id, c.doc_id, (cv.embedding <=> %s) AS dist "
+            "SELECT cv.chunk_id, c.doc_id, (cv.embedding <=> %s::vector) AS dist "
             "FROM chunks_vec cv JOIN chunks c ON c.chunk_id = cv.chunk_id "
             "JOIN documents d ON d.doc_id = c.doc_id WHERE d.active = TRUE"
         )
-        params: list[Any] = [embedding]
+        params: list[Any] = [list(embedding)]
         if layer is not None:
             sql += " AND d.layer = %s"
             params.append(layer.value)

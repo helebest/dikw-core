@@ -199,17 +199,19 @@ class SQLiteStorage:
 
     async def replace_chunks(
         self, doc_id: str, chunks: Sequence[ChunkRecord]
-    ) -> None:
-        def _run() -> None:
+    ) -> list[int]:
+        def _run() -> list[int]:
             conn = self._require_conn()
+            ids: list[int] = []
             with conn:
                 conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
                 for c in chunks:
-                    conn.execute(
+                    cur = conn.execute(
                         'INSERT INTO chunks(doc_id, seq, start, "end", text) '
                         "VALUES (?, ?, ?, ?, ?)",
                         (c.doc_id, c.seq, c.start, c.end, c.text),
                     )
+                    ids.append(int(cur.lastrowid or 0))
                 # refresh FTS rows for this document: delete stale, add new
                 conn.execute(
                     "DELETE FROM documents_fts WHERE path = "
@@ -227,8 +229,9 @@ class SQLiteStorage:
                             "VALUES (?, ?, ?, ?)",
                             (doc_row["path"], doc_row["title"], c.text, doc_row["layer"]),
                         )
+            return ids
 
-        await asyncio.to_thread(_run)
+        return await asyncio.to_thread(_run)
 
     async def upsert_embeddings(self, rows: Sequence[EmbeddingRow]) -> None:
         if not rows:

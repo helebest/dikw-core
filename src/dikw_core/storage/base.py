@@ -73,7 +73,13 @@ class Storage(Protocol):
 
     # ---- I layer ---------------------------------------------------------
 
-    async def replace_chunks(self, doc_id: str, chunks: Sequence[ChunkRecord]) -> None: ...
+    async def replace_chunks(
+        self, doc_id: str, chunks: Sequence[ChunkRecord]
+    ) -> list[int]:
+        """Replace all chunks for ``doc_id``. Return the assigned ``chunk_id``s
+        in the same ``seq`` order as the input so the caller can pair
+        embeddings with persisted rows."""
+        ...
     async def upsert_embeddings(self, rows: Sequence[EmbeddingRow]) -> None: ...
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None: ...
     async def fts_search(

@@ -1,8 +1,6 @@
 """``dikw`` CLI — thin wrapper around ``dikw_core.api``.
 
-Phase 0 commands: ``init``, ``status``, ``version``. More land with subsequent
-phases. All commands validate arguments with typer + Pydantic and delegate
-real work to the ``api`` module so the MCP server can reuse the same logic.
+Phase 0-1 commands: ``version``, ``init``, ``status``, ``ingest``, ``query``, ``mcp``.
 """
 
 from __future__ import annotations
@@ -13,6 +11,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__, api
@@ -86,6 +85,92 @@ def status_cmd(
     console.print(table)
     if counts.last_wiki_log_ts is not None:
         console.print(f"last wiki_log ts: [dim]{counts.last_wiki_log_ts}[/dim]")
+
+
+@app.command("ingest")
+def ingest_cmd(
+    path: Annotated[
+        Path,
+        typer.Option("--path", "-p", help="A path inside the wiki."),
+    ] = Path("."),
+    no_embed: Annotated[
+        bool,
+        typer.Option(
+            "--no-embed",
+            help="Skip embedding (only FTS-indexed). Useful offline or before API keys are set.",
+        ),
+    ] = False,
+) -> None:
+    """Scan configured sources and update the D + I layers."""
+    from .providers import build_embedder
+
+    async def _run() -> api.IngestReport:
+        embedder = None
+        if not no_embed:
+            cfg, _ = api.load_wiki(path)
+            embedder = build_embedder(cfg.provider)
+        return await api.ingest(path, embedder=embedder)
+
+    try:
+        report = asyncio.run(_run())
+    except FileNotFoundError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+
+    table = Table(title="dikw ingest", show_header=True, header_style="bold")
+    table.add_column("metric", justify="left")
+    table.add_column("count", justify="right")
+    table.add_row("scanned", str(report.scanned))
+    table.add_row("added", str(report.added))
+    table.add_row("updated", str(report.updated))
+    table.add_row("unchanged", str(report.unchanged))
+    table.add_row("chunks", str(report.chunks))
+    table.add_row("embeddings", str(report.embedded))
+    console.print(table)
+
+
+@app.command("query")
+def query_cmd(
+    question: Annotated[str, typer.Argument(help="Natural-language question.")],
+    path: Annotated[
+        Path, typer.Option("--path", "-p", help="A path inside the wiki.")
+    ] = Path("."),
+    limit: Annotated[
+        int, typer.Option("--limit", "-k", help="Number of excerpts to retrieve.")
+    ] = 5,
+) -> None:
+    """Answer QUESTION using the wiki as context, citing sources."""
+    try:
+        result = asyncio.run(api.query(question, path, limit=limit))
+    except FileNotFoundError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+
+    console.print(Panel(result.answer, title="answer", border_style="cyan"))
+    if not result.citations:
+        console.print("[dim]no citations[/dim]")
+        return
+
+    table = Table(title="citations", show_header=True, header_style="bold")
+    table.add_column("#", justify="right")
+    table.add_column("layer")
+    table.add_column("path")
+    table.add_column("excerpt")
+    for c in result.citations:
+        table.add_row(str(c.n), c.layer, c.path, c.excerpt[:120] + ("…" if len(c.excerpt) > 120 else ""))
+    console.print(table)
+
+
+@app.command("mcp")
+def mcp_cmd(
+    stdio: Annotated[bool, typer.Option("--stdio", help="Use stdio transport.")] = True,
+) -> None:
+    """Launch the MCP server over the chosen transport."""
+    if not stdio:
+        console.print("[yellow]HTTP transport lands in Phase 4; running stdio.[/yellow]")
+    from .mcp_server import run_stdio
+
+    run_stdio()
 
 
 def main() -> None:  # pragma: no cover - entry point shim

@@ -1,15 +1,24 @@
 """High-level engine facade used by both the CLI and the MCP server.
 
-Phase 0 surface: ``init_wiki`` (scaffold a new wiki directory) and ``status``
-(show backend counts). Subsequent phases add ``ingest``, ``synthesize``,
-``distill``, ``review``, ``query``, ``lint``.
+Phase 1 surface:
+  * ``ingest`` — walk configured sources, parse markdown, chunk, embed, index.
+  * ``query`` — hybrid search + LLM answer with citations.
+
+Phase 0 surface (``init_wiki``, ``status``) stays unchanged.
+
+Subsequent phases extend this module with ``synthesize``, ``distill``,
+``review``, ``lint``.
 """
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from pydantic import BaseModel
+
+from . import prompts
 from .config import (
     CONFIG_FILENAME,
     DikwConfig,
@@ -18,11 +27,14 @@ from .config import (
     find_config,
     load_config,
 )
-from .schemas import StorageCounts
-
-if TYPE_CHECKING:
-    from .storage.base import Storage
-
+from .data.backends.markdown import ParsedMarkdown, parse_file
+from .data.sources import iter_source_files
+from .info.chunk import chunk_markdown
+from .info.embed import ChunkToEmbed, embed_chunks
+from .info.search import Hit, HybridSearcher
+from .providers import EmbeddingProvider, LLMProvider, build_embedder, build_llm
+from .schemas import ChunkRecord, DocumentRecord, Layer, StorageCounts, WikiLogEntry
+from .storage import Storage, build_storage
 
 WIKI_INIT_FILES: dict[str, str] = {
     "sources/.gitkeep": "",
@@ -71,12 +83,36 @@ WIKI_INIT_FILES: dict[str, str] = {
 }
 
 
-def init_wiki(root: str | Path, *, description: str | None = None) -> Path:
-    """Scaffold a new dikw wiki at ``root``.
+# ---- public result models ------------------------------------------------
 
-    Creates the directory layout and a ``dikw.yml`` populated with defaults.
-    Fails if a config already exists at the target path.
-    """
+
+@dataclass(frozen=True)
+class IngestReport:
+    scanned: int = 0
+    added: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    chunks: int = 0
+    embedded: int = 0
+
+
+class Citation(BaseModel):
+    n: int
+    path: str
+    title: str | None = None
+    layer: str
+    excerpt: str
+
+
+class QueryResult(BaseModel):
+    answer: str
+    citations: list[Citation]
+
+
+# ---- wiki scaffolding (Phase 0) -----------------------------------------
+
+
+def init_wiki(root: str | Path, *, description: str | None = None) -> Path:
     wiki_root = Path(root).resolve()
     wiki_root.mkdir(parents=True, exist_ok=True)
 
@@ -97,7 +133,6 @@ def init_wiki(root: str | Path, *, description: str | None = None) -> Path:
 
 
 def resolve_wiki_root(path: str | Path | None) -> Path:
-    """Return the nearest wiki root (dir containing ``dikw.yml``) walking up from ``path``."""
     start = Path(path) if path is not None else Path.cwd()
     found = find_config(start)
     if found is None:
@@ -113,9 +148,6 @@ def load_wiki(path: str | Path | None = None) -> tuple[DikwConfig, Path]:
 
 
 async def _with_storage(path: str | Path | None) -> tuple[DikwConfig, Path, Storage]:
-    """Open and migrate the Storage backend for the wiki rooted near ``path``."""
-    from .storage import build_storage  # local import to avoid cycle at module import
-
     cfg, root = load_wiki(path)
     storage = build_storage(cfg.storage, root=root)
     await storage.connect()
@@ -124,9 +156,188 @@ async def _with_storage(path: str | Path | None) -> tuple[DikwConfig, Path, Stor
 
 
 async def status(path: str | Path | None = None) -> StorageCounts:
-    """Return storage counts across all DIKW layers for the nearest wiki."""
     _cfg, _root, storage = await _with_storage(path)
     try:
         return await storage.counts()
     finally:
         await storage.close()
+
+
+# ---- Phase 1: ingest -----------------------------------------------------
+
+
+def _doc_id_for(layer: Layer, logical_path: str) -> str:
+    return f"{layer.value}:{logical_path}"
+
+
+async def ingest(
+    path: str | Path | None = None,
+    *,
+    embedder: EmbeddingProvider | None = None,
+) -> IngestReport:
+    """Ingest every markdown file listed in ``sources:`` into the D and I layers.
+
+    ``embedder`` is injectable so tests can pass a deterministic fake;
+    production callers leave it ``None`` and the factory builds one from
+    ``provider:`` in ``dikw.yml``.
+    """
+    cfg, root, storage = await _with_storage(path)
+    try:
+        report = IngestReport()
+        to_embed: list[ChunkToEmbed] = []
+
+        for abs_path, logical_path in iter_source_files(cfg.sources, root=root):
+            parsed = parse_file(abs_path, rel_path=logical_path)
+            doc_id = _doc_id_for(Layer.SOURCE, logical_path)
+            existing = await storage.get_document(doc_id)
+
+            scanned = report.scanned + 1
+            if existing is not None and existing.hash == parsed.hash:
+                # Source unchanged since last ingest — skip chunk/embed work.
+                report = _replace(
+                    report,
+                    scanned=scanned,
+                    unchanged=report.unchanged + 1,
+                )
+                continue
+
+            await storage.put_content(parsed.hash, parsed.body)
+            await storage.upsert_document(_to_document(parsed, doc_id=doc_id))
+
+            chunks = chunk_markdown(parsed.body)
+            chunk_records = [
+                ChunkRecord(
+                    doc_id=doc_id, seq=c.seq, start=c.start, end=c.end, text=c.text
+                )
+                for c in chunks
+            ]
+            chunk_ids = await storage.replace_chunks(doc_id, chunk_records)
+            if embedder is not None and chunk_records:
+                to_embed.extend(
+                    ChunkToEmbed(chunk_id=cid, text=r.text)
+                    for cid, r in zip(chunk_ids, chunk_records, strict=True)
+                )
+
+            await storage.append_wiki_log(
+                WikiLogEntry(ts=time.time(), action="ingest", src=logical_path)
+            )
+            report = _replace(
+                report,
+                scanned=scanned,
+                added=report.added if existing is not None else report.added + 1,
+                updated=report.updated + 1 if existing is not None else report.updated,
+                chunks=report.chunks + len(chunk_records),
+            )
+
+        if embedder is not None and to_embed:
+            rows = await embed_chunks(
+                embedder, to_embed, model=cfg.provider.embedding_model
+            )
+            await storage.upsert_embeddings(rows)
+            report = _replace(report, embedded=len(rows))
+
+        return report
+    finally:
+        await storage.close()
+
+
+def _to_document(parsed: ParsedMarkdown, *, doc_id: str) -> DocumentRecord:
+    return DocumentRecord(
+        doc_id=doc_id,
+        path=parsed.path,
+        title=parsed.title,
+        hash=parsed.hash,
+        mtime=parsed.mtime,
+        layer=Layer.SOURCE,
+        active=True,
+    )
+
+
+def _replace(r: IngestReport, **kwargs: int) -> IngestReport:
+    return IngestReport(
+        scanned=kwargs.get("scanned", r.scanned),
+        added=kwargs.get("added", r.added),
+        updated=kwargs.get("updated", r.updated),
+        unchanged=kwargs.get("unchanged", r.unchanged),
+        chunks=kwargs.get("chunks", r.chunks),
+        embedded=kwargs.get("embedded", r.embedded),
+    )
+
+
+# ---- Phase 1: query ------------------------------------------------------
+
+
+async def query(
+    q: str,
+    path: str | Path | None = None,
+    *,
+    limit: int = 5,
+    llm: LLMProvider | None = None,
+    embedder: EmbeddingProvider | None = None,
+) -> QueryResult:
+    """Hybrid-search the wiki, feed the top hits to an LLM, and return cited answer."""
+    cfg, _root, storage = await _with_storage(path)
+    try:
+        _embedder = embedder
+        _llm = llm
+        if _embedder is None:
+            _embedder = build_embedder(cfg.provider)
+        if _llm is None:
+            _llm = build_llm(cfg.provider)
+
+        searcher = HybridSearcher(
+            storage, _embedder, embedding_model=cfg.provider.embedding_model
+        )
+        hits = await searcher.search(q, limit=limit)
+
+        excerpts_block, citations = await _build_excerpts(storage, hits)
+        if not citations:
+            return QueryResult(
+                answer="(no excerpts available — ingest sources first or rephrase)",
+                citations=[],
+            )
+
+        prompt_tmpl = prompts.load("query")
+        user_prompt = prompt_tmpl.format(question=q, excerpts=excerpts_block)
+        response = await _llm.complete(
+            system="You are the query-answering component of dikw-core.",
+            user=user_prompt,
+            model=cfg.provider.llm_model,
+            max_tokens=1024,
+            temperature=0.2,
+        )
+        return QueryResult(answer=response.text.strip(), citations=citations)
+    finally:
+        await storage.close()
+
+
+async def _build_excerpts(
+    storage: Storage, hits: list[Hit]
+) -> tuple[str, list[Citation]]:
+    citations: list[Citation] = []
+    lines: list[str] = []
+    for i, hit in enumerate(hits, start=1):
+        doc = await storage.get_document(hit.doc_id)
+        if doc is None:
+            continue
+        excerpt = hit.snippet
+        if not excerpt and hit.chunk_id is not None:
+            chunk = await storage.get_chunk(hit.chunk_id)
+            if chunk is not None:
+                excerpt = chunk.text[:400]
+        excerpt = (excerpt or "").strip()
+        if not excerpt:
+            continue
+        citations.append(
+            Citation(
+                n=i,
+                path=doc.path,
+                title=doc.title,
+                layer=doc.layer.value,
+                excerpt=excerpt,
+            )
+        )
+        lines.append(
+            f"[#{i}] ({doc.layer.value}) {doc.path}\n> {excerpt}"
+        )
+    return "\n\n".join(lines), citations

@@ -1,23 +1,43 @@
 """Anthropic LLM provider.
 
-Phase 0 ships a thin stub that lets the factory resolve without making real
-API calls. Phase 1 will flesh this out with actual completions + prompt
-caching. Anthropic has no embeddings endpoint, so embeddings must use an
+Wraps the official ``anthropic`` SDK. Prompt caching is applied to the system
+prompt via ``cache_control`` — the system prompt is the near-static part
+across ``synthesize``/``query``/``distill`` sessions, so it benefits most.
+Anthropic has no embeddings endpoint; embeddings must go through the
 OpenAI-compatible provider.
 """
 
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING, Any
 
 from .base import LLMResponse, ProviderError, ToolSpec
 
+if TYPE_CHECKING:
+    from anthropic import AsyncAnthropic
+
+
+def _resolve_api_key(explicit: str | None) -> str:
+    key = explicit or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise ProviderError(
+            "ANTHROPIC_API_KEY is not set. Export it or pass `api_key` explicitly."
+        )
+    return key
+
 
 class AnthropicLLM:
-    """Wrap the official ``anthropic`` SDK. Phase 0 = stub."""
-
     def __init__(self, *, api_key: str | None = None) -> None:
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self._api_key_explicit = api_key
+        self._client_cache: AsyncAnthropic | None = None
+
+    def _get_client(self) -> AsyncAnthropic:
+        if self._client_cache is None:
+            from anthropic import AsyncAnthropic
+
+            self._client_cache = AsyncAnthropic(api_key=_resolve_api_key(self._api_key_explicit))
+        return self._client_cache
 
     async def complete(
         self,
@@ -29,15 +49,45 @@ class AnthropicLLM:
         temperature: float = 0.2,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResponse:
-        _ = (system, user, model, max_tokens, temperature, tools)
-        raise NotImplementedError(
-            "AnthropicLLM.complete lands in Phase 1; "
-            "Phase 0 only exercises the factory wiring"
+        client = self._get_client()
+        _ = tools  # Phase 1 answers are plain-text; tool use comes later.
+
+        # Wrap the system prompt as a cache-eligible block so repeated calls
+        # within a session hit the prompt cache.
+        system_block: list[dict[str, Any]] = [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ]
+
+        resp = await client.messages.create(
+            model=model,
+            system=system_block,  # type: ignore[arg-type]
+            messages=[{"role": "user", "content": user}],
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
+        # Concatenate text blocks only; ignore tool_use / other block types for now.
+        parts: list[str] = []
+        for block in resp.content:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        text_out = "".join(parts)
 
+        usage = {}
+        if resp.usage is not None:
+            usage = {
+                "input_tokens": int(getattr(resp.usage, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(resp.usage, "output_tokens", 0) or 0),
+                "cache_creation_input_tokens": int(
+                    getattr(resp.usage, "cache_creation_input_tokens", 0) or 0
+                ),
+                "cache_read_input_tokens": int(
+                    getattr(resp.usage, "cache_read_input_tokens", 0) or 0
+                ),
+            }
 
-def require_api_key() -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
-        raise ProviderError("ANTHROPIC_API_KEY is not set")
-    return key
+        return LLMResponse(
+            text=text_out,
+            finish_reason=resp.stop_reason,
+            usage=usage,
+        )

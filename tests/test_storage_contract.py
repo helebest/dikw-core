@@ -125,25 +125,12 @@ async def test_embeddings_and_vec_search(storage: Storage) -> None:
     doc = _make_doc("sources/vec.md")
     await storage.put_content(doc.hash, "body")
     await storage.upsert_document(doc)
-    await storage.replace_chunks(
+    ids = await storage.replace_chunks(
         doc.doc_id,
         [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=5, text="alpha")],
     )
-    chunks = list(await storage.list_documents(layer=Layer.SOURCE))
-    assert chunks  # sanity
-
-    # pull the auto-assigned chunk_id
-    # (SQLite adapter auto-increments; find it via FTS or chunk lookup)
-    fts = await storage.fts_search("alpha", limit=1)
-    assert fts
-    # load chunk_id: the FTS hit may not include chunk_id, so we scan via get_chunk
-    cid = None
-    for i in range(1, 100):
-        c = await storage.get_chunk(i)
-        if c and c.doc_id == doc.doc_id:
-            cid = i
-            break
-    assert cid is not None
+    assert len(ids) == 1
+    cid = ids[0]
 
     await storage.upsert_embeddings(
         [EmbeddingRow(chunk_id=cid, model="test-embed", embedding=[1.0, 0.0, 0.0, 0.0])]

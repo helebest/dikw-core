@@ -78,7 +78,7 @@ Module boundaries are chosen so each subpackage fits in a single reading pass an
 
 ## Tech Stack
 
-- **Language**: Python 3.11+
+- **Language**: Python 3.12+
 - **Packaging**: `uv` → `pyproject.toml` (PEP 621), `uv.lock` committed; single source layout under `src/dikw_core/`
 - **Storage (MVP, default)**: stdlib `sqlite3` + `sqlite-vec` (pip) for vectors; FTS5 built into SQLite. Behind a `Storage` Protocol.
 - **Storage (planned, enterprise)**: Postgres 15+ with `pgvector` ≥0.6 and `tsvector`/`pg_trgm` for full-text, via `psycopg[binary,pool]`. Optional extra: `uv pip install dikw-core[postgres]`.
@@ -90,7 +90,7 @@ Module boundaries are chosen so each subpackage fits in a single reading pass an
 - **MCP**: `mcp` Python SDK (stdio transport first; HTTP optional)
 - **CLI & output**: `typer` + `rich`
 - **Quality**: `pytest`, `pytest-asyncio`, `ruff`, `mypy --strict` where practical
-- **CI**: GitHub Actions — lint + type-check + tests on 3.11/3.12
+- **CI**: GitHub Actions — lint + type-check + tests on 3.12/3.13
 
 Known patterns to reuse from references (concrete sources):
 - **Hybrid search pipeline (BM25 + vector + RRF + rerank)** — `mineru-doc-explorer/src/hybrid-search.ts`, `mineru-doc-explorer/src/search.ts`. Port the RRF fusion + position-aware blending logic.
@@ -109,7 +109,7 @@ dikw-core/
 ├── uv.lock
 ├── README.md
 ├── LICENSE
-├── .python-version           # 3.11
+├── .python-version           # 3.12
 ├── .github/workflows/ci.yml
 ├── .gitignore
 ├── src/dikw_core/

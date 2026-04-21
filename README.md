@@ -20,7 +20,7 @@ Inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6
 
 ## Install & quick start
 
-Requires Python 3.11+ and [`uv`](https://docs.astral.sh/uv/).
+Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/helebest/dikw-core

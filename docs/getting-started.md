@@ -1,7 +1,7 @@
 # Getting started
 
 This walkthrough takes a blank directory to a queryable knowledge base with a
-curated Wisdom layer in about five minutes. It only needs Python 3.11+ and
+curated Wisdom layer in about five minutes. It only needs Python 3.12+ and
 `uv`; LLM keys are optional until you hit `dikw synth` or `dikw query`.
 
 ## 1. Install and scaffold

@@ -62,6 +62,7 @@ class PostgresStorage:
 
     async def connect(self) -> None:
         try:
+            import psycopg
             from psycopg_pool import AsyncConnectionPool
         except ImportError as e:  # pragma: no cover - exercised only without extras
             raise StorageError(
@@ -69,18 +70,32 @@ class PostgresStorage:
                 "install via `uv pip install dikw-core[postgres]`"
             ) from e
 
+        # Extensions must exist before the pool hands out connections,
+        # because ``configure`` below registers pgvector types on each
+        # new connection — which needs the ``vector`` type present.
+        boot = await psycopg.AsyncConnection.connect(self._dsn, autocommit=True)
+        try:
+            async with boot.cursor() as cur:
+                await cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+                await cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                await cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
+        finally:
+            await boot.close()
+
+        async def _configure(conn: AsyncConnection) -> None:
+            from pgvector.psycopg import register_vector_async
+
+            await register_vector_async(conn)
+
         self._pool = AsyncConnectionPool(
             conninfo=self._dsn,
             min_size=1,
             max_size=self._pool_size,
             kwargs={"autocommit": False},
+            configure=_configure,
             open=False,
         )
         await self._pool.open()
-
-        # Register pgvector types on every connection handed out by the pool.
-        async with self._pool.connection() as conn:
-            await self._register_extensions(conn)
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -88,13 +103,11 @@ class PostgresStorage:
             self._pool = None
 
     async def migrate(self) -> None:
+        # Extensions + schema are created in ``connect()`` so the pool can
+        # register pgvector. Migrations here just apply tables/indexes.
         sql_text = self._load_migration_sql()
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    f"CREATE SCHEMA IF NOT EXISTS {self._schema}"
-                )
-                await cur.execute(f"SET search_path TO {self._schema}, public")
                 await cur.execute(sql_text)
             await conn.commit()
         # Restore the vector dim (if we've indexed before).
@@ -541,11 +554,6 @@ class PostgresStorage:
         if self._pool is None:
             raise StorageError("PostgresStorage is not connected; call `connect()` first")
         return _ConnectionContext(self._pool, self._schema)
-
-    async def _register_extensions(self, conn: AsyncConnection) -> None:
-        from pgvector.psycopg import register_vector_async
-
-        await register_vector_async(conn)
 
     def _load_migration_sql(self) -> str:
         return (

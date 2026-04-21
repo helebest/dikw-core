@@ -1,10 +1,8 @@
 -- dikw-core Postgres schema v1
--- Requires pre-installed extensions: pg_trgm and pgvector.
--- The vector table (chunks_vec) is created lazily in Python so the engine
--- can parameterise the embedding dimension at first insert.
-
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE EXTENSION IF NOT EXISTS vector;
+-- The pg_trgm and vector extensions are enabled at connect-time in Python
+-- (not here) so the pool can register pgvector types on first connection.
+-- The chunks_vec table is created lazily in Python so the engine can
+-- parameterise the embedding dimension at first insert.
 
 CREATE TABLE IF NOT EXISTS meta_kv (
     key   TEXT PRIMARY KEY,

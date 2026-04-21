@@ -121,6 +121,33 @@ provider:
 
 ## Pluggable storage
 
-The SQLite+sqlite-vec backend ships as the default. The Postgres+pgvector
-and filesystem (DB-less, Obsidian-vault-native) adapters land in Phase 5;
-the design doc documents the seam.
+Three backends ship; switch by editing `storage.backend` in `dikw.yml`:
+
+```yaml
+storage:
+  backend: sqlite                     # default
+  path: .dikw/index.sqlite
+```
+
+Enterprise / multi-user via Postgres (requires `pip install dikw-core[postgres]`
+and a database with the `pg_trgm` + `vector` extensions):
+
+```yaml
+storage:
+  backend: postgres
+  dsn: postgresql://user:pw@host:5432/dikw
+  schema: dikw
+  pool_size: 10
+```
+
+DB-less, Obsidian-vault-native (zero extra deps, bounded to ≤ ~300 pages):
+
+```yaml
+storage:
+  backend: filesystem
+  root: .dikw/fs
+  embed: true      # enable pure-Python cosine vector search
+```
+
+All three back ends implement the same `Storage` Protocol, so every
+`dikw` command behaves identically regardless of which one is active.

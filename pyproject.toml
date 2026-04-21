@@ -80,7 +80,7 @@ mypy_path = "src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec.*", "frontmatter.*", "markdown_it.*"]
+module = ["sqlite_vec.*", "frontmatter.*", "markdown_it.*", "pgvector.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

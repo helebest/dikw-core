@@ -61,9 +61,13 @@ src/dikw_core/
 │   ├── anthropic.py       anthropic SDK, system-prompt cache_control
 │   └── openai_compat.py   openai SDK; any base_url
 ├── storage/
-│   ├── base.py            Storage Protocol (engine depends only on this)
-│   ├── sqlite.py          SQLite + sqlite-vec + FTS5 (MVP)
-│   └── migrations/sqlite/ schema SQL
+│   ├── base.py              Storage Protocol (engine depends only on this)
+│   ├── sqlite.py            SQLite + sqlite-vec + FTS5 (default)
+│   ├── postgres.py          Postgres + pgvector + tsvector (optional extra)
+│   ├── filesystem.py        DB-less JSONL sidecars + in-proc FTS (zero deps)
+│   └── migrations/
+│       ├── sqlite/          schema SQL
+│       └── postgres/        schema SQL (pg_trgm + vector extensions)
 ├── prompts/               versioned LLM prompts loaded via importlib.resources
 ├── mcp_server.py          MCP tools grouped by layer
 └── cli.py                 typer app

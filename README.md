@@ -85,11 +85,42 @@ stdlib-only reference.
 
 ## Storage
 
-The default backend is SQLite + `sqlite-vec` + FTS5, stored at
-`.dikw/index.sqlite` inside the wiki directory. Postgres+`pgvector`
-(enterprise) and a DB-less filesystem adapter (Obsidian-native, ≤ ~200
-pages) are planned Phase 5 additions as optional install extras; the
-`Storage` Protocol is already in place.
+Three backends ship, selected in `dikw.yml`:
+
+```yaml
+storage:
+  backend: sqlite          # sqlite | postgres | filesystem
+
+  # --- sqlite (default): single-user local ---
+  path: .dikw/index.sqlite
+
+  # --- postgres (enterprise): multi-user, pgvector + tsvector ---
+  # backend: postgres
+  # dsn: postgresql://user:pw@host:5432/dikw
+  # schema: dikw
+  # pool_size: 10
+
+  # --- filesystem: DB-less, Obsidian-vault native (≤ ~300 pages) ---
+  # backend: filesystem
+  # root: .dikw/fs
+  # embed: true            # turn on for pure-Python cosine vector search
+```
+
+- **SQLite + `sqlite-vec` + FTS5** — the default. No extras required.
+- **Postgres + `pgvector`** — install via `uv pip install dikw-core[postgres]`.
+  Requires the `pg_trgm` and `vector` extensions (standard on the
+  `pgvector/pgvector:pg16` Docker image). The adapter uses `tsvector`+GIN
+  for FTS and `vector(N)` for embeddings; the vector dimension is set at
+  first insert.
+- **Filesystem / vault** — zero extra deps. JSONL sidecars under
+  `.dikw/fs/`, in-process inverted-index FTS, per-chunk `vecs/<id>.json`
+  files when `embed: true`. Good for personal vaults; not a multi-writer
+  story. Emits a hint to migrate once the corpus outgrows the scale
+  target.
+
+Engine code talks only to the `Storage` Protocol
+([`storage/base.py`](./src/dikw_core/storage/base.py)); each adapter
+implements the same contract and is swappable by changing `dikw.yml`.
 
 ## Releasing
 

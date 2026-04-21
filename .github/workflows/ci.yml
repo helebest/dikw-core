@@ -38,3 +38,50 @@ jobs:
 
       - name: Pytest
         run: uv run pytest -v
+
+  postgres-contract:
+    name: Postgres contract tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: dikw
+          POSTGRES_PASSWORD: dikw
+          POSTGRES_DB: dikw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dikw -d dikw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DIKW_TEST_POSTGRES_DSN: postgresql://dikw:dikw@localhost:5432/dikw
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Sync dependencies (with postgres extra)
+        run: uv sync --all-extras
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            if pg_isready -h localhost -p 5432 -U dikw; then
+              echo "postgres is ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "postgres failed to become ready" >&2
+          exit 1
+
+      - name: Run storage contract tests against Postgres
+        run: uv run pytest -v tests/test_storage_contract.py

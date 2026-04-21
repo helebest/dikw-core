@@ -29,6 +29,7 @@ from dikw_core.schemas import (
     WisdomStatus,
 )
 from dikw_core.storage.base import Storage
+from dikw_core.storage.filesystem import FilesystemStorage
 from dikw_core.storage.sqlite import SQLiteStorage
 
 
@@ -40,27 +41,44 @@ from dikw_core.storage.sqlite import SQLiteStorage
             id="postgres",
             marks=pytest.mark.skipif(
                 not os.environ.get("DIKW_TEST_POSTGRES_DSN"),
-                reason="Phase 5: Postgres adapter not implemented yet",
+                reason="Postgres adapter tests require DIKW_TEST_POSTGRES_DSN",
             ),
         ),
-        pytest.param(
-            "filesystem",
-            id="filesystem",
-            marks=pytest.mark.skip(reason="Phase 5: filesystem adapter not implemented"),
-        ),
+        pytest.param("filesystem", id="filesystem"),
     ]
 )
 async def storage(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Storage]:
     backend = request.param
     if backend == "sqlite":
         s: Storage = SQLiteStorage(tmp_path / "index.sqlite")
+    elif backend == "filesystem":
+        s = FilesystemStorage(tmp_path / ".dikw" / "fs", embed=True)
+    elif backend == "postgres":
+        from dikw_core.storage.postgres import PostgresStorage
+
+        dsn = os.environ["DIKW_TEST_POSTGRES_DSN"]
+        # Use a schema derived from the test tmpdir so parallel runs don't collide.
+        schema = f"dikw_test_{abs(hash(str(tmp_path))) % 10_000_000:07d}"
+        s = PostgresStorage(dsn, schema=schema, pool_size=2)
     else:
-        raise RuntimeError(f"unreachable: adapter {backend} should be skipped")
+        raise RuntimeError(f"unreachable: adapter {backend}")
+
     await s.connect()
     await s.migrate()
     try:
         yield s
     finally:
+        # Drop the Postgres schema to keep the test DB clean between runs.
+        if backend == "postgres":
+            from psycopg import AsyncConnection
+
+            conn = await AsyncConnection.connect(os.environ["DIKW_TEST_POSTGRES_DSN"])
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+                await conn.commit()
+            finally:
+                await conn.close()
         await s.close()
 
 

@@ -145,6 +145,11 @@ export ANTHROPIC_API_KEY=<your-MiniMax-key>
 export OPENAI_API_KEY=<your-MiniMax-key>
 ```
 
+Or copy [`.env.example`](../.env.example) → `.env` (gitignored) and fill
+it in. `pytest-dotenv` auto-loads `.env` for the test suite; for `dikw`
+CLI calls either `source` it (`set -a; source .env; set +a`) or use
+`uv run --env-file .env dikw …`.
+
 ### Verify your provider config
 
 After editing `dikw.yml` and exporting the env vars, run:

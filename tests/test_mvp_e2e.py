@@ -11,7 +11,7 @@ assert a specific answer string — production LLM output is
 non-deterministic — only that the grounding pipeline round-trips end to
 end against a real provider.
 
-Run manually:
+Run manually either by exporting the env vars:
 
     export MINIMAX_API_KEY=...
     export MINIMAX_LLM_MODEL=<anthropic-compatible model name>
@@ -19,6 +19,9 @@ Run manually:
     export MINIMAX_EMBEDDING_MODEL=<embedding model>
     export MINIMAX_EMBEDDING_BASE_URL=<MiniMax OpenAI-compatible endpoint>
     uv run pytest tests/test_mvp_e2e.py -v -s
+
+…or by copying ``.env.example`` to ``.env`` (gitignored) and filling it
+in — ``pytest-dotenv`` auto-loads it at collection time.
 """
 
 from __future__ import annotations

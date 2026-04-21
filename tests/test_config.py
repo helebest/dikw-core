@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from dikw_core.config import (
+    CONFIG_FILENAME,
+    DikwConfig,
+    FilesystemStorageConfig,
+    PostgresStorageConfig,
+    SQLiteStorageConfig,
+    default_config,
+    dump_config_yaml,
+    find_config,
+    load_config,
+)
+
+
+def test_default_config_roundtrip(tmp_path: Path) -> None:
+    cfg = default_config(description="unit-test wiki")
+    yaml_text = dump_config_yaml(cfg)
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(yaml_text, encoding="utf-8")
+
+    loaded = load_config(path)
+    assert isinstance(loaded, DikwConfig)
+    assert loaded.schema_.description == "unit-test wiki"
+    assert isinstance(loaded.storage, SQLiteStorageConfig)
+    assert loaded.storage.backend == "sqlite"
+
+
+def test_load_config_discriminated_storage(tmp_path: Path) -> None:
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+provider:
+  llm: anthropic
+  llm_model: claude-sonnet-4-6
+  embedding: openai_compat
+  embedding_model: text-embedding-3-small
+  embedding_base_url: https://example.invalid/v1
+storage:
+  backend: postgres
+  dsn: postgresql://u:p@h:5432/db
+  schema: dikw
+  pool_size: 4
+schema:
+  description: pg wiki
+sources:
+  - path: ./sources
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert isinstance(cfg.storage, PostgresStorageConfig)
+    assert cfg.storage.dsn.startswith("postgresql://")
+    assert cfg.storage.schema_ == "dikw"
+
+
+def test_load_config_filesystem_storage(tmp_path: Path) -> None:
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+storage:
+  backend: filesystem
+  root: .dikw/fs
+  embed: false
+sources: []
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert isinstance(cfg.storage, FilesystemStorageConfig)
+    assert cfg.storage.embed is False
+
+
+def test_find_config_walks_up(tmp_path: Path) -> None:
+    root = tmp_path / "wiki"
+    nested = root / "a" / "b" / "c"
+    nested.mkdir(parents=True)
+    (root / CONFIG_FILENAME).write_text(dump_config_yaml(default_config()), encoding="utf-8")
+
+    found = find_config(nested)
+    assert found is not None
+    assert found.parent == root
+
+
+def test_find_config_returns_none_when_missing(tmp_path: Path) -> None:
+    assert find_config(tmp_path) is None
+
+
+def test_load_config_rejects_non_mapping(tmp_path: Path) -> None:
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text("- not a mapping\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="mapping"):
+        load_config(path)

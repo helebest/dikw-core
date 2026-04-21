@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.venv/
+venv/
+*.sqlite
+*.sqlite-journal
+*.db
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+# engine-managed state in example/test wikis
+**/.dikw/

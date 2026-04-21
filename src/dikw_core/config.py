@@ -1,0 +1,126 @@
+"""Configuration loader for `dikw.yml`.
+
+The config mirrors the top-level sections in the design doc: `provider`, `storage`,
+`schema`, `sources`. Storage-specific fields live under a single `storage` block
+and are validated per backend via a discriminated union.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated, Literal
+
+import yaml
+from pydantic import BaseModel, Field, field_validator
+
+
+class ProviderConfig(BaseModel):
+    llm: Literal["anthropic", "openai_compat"] = "anthropic"
+    llm_model: str = "claude-sonnet-4-6"
+    embedding: Literal["openai_compat"] = "openai_compat"
+    embedding_model: str = "text-embedding-3-small"
+    # The OpenAI-compat base URL is used for BOTH `openai_compat` LLM calls and
+    # for embeddings when the LLM provider is Anthropic (which has no embeddings API).
+    embedding_base_url: str = "https://api.openai.com/v1"
+    llm_base_url: str | None = None  # only meaningful when llm == "openai_compat"
+
+
+class SQLiteStorageConfig(BaseModel):
+    backend: Literal["sqlite"] = "sqlite"
+    path: str = ".dikw/index.sqlite"
+
+
+class PostgresStorageConfig(BaseModel):
+    backend: Literal["postgres"] = "postgres"
+    dsn: str
+    schema_: str = Field(default="dikw", alias="schema")
+    pool_size: int = 10
+
+    model_config = {"populate_by_name": True}
+
+
+class FilesystemStorageConfig(BaseModel):
+    backend: Literal["filesystem"] = "filesystem"
+    root: str = ".dikw/fs"
+    embed: bool = False
+    max_pages_hint: int = 300
+
+
+StorageConfig = Annotated[
+    SQLiteStorageConfig | PostgresStorageConfig | FilesystemStorageConfig,
+    Field(discriminator="backend"),
+]
+
+
+class SchemaConfig(BaseModel):
+    description: str = ""
+    page_types: list[str] = Field(default_factory=lambda: ["entity", "concept", "note"])
+    wisdom_kinds: list[str] = Field(
+        default_factory=lambda: ["principle", "lesson", "pattern"]
+    )
+    log_style: Literal["append", "daily"] = "append"
+
+
+class SourceConfig(BaseModel):
+    path: str
+    pattern: str = "**/*.md"
+    ignore: list[str] = Field(default_factory=list)
+
+
+class DikwConfig(BaseModel):
+    provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    storage: StorageConfig = Field(default_factory=SQLiteStorageConfig)
+    schema_: SchemaConfig = Field(default_factory=SchemaConfig, alias="schema")
+    sources: list[SourceConfig] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
+
+    @field_validator("sources")
+    @classmethod
+    def _require_at_least_one_source_path(cls, v: list[SourceConfig]) -> list[SourceConfig]:
+        # allow an empty list at init time (newly scaffolded wiki); engine-level
+        # operations that need sources can validate at call time.
+        return v
+
+
+CONFIG_FILENAME = "dikw.yml"
+
+
+def load_config(path: str | Path) -> DikwConfig:
+    """Load and validate a `dikw.yml` file."""
+    p = Path(path)
+    if p.is_dir():
+        p = p / CONFIG_FILENAME
+    if not p.is_file():
+        raise FileNotFoundError(f"config not found: {p}")
+    with p.open("r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{p}: top-level YAML must be a mapping, got {type(raw).__name__}")
+    return DikwConfig.model_validate(raw)
+
+
+def find_config(start: str | Path) -> Path | None:
+    """Walk up from `start` looking for `dikw.yml`. Returns None if not found."""
+    p = Path(start).resolve()
+    for candidate in (p, *p.parents):
+        cfg = candidate / CONFIG_FILENAME
+        if cfg.is_file():
+            return cfg
+    return None
+
+
+def default_config(description: str = "A dikw-core knowledge base") -> DikwConfig:
+    """Return a DikwConfig populated with sensible defaults for `dikw init`."""
+    return DikwConfig(
+        provider=ProviderConfig(),
+        storage=SQLiteStorageConfig(),
+        schema=SchemaConfig(description=description),
+        sources=[SourceConfig(path="./sources")],
+    )
+
+
+def dump_config_yaml(cfg: DikwConfig) -> str:
+    """Render a DikwConfig as a YAML string suitable for `dikw.yml`."""
+    data = cfg.model_dump(mode="json", by_alias=True, exclude_defaults=False)
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)

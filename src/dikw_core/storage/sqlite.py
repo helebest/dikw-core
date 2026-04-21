@@ -386,6 +386,34 @@ class SQLiteStorage:
 
         await asyncio.to_thread(_run)
 
+    async def list_wiki_log(
+        self, *, since_ts: float | None = None, limit: int | None = None
+    ) -> list[WikiLogEntry]:
+        def _run() -> list[WikiLogEntry]:
+            conn = self._require_conn()
+            sql = "SELECT ts, action, src, dst, note FROM wiki_log"
+            params: list[Any] = []
+            if since_ts is not None:
+                sql += " WHERE ts >= ?"
+                params.append(since_ts)
+            sql += " ORDER BY ts ASC"
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(int(limit))
+            rows = conn.execute(sql, params).fetchall()
+            return [
+                WikiLogEntry(
+                    ts=float(r["ts"]),
+                    action=r["action"],
+                    src=r["src"],
+                    dst=r["dst"],
+                    note=r["note"],
+                )
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_run)
+
     # ---- W layer ---------------------------------------------------------
 
     async def put_wisdom(

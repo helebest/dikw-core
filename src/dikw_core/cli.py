@@ -1,6 +1,7 @@
 """``dikw`` CLI — thin wrapper around ``dikw_core.api``.
 
-Phase 0-1 commands: ``version``, ``init``, ``status``, ``ingest``, ``query``, ``mcp``.
+Phase 0-2 commands: ``version``, ``init``, ``status``, ``ingest``, ``query``,
+``synth``, ``lint``, ``mcp``.
 """
 
 from __future__ import annotations
@@ -159,6 +160,88 @@ def query_cmd(
     for c in result.citations:
         table.add_row(str(c.n), c.layer, c.path, c.excerpt[:120] + ("…" if len(c.excerpt) > 120 else ""))
     console.print(table)
+
+
+@app.command("synth")
+def synth_cmd(
+    path: Annotated[
+        Path, typer.Option("--path", "-p", help="A path inside the wiki.")
+    ] = Path("."),
+    force_all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Re-synthesise every source, even those already turned into wiki pages.",
+        ),
+    ] = False,
+    no_embed: Annotated[
+        bool,
+        typer.Option(
+            "--no-embed",
+            help="Skip embedding of generated wiki pages (still written to disk and FTS).",
+        ),
+    ] = False,
+) -> None:
+    """Turn source docs into K-layer wiki pages via the configured LLM."""
+    from .providers import build_embedder
+
+    async def _run() -> api.SynthReport:
+        embedder = None
+        if not no_embed:
+            cfg, _ = api.load_wiki(path)
+            embedder = build_embedder(cfg.provider)
+        return await api.synthesize(path, force_all=force_all, embedder=embedder)
+
+    try:
+        report = asyncio.run(_run())
+    except FileNotFoundError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+
+    table = Table(title="dikw synth", show_header=True, header_style="bold")
+    table.add_column("metric", justify="left")
+    table.add_column("count", justify="right")
+    table.add_row("candidates", str(report.candidates))
+    table.add_row("created", str(report.created))
+    table.add_row("updated", str(report.updated))
+    table.add_row("skipped", str(report.skipped))
+    table.add_row("errors", str(report.errors))
+    console.print(table)
+
+
+@app.command("lint")
+def lint_cmd(
+    path: Annotated[
+        Path, typer.Option("--path", "-p", help="A path inside the wiki.")
+    ] = Path("."),
+) -> None:
+    """Report broken wikilinks, orphan pages, and duplicate titles."""
+    try:
+        report = asyncio.run(api.lint(path))
+    except FileNotFoundError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from e
+
+    if report.ok:
+        console.print("[green]lint clean[/green] — 0 issues")
+        return
+
+    summary = " · ".join(f"{kind}: {n}" for kind, n in sorted(report.by_kind().items()))
+    console.print(f"[yellow]lint issues[/yellow] — {summary}")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("kind")
+    table.add_column("path")
+    table.add_column("line", justify="right")
+    table.add_column("detail")
+    for issue in report.issues:
+        table.add_row(
+            issue.kind,
+            issue.path,
+            str(issue.line) if issue.line is not None else "",
+            issue.detail,
+        )
+    console.print(table)
+    raise typer.Exit(code=1)
 
 
 @app.command("mcp")

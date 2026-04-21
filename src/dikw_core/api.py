@@ -4,10 +4,15 @@ Phase 1 surface:
   * ``ingest`` — walk configured sources, parse markdown, chunk, embed, index.
   * ``query`` — hybrid search + LLM answer with citations.
 
+Phase 2 surface:
+  * ``synthesize`` — turn source docs into K-layer wiki pages via the LLM,
+    persist them to disk + storage, maintain the link graph, and refresh
+    ``wiki/index.md`` + ``wiki/log.md``.
+  * ``lint`` — report broken wikilinks, orphans, and duplicate titles.
+
 Phase 0 surface (``init_wiki``, ``status``) stays unchanged.
 
-Subsequent phases extend this module with ``synthesize``, ``distill``,
-``review``, ``lint``.
+Subsequent phases extend this module with ``distill`` and ``review``.
 """
 
 from __future__ import annotations
@@ -27,11 +32,17 @@ from .config import (
     find_config,
     load_config,
 )
-from .data.backends.markdown import ParsedMarkdown, parse_file
+from .data.backends.markdown import ParsedMarkdown, content_hash, parse_file
 from .data.sources import iter_source_files
 from .info.chunk import chunk_markdown
 from .info.embed import ChunkToEmbed, embed_chunks
 from .info.search import Hit, HybridSearcher
+from .knowledge.indexgen import regenerate_index
+from .knowledge.links import parse_links, resolve_links
+from .knowledge.lint import LintReport, run_lint
+from .knowledge.log import render_log
+from .knowledge.synthesize import SynthesisError, parse_synthesis_response
+from .knowledge.wiki import WikiPage, now_iso, write_page
 from .providers import EmbeddingProvider, LLMProvider, build_embedder, build_llm
 from .schemas import ChunkRecord, DocumentRecord, Layer, StorageCounts, WikiLogEntry
 from .storage import Storage, build_storage
@@ -94,6 +105,15 @@ class IngestReport:
     unchanged: int = 0
     chunks: int = 0
     embedded: int = 0
+
+
+@dataclass(frozen=True)
+class SynthReport:
+    candidates: int = 0
+    created: int = 0
+    updated: int = 0
+    skipped: int = 0
+    errors: int = 0
 
 
 class Citation(BaseModel):
@@ -309,6 +329,200 @@ async def query(
         return QueryResult(answer=response.text.strip(), citations=citations)
     finally:
         await storage.close()
+
+
+# ---- Phase 2: synthesize + lint -----------------------------------------
+
+
+async def synthesize(
+    path: str | Path | None = None,
+    *,
+    force_all: bool = False,
+    llm: LLMProvider | None = None,
+    embedder: EmbeddingProvider | None = None,
+) -> SynthReport:
+    """Turn source docs into K-layer wiki pages via the configured LLM.
+
+    By default only source docs that have never been synthesised are
+    processed; pass ``force_all=True`` to re-synthesise every source.
+    Embedding of new wiki pages is skipped when ``embedder`` is ``None``.
+    """
+    cfg, root, storage = await _with_storage(path)
+    try:
+        _llm = llm or build_llm(cfg.provider)
+
+        sources = list(await storage.list_documents(layer=Layer.SOURCE, active=True))
+        already: set[str] = set()
+        if not force_all:
+            for entry in await storage.list_wiki_log():
+                if entry.action == "synth" and entry.src and entry.dst:
+                    already.add(entry.src)
+
+        report = SynthReport()
+        tmpl = prompts.load("synthesize")
+        persisted_any = False
+
+        for src in sources:
+            report = _sr_replace(report, candidates=report.candidates + 1)
+            if src.path in already:
+                report = _sr_replace(report, skipped=report.skipped + 1)
+                continue
+
+            body = _read_source_body(root, src)
+            if body is None:
+                report = _sr_replace(report, errors=report.errors + 1)
+                await storage.append_wiki_log(
+                    WikiLogEntry(
+                        ts=time.time(),
+                        action="synth",
+                        src=src.path,
+                        note="source body missing on disk",
+                    )
+                )
+                continue
+
+            user_prompt = tmpl.format(source_path=src.path, source_body=body)
+            response = await _llm.complete(
+                system="You synthesise K-layer wiki pages for dikw-core.",
+                user=user_prompt,
+                model=cfg.provider.llm_model,
+                max_tokens=2048,
+                temperature=0.3,
+            )
+
+            try:
+                page = parse_synthesis_response(response.text, source_path=src.path)
+            except SynthesisError as e:
+                report = _sr_replace(report, errors=report.errors + 1)
+                await storage.append_wiki_log(
+                    WikiLogEntry(
+                        ts=time.time(),
+                        action="synth",
+                        src=src.path,
+                        note=f"parse error: {e}",
+                    )
+                )
+                continue
+
+            pre_existing = await storage.get_document(
+                _doc_id_for(Layer.WIKI, page.path)
+            )
+            write_page(root, page)
+            await _persist_wiki_page(
+                storage=storage,
+                root=root,
+                page=page,
+                embedder=embedder,
+                embedding_model=cfg.provider.embedding_model,
+            )
+            await storage.append_wiki_log(
+                WikiLogEntry(
+                    ts=time.time(), action="synth", src=src.path, dst=page.path
+                )
+            )
+            persisted_any = True
+            if pre_existing is None:
+                report = _sr_replace(report, created=report.created + 1)
+            else:
+                report = _sr_replace(report, updated=report.updated + 1)
+
+        # Refresh the human-readable views after the batch so a partial run
+        # still leaves the wiki internally consistent.
+        if persisted_any or not (root / "wiki" / "index.md").exists():
+            regenerate_index(root, updated=now_iso())
+        entries = await storage.list_wiki_log()
+        render_log(root, entries, updated=now_iso())
+
+        return report
+    finally:
+        await storage.close()
+
+
+async def lint(path: str | Path | None = None) -> LintReport:
+    """Run the K-layer hygiene checker."""
+    _cfg, root, storage = await _with_storage(path)
+    try:
+        return await run_lint(storage, root=root)
+    finally:
+        await storage.close()
+
+
+def _read_source_body(root: Path, doc: DocumentRecord) -> str | None:
+    abs_path = (root / doc.path).resolve()
+    if not abs_path.is_file():
+        return None
+    # sources/... lives on disk as plain markdown with optional front-matter; we
+    # want the body ``parse_file`` produced (front-matter stripped). Re-parsing
+    # is cheap for the sizes Phase 2 targets.
+    try:
+        parsed = parse_file(abs_path, rel_path=doc.path)
+    except OSError:
+        return None
+    return parsed.body
+
+
+async def _persist_wiki_page(
+    *,
+    storage: Storage,
+    root: Path,
+    page: WikiPage,
+    embedder: EmbeddingProvider | None,
+    embedding_model: str,
+) -> None:
+    """Index ``page`` into the K layer: document, chunks, embeddings, links."""
+    doc_id = _doc_id_for(Layer.WIKI, page.path)
+    body_hash = content_hash(page.body)
+    abs_path = (root / page.path).resolve()
+    mtime = abs_path.stat().st_mtime if abs_path.is_file() else time.time()
+
+    await storage.put_content(body_hash, page.body)
+    await storage.upsert_document(
+        DocumentRecord(
+            doc_id=doc_id,
+            path=page.path,
+            title=page.title,
+            hash=body_hash,
+            mtime=mtime,
+            layer=Layer.WIKI,
+            active=True,
+        )
+    )
+
+    chunks = chunk_markdown(page.body)
+    records = [
+        ChunkRecord(doc_id=doc_id, seq=c.seq, start=c.start, end=c.end, text=c.text)
+        for c in chunks
+    ]
+    chunk_ids = await storage.replace_chunks(doc_id, records)
+
+    if embedder is not None and records:
+        to_embed = [
+            ChunkToEmbed(chunk_id=cid, text=r.text)
+            for cid, r in zip(chunk_ids, records, strict=True)
+        ]
+        rows = await embed_chunks(embedder, to_embed, model=embedding_model)
+        await storage.upsert_embeddings(rows)
+
+    # Link graph — resolve against the current K-layer title index.
+    k_docs = list(await storage.list_documents(layer=Layer.WIKI, active=True))
+    title_to_path: dict[str, str] = {}
+    for d in k_docs:
+        if d.title and d.title not in title_to_path:
+            title_to_path[d.title] = d.path
+    parsed_links = parse_links(page.body)
+    resolved, _unresolved = resolve_links(doc_id, parsed_links, title_to_path=title_to_path)
+    for link in resolved:
+        await storage.upsert_link(link)
+
+
+def _sr_replace(r: SynthReport, **kw: int) -> SynthReport:
+    return SynthReport(
+        candidates=kw.get("candidates", r.candidates),
+        created=kw.get("created", r.created),
+        updated=kw.get("updated", r.updated),
+        skipped=kw.get("skipped", r.skipped),
+        errors=kw.get("errors", r.errors),
+    )
 
 
 async def _build_excerpts(

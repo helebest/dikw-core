@@ -1,14 +1,18 @@
 """MCP server for dikw-core.
 
-Phase 0-1 tools:
+Phase 0-2 tools:
   * ``core.status`` — counts across DIKW layers.
-  * ``core.query`` — natural-language question → cited answer.
+  * ``core.query`` — natural-language question -> cited answer.
   * ``admin.ingest`` — run the ingest pipeline.
+  * ``admin.lint`` — run the K-layer hygiene checker.
   * ``doc.search`` — hybrid search returning ranked hits (no LLM call).
   * ``doc.read`` — return the body (or a chunk of it) for a given doc path or id.
+  * ``wiki.synthesize`` — turn source docs into K-layer wiki pages.
+  * ``wiki.list`` — list on-disk wiki pages with titles + types.
+  * ``wiki.get`` — read a wiki page back with front-matter.
 
 Tool groups mirror the reference projects' shape, keeping room for
-``wiki.*`` and ``wisdom.*`` in Phases 2 and 3.
+``wisdom.*`` in Phase 3.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from typing import Any
 
 from . import api
 from .info.search import HybridSearcher
+from .knowledge.wiki import read_page
 from .providers import build_embedder
 from .schemas import Layer
 from .storage import build_storage
@@ -109,6 +114,59 @@ async def build_server() -> Any:
                     "additionalProperties": False,
                 },
             ),
+            Tool(
+                name="wiki.synthesize",
+                description="Turn source docs into K-layer wiki pages via the configured LLM.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "all": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Re-synthesise every source, not just new ones.",
+                        },
+                        "embed": {"type": "boolean", "default": True},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="wiki.list",
+                description="List wiki pages (title + type + tags) for the nearest wiki.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="wiki.get",
+                description="Read a wiki page's front-matter and body by wiki-relative path.",
+                inputSchema={
+                    "type": "object",
+                    "required": ["page_path"],
+                    "properties": {
+                        "page_path": {"type": "string"},
+                        "path": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="admin.lint",
+                description=(
+                    "Report broken wikilinks, orphan pages, and duplicate titles "
+                    "across the K layer."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -160,12 +218,79 @@ async def build_server() -> Any:
         if name == "doc.read":
             doc_path = arguments["path"]
             wiki_path = arguments.get("wiki_path", ".")
-            cfg, root = api.load_wiki(wiki_path)
+            _cfg, root = api.load_wiki(wiki_path)
             abs_path = (root / doc_path).resolve()
             if not abs_path.is_file():
                 raise ValueError(f"not a file: {doc_path}")
             text = Path(abs_path).read_text(encoding="utf-8")
             return [TextContent(type="text", text=text)]
+
+        if name == "wiki.synthesize":
+            wiki_path = arguments.get("path", ".")
+            embedder = None
+            if arguments.get("embed", True):
+                cfg, _ = api.load_wiki(wiki_path)
+                embedder = build_embedder(cfg.provider)
+            synth_report = await api.synthesize(
+                wiki_path,
+                force_all=bool(arguments.get("all", False)),
+                embedder=embedder,
+            )
+            return [
+                TextContent(
+                    type="text", text=json.dumps(synth_report.__dict__, indent=2)
+                )
+            ]
+
+        if name == "wiki.list":
+            wiki_path = arguments.get("path", ".")
+            cfg, root = api.load_wiki(wiki_path)
+            storage = build_storage(cfg.storage, root=root)
+            await storage.connect()
+            await storage.migrate()
+            try:
+                docs = list(await storage.list_documents(layer=Layer.WIKI, active=True))
+            finally:
+                await storage.close()
+            list_payload: list[dict[str, Any]] = [
+                {"path": d.path, "title": d.title, "mtime": d.mtime} for d in docs
+            ]
+            return [TextContent(type="text", text=json.dumps(list_payload, indent=2))]
+
+        if name == "wiki.get":
+            wiki_path = arguments.get("path", ".")
+            _cfg, root = api.load_wiki(wiki_path)
+            page = read_page(root, arguments["page_path"])
+            page_payload: dict[str, Any] = {
+                "path": page.path,
+                "id": page.id,
+                "type": page.type,
+                "title": page.title,
+                "tags": page.tags,
+                "sources": page.sources,
+                "created": page.created,
+                "updated": page.updated,
+                "body": page.body,
+            }
+            return [TextContent(type="text", text=json.dumps(page_payload, indent=2))]
+
+        if name == "admin.lint":
+            wiki_path = arguments.get("path", ".")
+            lint_report = await api.lint(wiki_path)
+            lint_payload: dict[str, Any] = {
+                "ok": lint_report.ok,
+                "summary": lint_report.by_kind(),
+                "issues": [
+                    {
+                        "kind": i.kind,
+                        "path": i.path,
+                        "line": i.line,
+                        "detail": i.detail,
+                    }
+                    for i in lint_report.issues
+                ],
+            }
+            return [TextContent(type="text", text=json.dumps(lint_payload, indent=2))]
 
         raise ValueError(f"unknown tool: {name}")
 

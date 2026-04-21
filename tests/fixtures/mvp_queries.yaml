@@ -1,0 +1,47 @@
+# MVP retrieval-quality ground truth.
+#
+# Each entry:
+#   q:           the natural-language query
+#   expect_any:  list of doc stems (filename without .md); if ANY stem is in
+#                the top-k retrieval result, the query is a "hit" at that k.
+#
+# Corpus: tests/fixtures/mvp_corpus/
+# Stems:  design, architecture, getting-started, README,
+#         karpathy-gist, karpathy-software-2-0, karpathy-recipe
+#
+# Mix: 4 exact-fact + 3 paraphrase + 3 multi-doc synthesis = 10 queries.
+# Negatives omitted in the initial iteration — revisit after observing metrics.
+
+queries:
+  # ---- Exact-fact lookups ---------------------------------------------------
+  - q: "What are the four layers of the DIKW pyramid in dikw-core?"
+    expect_any: [design, architecture, README]
+
+  - q: "Which storage backends does dikw-core support out of the box?"
+    expect_any: [README, design, architecture]
+
+  - q: "What does Karpathy mean by deterministic scoping versus probabilistic reasoning?"
+    expect_any: [karpathy-gist, design]
+
+  - q: "What is Software 2.0?"
+    expect_any: [karpathy-software-2-0]
+
+  # ---- Paraphrases ----------------------------------------------------------
+  - q: "How do I scaffold a new knowledge base from scratch with the CLI?"
+    expect_any: [getting-started, README]
+
+  - q: "Why should I start with a small baseline model before training a large neural network?"
+    expect_any: [karpathy-recipe]
+
+  - q: "What directory structure does `dikw init` create inside a wiki?"
+    expect_any: [getting-started, design]
+
+  # ---- Multi-doc synthesis --------------------------------------------------
+  - q: "How does the engine avoid re-processing source files whose content has not changed?"
+    expect_any: [design, architecture, getting-started, README]
+
+  - q: "What is the Wisdom layer for and how do items get approved?"
+    expect_any: [design, architecture, README, getting-started]
+
+  - q: "How do I configure pluggable LLM and embedding providers?"
+    expect_any: [README, getting-started, design, architecture]

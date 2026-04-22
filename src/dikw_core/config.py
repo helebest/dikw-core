@@ -47,6 +47,14 @@ class ProviderConfig(BaseModel):
     llm_max_tokens_query: int = 1024
     llm_max_tokens_synth: int = 2048
     llm_max_tokens_distill: int = 2048
+    # Per-leg SDK retry budget. Anthropic and OpenAI SDKs retry 408/409/429/5xx
+    # (incl. MiniMax 529) with exponential backoff + jitter; their default is
+    # 2. We bump to 5 by default to absorb intermittent overload without
+    # pulling in a third-party retry layer. Split per-leg because LLM and
+    # embedding frequently target different vendors with different failure
+    # profiles (e.g., MiniMax LLM + Gitee AI embeddings).
+    llm_max_retries: int = 5
+    embedding_max_retries: int = 5
 
 
 class SQLiteStorageConfig(BaseModel):

@@ -43,21 +43,37 @@ def _resolve_embedding_api_key(explicit: str | None) -> str:
     return key
 
 
-def _client(base_url: str, api_key: str) -> AsyncOpenAI:
+def _client(
+    base_url: str, api_key: str, *, max_retries: int | None = None
+) -> AsyncOpenAI:
     from openai import AsyncOpenAI
 
-    return AsyncOpenAI(base_url=base_url, api_key=api_key)
+    kwargs: dict[str, Any] = {"base_url": base_url, "api_key": api_key}
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
+    return AsyncOpenAI(**kwargs)
 
 
 class OpenAICompatLLM:
-    def __init__(self, *, base_url: str | None = None, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        max_retries: int | None = None,
+    ) -> None:
         self._base_url = base_url or os.environ.get("OPENAI_BASE_URL", _DEFAULT_BASE_URL)
         self._api_key_explicit = api_key
+        self._max_retries = max_retries
         self._client_cache: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client_cache is None:
-            self._client_cache = _client(self._base_url, _resolve_api_key(self._api_key_explicit))
+            self._client_cache = _client(
+                self._base_url,
+                _resolve_api_key(self._api_key_explicit),
+                max_retries=self._max_retries,
+            )
         return self._client_cache
 
     async def complete(
@@ -106,16 +122,20 @@ class OpenAICompatEmbeddings:
         base_url: str | None = None,
         api_key: str | None = None,
         default_dimensions: int | None = None,
+        max_retries: int | None = None,
     ) -> None:
         self._base_url = base_url or os.environ.get("OPENAI_BASE_URL", _DEFAULT_BASE_URL)
         self._api_key_explicit = api_key
         self._default_dimensions = default_dimensions
+        self._max_retries = max_retries
         self._client_cache: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client_cache is None:
             self._client_cache = _client(
-                self._base_url, _resolve_embedding_api_key(self._api_key_explicit)
+                self._base_url,
+                _resolve_embedding_api_key(self._api_key_explicit),
+                max_retries=self._max_retries,
             )
         return self._client_cache
 

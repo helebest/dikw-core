@@ -123,3 +123,29 @@ sources: []
     assert cfg.provider.llm_max_tokens_query == 512
     assert cfg.provider.llm_max_tokens_synth == 4096
     assert cfg.provider.llm_max_tokens_distill == 1536
+
+
+def test_provider_config_max_retries_defaults() -> None:
+    """Both legs default to 5 retries — above the SDK default of 2 to give
+    MiniMax 529 / Gemini 429 class errors a bit more breathing room.
+    """
+    cfg = ProviderConfig()
+    assert cfg.llm_max_retries == 5
+    assert cfg.embedding_max_retries == 5
+
+
+def test_provider_config_max_retries_round_trip(tmp_path: Path) -> None:
+    """Retry budgets are independently tunable per leg via dikw.yml."""
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+provider:
+  llm_max_retries: 3
+  embedding_max_retries: 7
+sources: []
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.provider.llm_max_retries == 3
+    assert cfg.provider.embedding_max_retries == 7

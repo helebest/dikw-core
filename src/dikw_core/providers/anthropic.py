@@ -28,9 +28,16 @@ def _resolve_api_key(explicit: str | None) -> str:
 
 
 class AnthropicLLM:
-    def __init__(self, *, api_key: str | None = None, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        max_retries: int | None = None,
+    ) -> None:
         self._api_key_explicit = api_key
         self._base_url = base_url
+        self._max_retries = max_retries
         self._client_cache: AsyncAnthropic | None = None
 
     def _get_client(self) -> AsyncAnthropic:
@@ -42,6 +49,8 @@ class AnthropicLLM:
             }
             if self._base_url is not None:
                 kwargs["base_url"] = self._base_url
+            if self._max_retries is not None:
+                kwargs["max_retries"] = self._max_retries
             self._client_cache = AsyncAnthropic(**kwargs)
         return self._client_cache
 

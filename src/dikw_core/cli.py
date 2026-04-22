@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -98,10 +98,29 @@ def check_cmd(
             help="A path inside the wiki; dikw walks up to find dikw.yml.",
         ),
     ] = Path("."),
+    llm_only: Annotated[
+        bool,
+        typer.Option(
+            "--llm-only",
+            help="Probe only the LLM leg; skip embedding config and ping.",
+        ),
+    ] = False,
+    embed_only: Annotated[
+        bool,
+        typer.Option(
+            "--embed-only",
+            help="Probe only the embedding leg; skip LLM config and ping.",
+        ),
+    ] = False,
 ) -> None:
     """Verify the configured LLM + embedding providers by pinging each endpoint."""
+    if llm_only and embed_only:
+        console.print("[red]error:[/red] --llm-only and --embed-only are mutually exclusive")
+        raise typer.Exit(code=2)
     try:
-        report = asyncio.run(api.check_providers(path))
+        report = asyncio.run(
+            api.check_providers(path, llm_only=llm_only, embed_only=embed_only)
+        )
     except FileNotFoundError as e:
         console.print(f"[red]error:[/red] {e}")
         raise typer.Exit(code=1) from e
@@ -112,6 +131,8 @@ def check_cmd(
     table.add_column("status", justify="left")
     table.add_column("detail", justify="left")
     for label, probe in (("LLM", report.llm), ("Embedding", report.embed)):
+        if probe is None:
+            continue
         status = "[green]✓ OK[/green]" if probe.ok else "[red]✗ FAIL[/red]"
         table.add_row(label, probe.target, status, probe.detail)
     console.print(table)
@@ -374,6 +395,158 @@ def review_reject_cmd(
         console.print(f"[red]error:[/red] {e}")
         raise typer.Exit(code=1) from e
     console.print(f"[yellow]{result.item_id} -> {result.new_status.value}[/yellow]")
+
+
+@app.command("eval")
+def eval_cmd(
+    dataset: Annotated[
+        str | None,
+        typer.Option(
+            "--dataset",
+            "-d",
+            help=(
+                "Dataset name (resolved under the packaged datasets root) or "
+                "a filesystem path to a dataset directory. Omit to run every "
+                "packaged dataset."
+            ),
+        ),
+    ] = None,
+    embedder_mode: Annotated[
+        str,
+        typer.Option(
+            "--embedder",
+            help="'fake' (hermetic, default) or 'provider' (use wiki's configured provider).",
+        ),
+    ] = "fake",
+    wiki_path: Annotated[
+        Path,
+        typer.Option(
+            "--path",
+            "-p",
+            help="A path inside a wiki; required when --embedder provider.",
+        ),
+    ] = Path("."),
+) -> None:
+    """Run retrieval-quality evaluation against one or every packaged dataset."""
+    # Lazy imports: keep top-of-module `from . import api` light for the
+    # non-eval commands and avoid circular imports with dikw_core.eval.
+    from .eval.dataset import DatasetError
+    from .eval.runner import run_eval
+
+    # Resolve which datasets to run.
+    try:
+        specs = _collect_eval_specs(dataset)
+    except DatasetError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=2) from e
+
+    if not specs:
+        from .eval.dataset import datasets_root
+
+        root = datasets_root()
+        console.print(
+            f"[red]error:[/red] no datasets found under {root}. "
+            "Create one as a `<name>/` subdirectory with dataset.yaml, "
+            "corpus/, queries.yaml."
+        )
+        raise typer.Exit(code=2)
+
+    # Build the embedder + provider config once if --embedder provider.
+    embedder = None
+    provider_cfg = None
+    if embedder_mode == "provider":
+        from .providers import build_embedder
+
+        try:
+            cfg, _root = api.load_wiki(wiki_path)
+        except FileNotFoundError as e:
+            console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=2) from e
+        embedder = build_embedder(cfg.provider)
+        # Pass the whole provider block — batch_size/dimensions/base_url/
+        # provider_label all matter at ingest time.
+        provider_cfg = cfg.provider
+    elif embedder_mode != "fake":
+        console.print(
+            f"[red]error:[/red] --embedder must be 'fake' or 'provider', got {embedder_mode!r}"
+        )
+        raise typer.Exit(code=2)
+
+    all_passed = True
+    for spec in specs:
+        try:
+            report = asyncio.run(
+                run_eval(spec, embedder=embedder, provider_config=provider_cfg)
+            )
+        except Exception as e:  # runner-level error — report, fail this dataset
+            console.print(f"[red]error in {spec.name}:[/red] {e}")
+            all_passed = False
+            continue
+        _print_eval_report(report)
+        if not report.passed:
+            all_passed = False
+
+    raise typer.Exit(code=0 if all_passed else 1)
+
+
+def _collect_eval_specs(dataset: str | None) -> list[Any]:
+    """Resolve the CLI ``--dataset`` option to a list of loaded ``DatasetSpec``.
+
+    - ``None`` → every subdirectory of ``datasets_root()`` that contains a
+      ``dataset.yaml`` (so a partially-built dataset dir doesn't explode the run).
+    - ``"<name>"`` or ``"<path>"`` → a single loaded spec.
+    """
+    from .eval.dataset import DatasetSpec, datasets_root, load_dataset
+
+    if dataset is not None:
+        return [load_dataset(dataset)]
+
+    root = datasets_root()
+    if not root.is_dir():
+        return []
+    specs: list[DatasetSpec] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        if not (child / "dataset.yaml").is_file():
+            continue
+        specs.append(load_dataset(child))
+    return specs
+
+
+def _print_eval_report(report: Any) -> None:
+    """Render an ``EvalReport`` as a rich table with per-metric verdict."""
+    title = f"dikw eval — {report.dataset_name}"
+    table = Table(title=title, show_header=True, header_style="bold")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_column("threshold", justify="right")
+    table.add_column("result")
+    for key in ("hit_at_3", "hit_at_10", "mrr"):
+        if key not in report.metrics and key not in report.thresholds:
+            continue
+        val = report.metrics.get(key)
+        thr = report.thresholds.get(key)
+        val_str = f"{val:.3f}" if val is not None else "-"
+        thr_str = f"{thr:.3f}" if thr is not None else "-"
+        if thr is None or val is None:
+            verdict = "[dim]—[/dim]"
+        elif val >= thr:
+            verdict = "[green]✓ pass[/green]"
+        else:
+            verdict = "[red]✗ FAIL[/red]"
+        table.add_row(key, val_str, thr_str, verdict)
+    console.print(table)
+
+    if not report.passed:
+        console.print("[yellow]per-query diagnostic (top-5):[/yellow]")
+        for row in report.per_query:
+            q_short = row["q"] if len(row["q"]) <= 60 else row["q"][:57] + "..."
+            top5 = row["ranked"][:5]
+            mark = "✓" if any(e in top5 for e in row["expect_any"]) else "✗"
+            console.print(f"  {mark} {q_short}")
+            console.print(f"       expected: {row['expect_any']}")
+            console.print(f"       top-5:    {top5}")
 
 
 @app.command("mcp")

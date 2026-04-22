@@ -30,7 +30,7 @@ uv sync
 uv run dikw init my-wiki --description "my research wiki"
 cd my-wiki
 # drop some markdown or HTML into sources/, then:
-uv run dikw ingest --no-embed     # or: uv run dikw ingest (needs OPENAI_API_KEY)
+uv run dikw ingest --no-embed     # or: uv run dikw ingest (needs DIKW_EMBEDDING_API_KEY)
 uv run dikw status
 uv run dikw synth                  # K layer (needs ANTHROPIC_API_KEY or OpenAI-compat)
 uv run dikw distill                # W-layer candidates
@@ -57,6 +57,7 @@ Approved design doc: [`docs/design.md`](./docs/design.md).
 | `dikw mcp [--stdio]`        | launch the MCP server (exposes the engine to Claude Code / Claude Desktop)    |
 | `dikw status`               | counts across DIKW layers                                                     |
 | `dikw check`                | ping the configured LLM + embedding endpoints to verify `dikw.yml` + keys     |
+| `dikw eval [--dataset]`     | run retrieval-quality evaluation against packaged or custom datasets          |
 
 ## Providers
 
@@ -70,6 +71,7 @@ provider:
   embedding: openai_compat
   embedding_model: text-embedding-3-small
   embedding_base_url: https://api.openai.com/v1
+  embedding_dimensions: null    # set to truncate (e.g., 1024 for Qwen3-Embedding-8B)
 ```
 
 - `anthropic` → uses the `anthropic` async SDK with `cache_control` on the
@@ -79,11 +81,16 @@ provider:
 - `openai_compat` → uses the `openai` async SDK against any base URL that
   speaks the OpenAI HTTP surface (Azure, Ollama, vLLM, DeepSeek, MiniMax, …).
 
-### Using MiniMax (Anthropic-compatible)
+Full vendor cookbook (MiniMax, GLM, Gemini, DeepSeek, Gitee AI, Ollama, …)
+and the production gotchas around batch size, embedding dimensions, and
+retry/caching live in [`docs/providers.md`](./docs/providers.md).
 
-MiniMax exposes both an Anthropic-compatible endpoint (for LLM calls) and
-an OpenAI-compatible endpoint (for embeddings). Fill these in by hand —
-dikw-core never auto-detects vendor URLs:
+### Using MiniMax LLM + Gitee AI embeddings
+
+MiniMax has no embeddings endpoint — pair its Anthropic-compatible LLM surface
+with an OpenAI-compatible embedding vendor. The example below uses
+[Gitee AI](https://ai.gitee.com/v1) (`Qwen3-Embedding-8B`, matryoshka-truncatable).
+Fill the URLs in by hand — dikw-core never auto-detects vendor endpoints:
 
 ```yaml
 provider:
@@ -91,26 +98,38 @@ provider:
   llm_model: <MiniMax Anthropic-compatible model name>
   llm_base_url: <MiniMax Anthropic endpoint, e.g. https://api.minimaxi.com/anthropic>
   embedding: openai_compat
-  embedding_model: <MiniMax embedding model>
-  embedding_base_url: <MiniMax OpenAI-compatible endpoint, e.g. https://api.minimaxi.com/v1>
+  embedding_model: Qwen3-Embedding-8B
+  embedding_base_url: https://ai.gitee.com/v1
+  embedding_dimensions: 1024        # optional; matryoshka truncation
+  embedding_batch_size: 16          # required: Gitee rejects batches >25
+  embedding_provider_label: gitee-ai  # optional; shows up in `dikw check`
 ```
 
-Env vars (both SDKs read their own — same key, two names is the norm):
+A working reference copy lives at
+[`tests/fixtures/live-minimax-gitee.dikw.yml`](./tests/fixtures/live-minimax-gitee.dikw.yml)
+— drop it into a fresh wiki and fill in your two keys.
+
+Two keys for two vendors — the embedding leg reads `DIKW_EMBEDDING_API_KEY`
+exclusively (no `OPENAI_API_KEY` fallback), so misconfigurations fail loudly
+rather than cross-wiring credentials:
 
 ```bash
 export ANTHROPIC_API_KEY=<your-MiniMax-key>
-export OPENAI_API_KEY=<your-MiniMax-key>
+export DIKW_EMBEDDING_API_KEY=<your-Gitee-key>
 ```
 
-Verify connectivity **before** running ingest/query:
+Verify connectivity **before** running ingest/query. The two legs can be
+probed separately, which is useful when you set up one vendor first:
 
 ```bash
-uv run dikw check
+uv run dikw check --llm-only     # just LLM — useful before Gitee is wired up
+uv run dikw check --embed-only   # just embedding
+uv run dikw check                # both
 ```
 
 `dikw check` pings each provider with one tiny request and prints a status
-table with endpoint, latency, and (for LLM) input-token count. Exit code
-is 0 on success and 1 on any failure — scriptable in CI or a shell one-liner.
+table with endpoint, latency, and dim/tokens. Exit code is 0 on success,
+1 on failure, 2 on flag misuse — scriptable in CI or a shell one-liner.
 
 ## Source formats
 

@@ -1,0 +1,26 @@
+# Live end-to-end test config — MiniMax LLM + Gitee AI embeddings.
+#
+# Checked into the repo as-is. URLs and model names are public vendor
+# documentation; only the API keys (ANTHROPIC_API_KEY, DIKW_EMBEDDING_API_KEY)
+# are secret, and those come from env via .env.
+#
+# tests/test_mvp_e2e.py copies this file verbatim to the temp wiki as dikw.yml.
+provider:
+  llm: anthropic
+  llm_model: MiniMax-M2.7
+  llm_base_url: https://api.minimaxi.com/anthropic
+  embedding: openai_compat
+  embedding_model: Qwen3-Embedding-8B
+  embedding_base_url: https://ai.gitee.com/v1
+  embedding_dimensions: 4096
+  # Gitee AI rejects batches >25 (HTTP 400 "No schema matches").
+  embedding_batch_size: 16
+  embedding_provider_label: gitee-ai
+storage:
+  backend: sqlite
+  path: .dikw/index.sqlite
+schema:
+  description: "mvp e2e smoke test wiki"
+sources:
+  - path: ./sources
+    pattern: "**/*.md"

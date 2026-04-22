@@ -1,0 +1,16 @@
+name: mvp
+description: >
+  MVP dogfood corpus — dikw-core's own docs (design, architecture,
+  getting-started, README) plus three Karpathy essays (LLM-wiki gist,
+  Software 2.0, Recipe for Training Neural Networks). 10 hand-authored
+  queries with 4 exact-fact + 3 paraphrase + 3 multi-doc synthesis.
+
+# Calibrated from the first hermetic FakeEmbeddings run on 2026-04-21:
+# observed hit@3 = 1.000, hit@10 = 1.000, MRR = 0.833 on 10 queries.
+# With 10 queries, each single-query change shifts hit@k by 0.1 — the
+# thresholds leave ~2 queries of slack so corpus tweaks don't flake
+# the gate while a real retrieval regression still fails it.
+thresholds:
+  hit_at_3: 0.80
+  hit_at_10: 0.80
+  mrr: 0.60

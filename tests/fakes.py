@@ -1,46 +1,19 @@
 """Test doubles for LLM + embedding providers.
 
-The embedder produces deterministic vectors so retrieval tests are stable:
-it tokenises each text, hashes each token into a fixed-size bucket, and
-returns the bucket counts as an L2-normalised vector. Semantically similar
-inputs (overlapping bag-of-words) cluster as expected.
+``FakeEmbeddings`` lives in ``src/dikw_core/eval/fake_embedder.py`` so it
+ships with the wheel for ``dikw eval``. This module re-exports it for
+backward compatibility with existing ``from tests.fakes import FakeEmbeddings``
+imports; new code should reach into ``dikw_core.eval.fake_embedder``.
 """
 
 from __future__ import annotations
 
-import hashlib
-import math
-import re
 from dataclasses import dataclass, field
 
+from dikw_core.eval.fake_embedder import EMBED_DIM, FakeEmbeddings
 from dikw_core.providers import LLMResponse, ToolSpec
 
-EMBED_DIM = 64
-_WORD = re.compile(r"[A-Za-z]+")
-
-
-def _tokens(text: str) -> list[str]:
-    return [w.lower() for w in _WORD.findall(text)]
-
-
-def _bucket(tok: str) -> int:
-    h = hashlib.sha1(tok.encode("utf-8")).digest()
-    return int.from_bytes(h[:4], "big") % EMBED_DIM
-
-
-class FakeEmbeddings:
-    """Deterministic bag-of-words embeddings over a fixed ``EMBED_DIM`` space."""
-
-    async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
-        _ = model
-        out: list[list[float]] = []
-        for text in texts:
-            vec = [0.0] * EMBED_DIM
-            for tok in _tokens(text):
-                vec[_bucket(tok)] += 1.0
-            norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-            out.append([v / norm for v in vec])
-        return out
+__all__ = ["EMBED_DIM", "FakeEmbeddings", "FakeLLM"]
 
 
 @dataclass

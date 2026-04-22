@@ -23,6 +23,7 @@ class FakeLLM:
     response_text: str = "STUB: wired up."
     last_system: str | None = field(default=None, init=False)
     last_user: str | None = field(default=None, init=False)
+    last_max_tokens: int | None = field(default=None, init=False)
 
     async def complete(
         self,
@@ -34,7 +35,8 @@ class FakeLLM:
         temperature: float = 0.2,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResponse:
-        _ = (model, max_tokens, temperature, tools)
+        _ = (model, temperature, tools)
         self.last_system = system
         self.last_user = user
+        self.last_max_tokens = max_tokens
         return LLMResponse(text=self.response_text, finish_reason="end_turn")

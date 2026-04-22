@@ -1,16 +1,19 @@
 # MVP retrieval-quality ground truth.
 #
-# Each entry:
+# Each entry — exactly one polarity:
 #   q:           the natural-language query
 #   expect_any:  list of doc stems (filename without .md); if ANY stem is in
 #                the top-k retrieval result, the query is a "hit" at that k.
+#   expect_none: true — mark out-of-domain queries. Retrieved top-k is
+#                surfaced as diagnostic; does NOT contribute to hit@k/MRR.
 #
 # Corpus: tests/fixtures/mvp_corpus/
 # Stems:  design, architecture, getting-started, README,
 #         karpathy-gist, karpathy-software-2-0, karpathy-recipe
 #
-# Mix: 4 exact-fact + 3 paraphrase + 3 multi-doc synthesis = 10 queries.
-# Negatives omitted in the initial iteration — revisit after observing metrics.
+# Mix: 4 exact-fact + 3 paraphrase + 3 multi-doc synthesis + 3 negatives = 13.
+# Negatives are observational — a Phase B answer-level judge (not Phase A
+# retrieval-only) would be the right place to gate them.
 
 queries:
   # ---- Exact-fact lookups ---------------------------------------------------
@@ -45,3 +48,13 @@ queries:
 
   - q: "How do I configure pluggable LLM and embedding providers?"
     expect_any: [README, getting-started, design, architecture]
+
+  # ---- Negatives (out-of-domain) -------------------------------------------
+  - q: "What's the weather in Tokyo tomorrow?"
+    expect_none: true
+
+  - q: "Who wrote the Iliad?"
+    expect_none: true
+
+  - q: "How do I implement Rust's ownership model?"
+    expect_none: true

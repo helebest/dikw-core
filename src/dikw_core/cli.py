@@ -548,6 +548,22 @@ def _print_eval_report(report: Any) -> None:
             console.print(f"       expected: {row['expect_any']}")
             console.print(f"       top-5:    {top5}")
 
+    negatives = getattr(report, "negative_diagnostics", []) or []
+    if negatives:
+        neg_table = Table(
+            title="negative queries (top-3 observed — diagnostic only)",
+            show_header=True,
+            header_style="bold",
+        )
+        neg_table.add_column("#", justify="right")
+        neg_table.add_column("query")
+        neg_table.add_column("top-3")
+        for i, row in enumerate(negatives, start=1):
+            q_short = row["q"] if len(row["q"]) <= 60 else row["q"][:57] + "..."
+            top3 = ", ".join(row["ranked"][:3])
+            neg_table.add_row(str(i), q_short, top3)
+        console.print(neg_table)
+
 
 @app.command("mcp")
 def mcp_cmd(

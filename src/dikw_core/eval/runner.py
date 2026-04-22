@@ -49,6 +49,21 @@ class PerQueryRow:
         return {"q": self.q, "expect_any": self.expect_any, "ranked": self.ranked}
 
 
+@dataclass(frozen=True)
+class NegativeRow:
+    """One ``expect_none=True`` query's observed retrieval. Diagnostic only —
+    retrieval always returns something from a non-empty corpus, so there's no
+    pass/fail here yet; scoring negatives requires a score threshold or an
+    answer-level judge that we don't have in Phase A.
+    """
+
+    q: str
+    ranked: list[str]  # doc stems, top 10
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"q": self.q, "ranked": self.ranked}
+
+
 class EvalReport(BaseModel):
     """Result of a single ``run_eval`` invocation."""
 
@@ -58,6 +73,7 @@ class EvalReport(BaseModel):
     metrics: dict[str, float]
     thresholds: dict[str, float]
     per_query: list[dict[str, Any]] = Field(default_factory=list)
+    negative_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -135,24 +151,31 @@ async def run_eval(
 
         await api.ingest(wiki, embedder=effective_embedder)
 
-        per_query = await _run_queries(
+        positives, negatives = await _run_queries(
             wiki,
             spec,
             embedder=effective_embedder,
             embedding_model=effective_provider_cfg.embedding_model,
         )
 
-    hit10_pairs = [(r.ranked, r.expect_any) for r in per_query]
-    metrics = {
-        "hit_at_3": mean_hit_at_k(hit10_pairs, 3),
-        "hit_at_10": mean_hit_at_k(hit10_pairs, 10),
-        "mrr": mean_reciprocal_rank(hit10_pairs),
-    }
+    # Metrics are scored only over positive queries. Including negatives
+    # would silently drag hit@k toward 0.0 (retrieval always returns
+    # something from a non-empty corpus) and make the pass/fail gate
+    # dependent on how many negatives happen to live in the dataset.
+    metrics: dict[str, float] = {}
+    if positives:
+        hit10_pairs = [(r.ranked, r.expect_any) for r in positives]
+        metrics = {
+            "hit_at_3": mean_hit_at_k(hit10_pairs, 3),
+            "hit_at_10": mean_hit_at_k(hit10_pairs, 10),
+            "mrr": mean_reciprocal_rank(hit10_pairs),
+        }
     return EvalReport(
         dataset_name=spec.name,
         metrics=metrics,
         thresholds=dict(spec.thresholds),
-        per_query=[r.to_dict() for r in per_query],
+        per_query=[r.to_dict() for r in positives],
+        negative_diagnostics=[r.to_dict() for r in negatives],
     )
 
 
@@ -198,22 +221,28 @@ async def _run_queries(
     *,
     embedder: EmbeddingProvider,
     embedding_model: str,
-) -> list[PerQueryRow]:
+) -> tuple[list[PerQueryRow], list[NegativeRow]]:
     cfg, _root = api.load_wiki(wiki)
     storage = build_storage(cfg.storage, root=wiki)
     await storage.connect()
     await storage.migrate()
     try:
         searcher = HybridSearcher(storage, embedder, embedding_model=embedding_model)
-        rows: list[PerQueryRow] = []
+        positives: list[PerQueryRow] = []
+        negatives: list[NegativeRow] = []
         for q in spec.queries:
             hits = await searcher.search(q.q, limit=10)
             ranked_stems = [
                 Path(h.path).stem if h.path else h.doc_id for h in hits
             ]
-            rows.append(
-                PerQueryRow(q=q.q, expect_any=list(q.expect_any), ranked=ranked_stems)
-            )
-        return rows
+            if q.expect_none:
+                negatives.append(NegativeRow(q=q.q, ranked=ranked_stems))
+            else:
+                positives.append(
+                    PerQueryRow(
+                        q=q.q, expect_any=list(q.expect_any), ranked=ranked_stems
+                    )
+                )
+        return positives, negatives
     finally:
         await storage.close()

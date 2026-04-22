@@ -112,6 +112,55 @@ def test_load_dataset_rejects_unknown_threshold_key(tmp_path: Path) -> None:
         load_dataset(ds)
 
 
+def test_query_accepts_expect_none_with_empty_expect_any() -> None:
+    """``expect_none: true`` marks an out-of-domain query — no stems expected."""
+    q = Query(q="weather in Tokyo?", expect_none=True)
+    assert q.expect_none is True
+    assert q.expect_any == []
+
+
+def test_query_rejects_both_expect_any_and_expect_none() -> None:
+    """Polarity must be unambiguous — can't claim both 'some doc' and 'no doc'."""
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Query(q="ambiguous", expect_any=["foo"], expect_none=True)
+
+
+def test_query_rejects_both_fields_empty() -> None:
+    """A query with neither polarity given is almost always a YAML typo."""
+    with pytest.raises(ValueError, match=r"expect_any.*expect_none"):
+        Query(q="nothing specified")
+
+
+def test_load_dataset_parses_negative_query_yaml(tmp_path: Path) -> None:
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - q: what is alpha\n"
+        "    expect_any: [alpha]\n"
+        "  - q: weather in Tokyo?\n"
+        "    expect_none: true\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    assert len(spec.queries) == 2
+    assert spec.queries[0].expect_none is False
+    assert spec.queries[1].expect_none is True
+    assert spec.queries[1].expect_any == []
+
+
+def test_load_dataset_rejects_mixed_polarity_query(tmp_path: Path) -> None:
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - q: muddled\n"
+        "    expect_any: [alpha]\n"
+        "    expect_none: true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="mutually exclusive"):
+        load_dataset(ds)
+
+
 def test_load_dataset_by_name_finds_packaged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When given a plain name, load_dataset searches datasets_root().
 

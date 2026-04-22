@@ -7,7 +7,7 @@ anything else that speaks the OpenAI HTTP surface via ``base_url`` + ``api_key``
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import LLMResponse, ProviderError, ToolSpec
 
@@ -22,6 +22,23 @@ def _resolve_api_key(explicit: str | None) -> str:
     if not key:
         raise ProviderError(
             "OPENAI_API_KEY is not set. Export it or pass `api_key` explicitly."
+        )
+    return key
+
+
+def _resolve_embedding_api_key(explicit: str | None) -> str:
+    """Resolve the embedding-leg API key.
+
+    The embedding provider reads only ``DIKW_EMBEDDING_API_KEY`` — never
+    ``OPENAI_API_KEY``. This is deliberate: the intended deployment splits
+    the LLM and embedding legs across different vendors (e.g., MiniMax LLM +
+    Gitee AI embeddings), each with its own key. Conflating them via
+    ``OPENAI_API_KEY`` silently cross-wires credentials and masks misconfig.
+    """
+    key = explicit or os.environ.get("DIKW_EMBEDDING_API_KEY")
+    if not key:
+        raise ProviderError(
+            "DIKW_EMBEDDING_API_KEY is not set. Export it or pass `api_key` explicitly."
         )
     return key
 
@@ -83,19 +100,31 @@ class OpenAICompatLLM:
 
 
 class OpenAICompatEmbeddings:
-    def __init__(self, *, base_url: str | None = None, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        default_dimensions: int | None = None,
+    ) -> None:
         self._base_url = base_url or os.environ.get("OPENAI_BASE_URL", _DEFAULT_BASE_URL)
         self._api_key_explicit = api_key
+        self._default_dimensions = default_dimensions
         self._client_cache: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client_cache is None:
-            self._client_cache = _client(self._base_url, _resolve_api_key(self._api_key_explicit))
+            self._client_cache = _client(
+                self._base_url, _resolve_embedding_api_key(self._api_key_explicit)
+            )
         return self._client_cache
 
     async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
         if not texts:
             return []
         client = self._get_client()
-        resp = await client.embeddings.create(model=model, input=texts)
+        kwargs: dict[str, Any] = {"model": model, "input": texts}
+        if self._default_dimensions is not None:
+            kwargs["dimensions"] = self._default_dimensions
+        resp = await client.embeddings.create(**kwargs)
         return [list(r.embedding) for r in resp.data]

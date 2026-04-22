@@ -22,6 +22,19 @@ class ProviderConfig(BaseModel):
     # The OpenAI-compat base URL is used for BOTH `openai_compat` LLM calls and
     # for embeddings when the LLM provider is Anthropic (which has no embeddings API).
     embedding_base_url: str = "https://api.openai.com/v1"
+    # Optional embedding output dimension (matryoshka truncation). ``None`` keeps
+    # the provider's native default (e.g., 1536 for text-embedding-3-small);
+    # set it explicitly for models that support trimming (e.g.,
+    # Qwen3-Embedding-8B on Gitee AI).
+    embedding_dimensions: int | None = None
+    # Max texts per ``/v1/embeddings`` request. OpenAI accepts ~2048;
+    # Gitee AI caps at ~25. Keep the default safe for OpenAI and drop it
+    # via config when hitting a stricter backend.
+    embedding_batch_size: int = 64
+    # Optional free-form display label surfaced in ``dikw check`` output
+    # (e.g., "gitee-ai", "openai", "azure-east"). Describes which vendor
+    # the embedding endpoint points at; purely for human diagnostics.
+    embedding_provider_label: str | None = None
     # Used by both "anthropic" and "openai_compat" LLM providers. For anthropic,
     # points the Anthropic SDK at an Anthropic-protocol-compatible endpoint
     # (e.g., MiniMax's Anthropic surface). Leave null to use the provider default.

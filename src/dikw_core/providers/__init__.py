@@ -20,7 +20,10 @@ def build_embedder(config: ProviderConfig) -> EmbeddingProvider:
     # Anthropic has no embeddings API; both paths route through OpenAI-compat
     # using ``embedding_base_url`` so users configure one endpoint explicitly.
     if config.embedding == "openai_compat":
-        return OpenAICompatEmbeddings(base_url=config.embedding_base_url)
+        return OpenAICompatEmbeddings(
+            base_url=config.embedding_base_url,
+            default_dimensions=config.embedding_dimensions,
+        )
     raise ProviderError(f"unknown embedding provider: {config.embedding!r}")
 
 

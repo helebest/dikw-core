@@ -15,6 +15,11 @@ Canonical docs (read these before designing changes):
 - `docs/design.md` — approved design doc, source of truth for intent
 - `docs/architecture.md` — module map, layer contracts, seams
 - `docs/getting-started.md` — end-user walkthrough
+- `docs/providers.md` — per-vendor config cookbook + production gotchas
+  (batch size, dim locking, retry, prompt caching) when swapping LLM or
+  embedding providers
+- `docs/eval-plan.md` — methodology (retrieval-only Phase A, triggers for LLM-as-judge)
+- `evals/README.md` — dataset three-file contract, how to add new datasets
 
 ## Dev workflow
 
@@ -54,6 +59,7 @@ src/dikw_core/
 ├── wisdom/                W layer — distill, review state machine, apply-at-query
 ├── providers/             LLMProvider + EmbeddingProvider Protocols (anthropic, openai_compat)
 ├── storage/               Storage Protocol + adapters (sqlite, postgres, filesystem)
+├── eval/                  retrieval-quality eval — metrics, dataset loader, runner, packaged datasets
 └── prompts/               versioned LLM prompts (importlib.resources)
 ```
 
@@ -76,7 +82,7 @@ src/dikw_core/
 - DTOs: anything crossing the Storage Protocol is a pydantic model in `schemas.py`. No SQL types, ORM handles, or cursors leak out of adapters.
 - Tests: `tests/fakes.py` provides in-memory fakes; prefer them over mocks. Storage adapters are validated via `tests/test_storage_contract.py` — add new adapter behavior to the contract, not to ad-hoc tests.
 - Prompts: versioned markdown files under `src/dikw_core/prompts/`, loaded via `importlib.resources`. Don't inline prompts in code.
-- Secrets: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` are read from env; never hardcode or commit. `.env`/`.env.*` are gitignored (except `.env.example`).
+- Secrets: `OPENAI_API_KEY` (openai_compat LLM), `ANTHROPIC_API_KEY` (anthropic LLM), and `DIKW_EMBEDDING_API_KEY` (every embedding call) are read from env. The embedding leg never falls back to `OPENAI_API_KEY` — set `DIKW_EMBEDDING_API_KEY` explicitly so LLM and embedding keys can differ (e.g., MiniMax LLM + Gitee AI embeddings). **`.env` is for secrets only**; non-secret config (URLs, models, dims, batch, display labels) lives in `dikw.yml`. Never hardcode or commit; `.env`/`.env.*` are gitignored (except `.env.example`).
 
 ## Things not to do
 

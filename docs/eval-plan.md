@@ -10,11 +10,18 @@ revisited when the triggers at the bottom fire.
 
 ## What we measure today
 
-`tests/test_retrieval_quality.py` ingests a curated dogfood corpus into
-a temp wiki with deterministic `FakeEmbeddings`, runs ~10 hand-authored
-queries through `HybridSearcher`, and asserts aggregate `hit@3`, `hit@10`,
-and `MRR` thresholds. Ground truth lives in `tests/fixtures/mvp_queries.yaml`
-as `q → expect_any: [doc_stem, …]`.
+Eval is a first-class CLI subcommand — `dikw eval` — driven by the
+runner at `src/dikw_core/eval/runner.py`. It ingests a dataset's corpus
+into a temp wiki with deterministic `FakeEmbeddings`, runs the queries
+through `HybridSearcher`, and compares aggregate `hit@3`, `hit@10`, and
+`MRR` against the dataset's own thresholds.
+
+The MVP dogfood dataset (project docs + Karpathy essays + 10 queries)
+lives at `evals/datasets/mvp/` with its own `dataset.yaml` specifying
+the thresholds. The full three-file contract ("how to add a dataset")
+is in [`evals/README.md`](../evals/README.md). The pytest gate
+`tests/test_retrieval_quality.py` is now a ~10-line wrapper over the
+same runner, so the CLI and the gate can never drift.
 
 - **What's covered.** Retrieval (I layer): chunking + RRF fusion + storage
   lookup. Catches: wrong chunk boundaries, broken vec/FTS wiring, RRF bugs,

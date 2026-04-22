@@ -206,14 +206,19 @@ class ProbeResult(BaseModel):
 
 
 class CheckReport(BaseModel):
-    """Result of ``check_providers`` — per-leg connectivity probes."""
+    """Result of ``check_providers`` — per-leg connectivity probes.
 
-    llm: ProbeResult
-    embed: ProbeResult
+    Either leg may be ``None`` when skipped via ``llm_only`` / ``embed_only``.
+    ``ok`` is True when every *present* leg is ok (and at least one is present).
+    """
+
+    llm: ProbeResult | None = None
+    embed: ProbeResult | None = None
 
     @property
     def ok(self) -> bool:
-        return self.llm.ok and self.embed.ok
+        legs = [p for p in (self.llm, self.embed) if p is not None]
+        return bool(legs) and all(p.ok for p in legs)
 
 
 # ---- wiki scaffolding (Phase 0) -----------------------------------------
@@ -297,7 +302,11 @@ async def _probe_llm(
 
 
 async def _probe_embed(
-    embedder: EmbeddingProvider, model: str, target: str
+    embedder: EmbeddingProvider,
+    model: str,
+    target: str,
+    *,
+    provider_label: str | None = None,
 ) -> ProbeResult:
     started = time.perf_counter()
     try:
@@ -306,7 +315,10 @@ async def _probe_embed(
         return ProbeResult(ok=False, target=target, detail=f"{type(e).__name__}: {e}")
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     dim = len(vectors[0]) if vectors else 0
-    return ProbeResult(ok=True, target=target, detail=f"{elapsed_ms}ms, dim={dim}")
+    detail = f"{elapsed_ms}ms, dim={dim}"
+    if provider_label:
+        detail = f"{detail}, provider={provider_label}"
+    return ProbeResult(ok=True, target=target, detail=detail)
 
 
 async def check_providers(
@@ -314,25 +326,56 @@ async def check_providers(
     *,
     llm: LLMProvider | None = None,
     embedder: EmbeddingProvider | None = None,
+    llm_only: bool = False,
+    embed_only: bool = False,
 ) -> CheckReport:
     """Ping the configured LLM and embedding providers.
 
     ``llm`` and ``embedder`` are injectable for tests; production callers
     leave them ``None`` and the factory builds them from ``provider:`` in
-    ``dikw.yml``. The two legs are probed in parallel and each reports its
-    own result — an LLM failure does not short-circuit the embedding probe.
-    """
-    cfg, _root = load_wiki(path)
-    llm_inst = llm if llm is not None else build_llm(cfg.provider)
-    embed_inst = embedder if embedder is not None else build_embedder(cfg.provider)
+    ``dikw.yml``. Two legs run in parallel and each reports its own result
+    — an LLM failure does not short-circuit the embedding probe.
 
+    ``llm_only`` / ``embed_only`` (mutually exclusive) verify a single leg.
+    The skipped leg is never built or called, so a misconfigured embedding
+    side cannot fail an ``--llm-only`` run.
+    """
+    if llm_only and embed_only:
+        raise ValueError("llm_only and embed_only are mutually exclusive")
+
+    cfg, _root = load_wiki(path)
+
+    llm_probe: ProbeResult | None = None
+    embed_probe: ProbeResult | None = None
     llm_target = cfg.provider.llm_base_url or "(provider default)"
     embed_target = cfg.provider.embedding_base_url
 
-    llm_probe, embed_probe = await asyncio.gather(
-        _probe_llm(llm_inst, cfg.provider.llm_model, llm_target),
-        _probe_embed(embed_inst, cfg.provider.embedding_model, embed_target),
-    )
+    if not embed_only:
+        llm_inst = llm if llm is not None else build_llm(cfg.provider)
+    if not llm_only:
+        embed_inst = embedder if embedder is not None else build_embedder(cfg.provider)
+
+    embed_label = cfg.provider.embedding_provider_label
+
+    if llm_only:
+        llm_probe = await _probe_llm(llm_inst, cfg.provider.llm_model, llm_target)
+    elif embed_only:
+        embed_probe = await _probe_embed(
+            embed_inst,
+            cfg.provider.embedding_model,
+            embed_target,
+            provider_label=embed_label,
+        )
+    else:
+        llm_probe, embed_probe = await asyncio.gather(
+            _probe_llm(llm_inst, cfg.provider.llm_model, llm_target),
+            _probe_embed(
+                embed_inst,
+                cfg.provider.embedding_model,
+                embed_target,
+                provider_label=embed_label,
+            ),
+        )
     return CheckReport(llm=llm_probe, embed=embed_probe)
 
 
@@ -409,7 +452,10 @@ async def ingest(
 
         if embedder is not None and to_embed:
             rows = await embed_chunks(
-                embedder, to_embed, model=cfg.provider.embedding_model
+                embedder,
+                to_embed,
+                model=cfg.provider.embedding_model,
+                batch_size=cfg.provider.embedding_batch_size,
             )
             await storage.upsert_embeddings(rows)
             report = _replace(report, embedded=len(rows))

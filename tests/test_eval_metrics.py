@@ -1,6 +1,8 @@
+"""Metrics module lives in src, not tests — test the public import path."""
+
 from __future__ import annotations
 
-from tests.eval.metrics import (
+from dikw_core.eval.metrics import (
     hit_at_k,
     mean_hit_at_k,
     mean_reciprocal_rank,

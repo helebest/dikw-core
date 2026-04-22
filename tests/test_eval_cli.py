@@ -119,3 +119,29 @@ def test_cli_eval_empty_datasets_root_exits_two(
     result = runner.invoke(app, ["eval"])
     assert result.exit_code == 2, result.stdout
     assert "no datasets" in result.stdout.lower()
+
+
+def test_cli_eval_prints_negative_diagnostics_section(tmp_path: Path) -> None:
+    """When the dataset has ``expect_none`` queries, the report ends with a
+    diagnostic section listing each negative query and its top-k observed
+    retrieval. Pure observation — does not contribute to pass/fail.
+    """
+    ds = _write_toy_dataset(tmp_path)
+    # Replace queries.yaml with one positive + two negatives.
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - q: foo and bar topics\n"
+        "    expect_any: [alpha]\n"
+        "  - q: weather in Tokyo today\n"
+        "    expect_none: true\n"
+        "  - q: who wrote the Iliad\n"
+        "    expect_none: true\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["eval", "--dataset", str(ds)])
+    assert result.exit_code == 0, result.stdout
+    # Section header + both negative queries surface in the diagnostic table.
+    assert "negative" in result.stdout.lower()
+    assert "weather in Tokyo today" in result.stdout
+    assert "who wrote the Iliad" in result.stdout

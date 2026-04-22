@@ -153,6 +153,98 @@ async def test_run_eval_synthetic_spec_direct(tmp_path: Path) -> None:
     assert report.passed
 
 
+@pytest.mark.asyncio
+async def test_run_eval_negative_query_does_not_drag_positive_metrics(
+    tmp_path: Path,
+) -> None:
+    """Negative queries (expect_none=True) must not contribute to hit@k/MRR.
+
+    Two queries: one hit, one ``expect_none``. If the runner averaged
+    hit@3 over both, the negative would count as a miss and halve the
+    score. Correct behaviour is to compute metrics over positives only.
+    """
+    # Positive query with a guaranteed hit + negative query (no expected match).
+    ds = _write_dataset(
+        tmp_path,
+        queries=[
+            ("foo and bar topics", ["alpha"]),  # positive — alpha is the answer
+        ],
+    )
+    # Append a negative query manually (helper only supports positives).
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - q: foo and bar topics\n"
+        "    expect_any: [alpha]\n"
+        "  - q: totally unrelated out-of-domain question\n"
+        "    expect_none: true\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    report = await run_eval(spec)
+
+    # hit@3 = 1.0 over 1 positive, not 0.5 over positive + negative
+    assert report.metrics["hit_at_3"] == 1.0
+    assert report.metrics["hit_at_10"] == 1.0
+    assert report.metrics["mrr"] == 1.0
+    # Only the positive query lands in per_query (it's what metrics table uses).
+    assert len(report.per_query) == 1
+    assert report.per_query[0]["q"] == "foo and bar topics"
+
+
+@pytest.mark.asyncio
+async def test_run_eval_exposes_negative_diagnostics(tmp_path: Path) -> None:
+    """Negative queries still get executed — their top-k is surfaced as
+    observational diagnostics so humans can eyeball "what DID get retrieved
+    for this out-of-domain query?".
+    """
+    ds = _write_dataset(tmp_path, queries=[("foo and bar", ["alpha"])])
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - q: foo and bar\n"
+        "    expect_any: [alpha]\n"
+        "  - q: totally unrelated\n"
+        "    expect_none: true\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    report = await run_eval(spec)
+
+    assert len(report.negative_diagnostics) == 1
+    neg = report.negative_diagnostics[0]
+    assert neg["q"] == "totally unrelated"
+    # Retrieval always returns SOMETHING from a non-empty corpus; the point
+    # is to observe what, not to pass/fail on it.
+    assert "ranked" in neg
+    assert isinstance(neg["ranked"], list)
+
+
+@pytest.mark.asyncio
+async def test_run_eval_all_negative_dataset_metrics_empty(tmp_path: Path) -> None:
+    """A dataset of only negatives produces no hit@k/MRR values — nothing
+    to average. The report's ``passed`` flag still works (trivially True
+    if no thresholds, or would fail if the user set one for a metric the
+    runner now skips).
+    """
+    ds = _write_dataset(tmp_path, queries=[("placeholder", ["alpha"])], thresholds={})
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - q: out of domain one\n"
+        "    expect_none: true\n"
+        "  - q: out of domain two\n"
+        "    expect_none: true\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    report = await run_eval(spec)
+
+    # Metrics over an empty positive set are not meaningful — runner
+    # omits them so a spurious 0.0 doesn't fail a threshold that was
+    # never intended for a negatives-only corpus.
+    assert "hit_at_3" not in report.metrics
+    assert len(report.negative_diagnostics) == 2
+    assert report.passed is True
+
+
 def test_eval_error_is_raised_for_nonexistent_corpus_dir(tmp_path: Path) -> None:
     """Programmatic DatasetSpec with bad corpus path → EvalError at run time."""
     spec = DatasetSpec(

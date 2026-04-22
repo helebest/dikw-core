@@ -16,10 +16,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 # Metric keys accepted under ``thresholds:``. Mirrors what runner.py computes.
 SUPPORTED_METRICS = frozenset({"hit_at_3", "hit_at_10", "mrr"})
@@ -30,19 +30,34 @@ class DatasetError(RuntimeError):
 
 
 class Query(BaseModel):
-    """One entry in ``queries.yaml``."""
+    """One entry in ``queries.yaml``.
+
+    Polarity must be exactly one of:
+
+    * ``expect_any: [doc_stem, …]`` — positive case; query is a hit at k if
+      any listed stem appears in top-k.
+    * ``expect_none: true`` — negative case; observed top-k is surfaced as
+      diagnostic only and does NOT contribute to hit@k/MRR. Used for
+      out-of-domain queries where the right behaviour is "no match".
+
+    The two are mutually exclusive; giving neither is almost always a YAML typo.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     q: str
     expect_any: list[str] = Field(default_factory=list)
+    expect_none: bool = False
 
-    @field_validator("expect_any")
-    @classmethod
-    def _non_empty(cls, v: list[str]) -> list[str]:
-        if not v:
-            raise ValueError("expect_any must contain at least one doc stem")
-        return v
+    @model_validator(mode="after")
+    def _polarity(self) -> Self:
+        if self.expect_none and self.expect_any:
+            raise ValueError("expect_none and expect_any are mutually exclusive")
+        if not self.expect_none and not self.expect_any:
+            raise ValueError(
+                "query must provide either expect_any (positive) or expect_none=true (negative)"
+            )
+        return self
 
 
 class DatasetSpec(BaseModel):

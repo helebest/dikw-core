@@ -533,7 +533,7 @@ async def query(
             system="You are the query-answering component of dikw-core.",
             user=user_prompt,
             model=cfg.provider.llm_model,
-            max_tokens=1024,
+            max_tokens=cfg.provider.llm_max_tokens_query,
             temperature=0.2,
         )
         return QueryResult(
@@ -624,7 +624,7 @@ async def synthesize(
                 system="You synthesise K-layer wiki pages for dikw-core.",
                 user=user_prompt,
                 model=cfg.provider.llm_model,
-                max_tokens=2048,
+                max_tokens=cfg.provider.llm_max_tokens_synth,
                 temperature=0.3,
             )
 
@@ -806,7 +806,7 @@ async def distill(
                 system="You distil W-layer wisdom items from a K-layer wiki.",
                 user=user_prompt,
                 model=cfg.provider.llm_model,
-                max_tokens=2048,
+                max_tokens=cfg.provider.llm_max_tokens_distill,
                 temperature=0.25,
             )
             parsed = parse_distill_response(response.text)

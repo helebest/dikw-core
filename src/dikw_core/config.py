@@ -39,6 +39,14 @@ class ProviderConfig(BaseModel):
     # points the Anthropic SDK at an Anthropic-protocol-compatible endpoint
     # (e.g., MiniMax's Anthropic surface). Leave null to use the provider default.
     llm_base_url: str | None = None
+    # Per-operation response budget handed to ``LLMProvider.complete`` via
+    # ``max_tokens``. Defaults match the values previously hardcoded in
+    # ``api.py``; shrink for cost-optimised models (some GLM-Flash / Gemini
+    # Nano variants cap below 2048), grow if synth/distill responses get
+    # truncated.
+    llm_max_tokens_query: int = 1024
+    llm_max_tokens_synth: int = 2048
+    llm_max_tokens_distill: int = 2048
 
 
 class SQLiteStorageConfig(BaseModel):

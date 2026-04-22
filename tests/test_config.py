@@ -9,6 +9,7 @@ from dikw_core.config import (
     DikwConfig,
     FilesystemStorageConfig,
     PostgresStorageConfig,
+    ProviderConfig,
     SQLiteStorageConfig,
     default_config,
     dump_config_yaml,
@@ -95,3 +96,30 @@ def test_load_config_rejects_non_mapping(tmp_path: Path) -> None:
     path.write_text("- not a mapping\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mapping"):
         load_config(path)
+
+
+def test_provider_config_llm_max_tokens_defaults() -> None:
+    """Per-op max_tokens fields default to the values currently hardcoded in api.py."""
+    cfg = ProviderConfig()
+    assert cfg.llm_max_tokens_query == 1024
+    assert cfg.llm_max_tokens_synth == 2048
+    assert cfg.llm_max_tokens_distill == 2048
+
+
+def test_provider_config_llm_max_tokens_override_via_yaml(tmp_path: Path) -> None:
+    """Users can shrink (or grow) per-op budgets via dikw.yml to fit their vendor."""
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+provider:
+  llm_max_tokens_query: 512
+  llm_max_tokens_synth: 4096
+  llm_max_tokens_distill: 1536
+sources: []
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.provider.llm_max_tokens_query == 512
+    assert cfg.provider.llm_max_tokens_synth == 4096
+    assert cfg.provider.llm_max_tokens_distill == 1536

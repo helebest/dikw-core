@@ -510,7 +510,12 @@ async def query(
             _llm = build_llm(cfg.provider)
 
         searcher = HybridSearcher(
-            storage, _embedder, embedding_model=cfg.provider.embedding_model
+            storage,
+            _embedder,
+            embedding_model=cfg.provider.embedding_model,
+            rrf_k=cfg.retrieval.rrf_k,
+            bm25_weight=cfg.retrieval.bm25_weight,
+            vector_weight=cfg.retrieval.vector_weight,
         )
         hits = await searcher.search(q, limit=limit)
 

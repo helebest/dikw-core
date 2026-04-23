@@ -436,6 +436,18 @@ def eval_cmd(
             ),
         ),
     ] = "hybrid",
+    dump_raw: Annotated[
+        Path | None,
+        typer.Option(
+            "--dump-raw",
+            help=(
+                "Append per-(query, mode) top-100 ranked lists to this "
+                "JSONL file. Only meaningful with --retrieval all — "
+                "``evals/tools/sweep_rrf.py`` consumes this to re-fuse "
+                "offline without re-embedding."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run retrieval-quality evaluation against one or every packaged dataset."""
     # Lazy imports: keep top-of-module `from . import api` light for the
@@ -450,6 +462,22 @@ def eval_cmd(
             f"got {retrieval!r}"
         )
         raise typer.Exit(code=2)
+
+    # --dump-raw needs both legs' rankings to be useful; warn-and-ignore
+    # in single-mode runs rather than silently writing a file the sweep
+    # tool would reject anyway.
+    if dump_raw is not None and retrieval != "all":
+        console.print(
+            "[yellow]warning:[/yellow] --dump-raw is ignored unless "
+            "--retrieval all; skipping."
+        )
+        dump_raw = None
+
+    if dump_raw is not None:
+        # Truncate before the first run_eval — each dataset then appends
+        # its rows. Avoids silent contamination from an old sweep.
+        dump_raw.parent.mkdir(parents=True, exist_ok=True)
+        dump_raw.write_text("", encoding="utf-8")
 
     # Resolve which datasets to run.
     try:
@@ -499,6 +527,7 @@ def eval_cmd(
                     embedder=embedder,
                     provider_config=provider_cfg,
                     mode=retrieval,  # type: ignore[arg-type]
+                    raw_dump_path=dump_raw,
                 )
             )
         except Exception as e:  # runner-level error — report, fail this dataset

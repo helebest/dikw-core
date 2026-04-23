@@ -19,17 +19,19 @@ description: >
   strips the curated description. See ``evals/BASELINES.md`` for the
   observed numbers and follow-ups.
 
-# Calibrated from the first real-embedder run on 2026-04-23 (Qwen3-
-# Embedding-8B @ 4096-dim via Gitee AI, commit 62b596f). Thresholds
-# leave ~2-3% slack below observed so an honest retrieval regression
-# fails the gate while a small re-run variance does not. These bind
-# when running with ``--retrieval hybrid`` (canonical) or ``--retrieval
+# Calibrated against the 2026-04-23 v2 real-embedder run (Qwen3-
+# Embedding-8B @ 4096-dim via Gitee AI) with the SciFact-tuned RRF
+# defaults (rrf_k=60, bm25_weight=0.3, vector_weight=1.5 — see
+# ``src/dikw_core/config.py :: RetrievalConfig``). Thresholds leave
+# ~2-3% slack below observed so an honest retrieval regression fails
+# the gate while small re-run variance doesn't. These bind when
+# running with ``--retrieval hybrid`` (canonical) or ``--retrieval
 # all`` (mirrored from hybrid).
 thresholds:
-  hit_at_3: 0.73
-  hit_at_10: 0.85
-  mrr: 0.68
-  ndcg_at_10: 0.70
+  hit_at_3: 0.77
+  hit_at_10: 0.89
+  mrr: 0.71
+  ndcg_at_10: 0.74
   recall_at_100: 0.94
 
 published_baselines:

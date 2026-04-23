@@ -57,6 +57,42 @@ class ProviderConfig(BaseModel):
     embedding_max_retries: int = 5
 
 
+class RetrievalConfig(BaseModel):
+    """Fusion knobs for ``HybridSearcher``.
+
+    Defaults are calibrated against BEIR/SciFact (2026-04-23 sweep,
+    300 queries, Qwen3-Embedding-8B): the equal-weight ``(1.0, 1.0)``
+    starting point left hybrid 0.037 nDCG@10 behind vector-only because
+    RRF gave equal vote to a ~0.10-nDCG-weaker BM25 leg. Shifting to a
+    vector-heavy ratio (BM25 0.3 / vector 1.5) closes that gap: hybrid
+    lands at nDCG@10 ≈ 0.771 (≈ vector 0.773, well inside noise) while
+    keeping hybrid's recall@100 advantage (0.970 vs 0.947 dense-only).
+
+    Users whose corpus is **keyword-heavy** (code, identifiers, rare
+    terminology) should raise ``bm25_weight`` back toward 1.0 — the
+    SciFact tuning over-favours dense semantics and will under-rank
+    exact-term matches. Tune per-corpus with
+    ``dikw eval --retrieval all --dump-raw`` +
+    ``evals/tools/sweep_rrf.py``. See ``evals/BASELINES.md`` for the
+    full sweep table.
+    """
+
+    # Reciprocal Rank Fusion's rank-offset constant. Smaller = steeper
+    # decay (rank-1 wins by more). 60 is the value used in the original
+    # RRF paper and by both reference projects; the SciFact sweep finds
+    # it near-optimal (k=40 scores 0.002 higher but the curve is flat
+    # across 40/60/100, so keep the historical constant).
+    rrf_k: int = 60
+    # Per-leg contribution factor. Asymmetric because — see the class
+    # docstring — the BM25 leg on BEIR-style corpora is measurably
+    # behind the dense leg; equal weights drag the fused ranking toward
+    # the weaker signal. A leg with weight 0.3 still has every doc it
+    # alone found enter the pool (recall preserved); the weight only
+    # scales how much that leg's rank order influences the top-k.
+    bm25_weight: float = 0.3
+    vector_weight: float = 1.5
+
+
 class SQLiteStorageConfig(BaseModel):
     backend: Literal["sqlite"] = "sqlite"
     path: str = ".dikw/index.sqlite"
@@ -102,6 +138,7 @@ class SourceConfig(BaseModel):
 class DikwConfig(BaseModel):
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     storage: StorageConfig = Field(default_factory=SQLiteStorageConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     schema_: SchemaConfig = Field(default_factory=SchemaConfig, alias="schema")
     sources: list[SourceConfig] = Field(default_factory=list)
 

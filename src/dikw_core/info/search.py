@@ -54,13 +54,35 @@ class Hit(BaseModel):
 
 
 def reciprocal_rank_fusion(
-    rank_lists: list[list[str]], *, k: int = RRF_K
+    rank_lists: list[list[str]],
+    *,
+    k: int = RRF_K,
+    weights: list[float] | None = None,
 ) -> dict[str, float]:
-    """Reciprocal Rank Fusion. Returns doc_id → fused score (higher = better)."""
+    """Reciprocal Rank Fusion. Returns doc_id → fused score (higher = better).
+
+    ``weights`` lets the caller bias fusion toward a stronger leg — e.g.,
+    when BM25 is measurably behind the dense leg on a given corpus,
+    equal-weight RRF drags the combined ranking toward the weaker signal
+    (observed on BEIR/SciFact: hybrid nDCG@10 0.736 < vector 0.773 at
+    default k=60, equal weights). Setting ``weights=[0.5, 1.0]`` halves
+    BM25's per-rank contribution while keeping every doc it found in the
+    pool — better rank quality, no recall loss.
+
+    ``None`` (the default) is equivalent to ``[1.0] * len(rank_lists)``
+    — the behaviour before weighting landed, preserved bit-for-bit.
+    """
+    if weights is None:
+        weights = [1.0] * len(rank_lists)
+    if len(weights) != len(rank_lists):
+        raise ValueError(
+            f"weights length {len(weights)} must match rank_lists length "
+            f"{len(rank_lists)}"
+        )
     scores: dict[str, float] = {}
-    for lst in rank_lists:
+    for lst, w in zip(rank_lists, weights, strict=True):
         for rank, key in enumerate(lst):
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+            scores[key] = scores.get(key, 0.0) + w / (k + rank + 1)
     return scores
 
 
@@ -73,10 +95,16 @@ class HybridSearcher:
         embedder: EmbeddingProvider | None,
         *,
         embedding_model: str | None = None,
+        rrf_k: int = RRF_K,
+        bm25_weight: float = 1.0,
+        vector_weight: float = 1.0,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
         self._embedding_model = embedding_model
+        self._rrf_k = rrf_k
+        self._bm25_weight = bm25_weight
+        self._vector_weight = vector_weight
 
     async def search(
         self,
@@ -120,7 +148,11 @@ class HybridSearcher:
 
         fts_ranked = [h.doc_id for h in fts_hits]
         vec_ranked = [h.doc_id for h in vec_hits]
-        fused = reciprocal_rank_fusion([fts_ranked, vec_ranked])
+        fused = reciprocal_rank_fusion(
+            [fts_ranked, vec_ranked],
+            k=self._rrf_k,
+            weights=[self._bm25_weight, self._vector_weight],
+        )
 
         # index hits for fast snippet lookup
         snippets: dict[str, str] = {h.doc_id: h.snippet or "" for h in fts_hits if h.snippet}

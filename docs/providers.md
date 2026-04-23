@@ -175,19 +175,48 @@ uv run python evals/tools/convert_beir.py \
     --baseline-bm25-ndcg10 0.665    # BEIR paper, Thakur et al. 2021
 ```
 
-Run the full ablation:
+Run the full ablation and dump per-mode rankings for offline re-fusion:
 
 ```bash
 uv run --env-file scratch-bench-wiki/.env \
     dikw eval --dataset scifact --embedder provider \
-    --path ./scratch-bench-wiki --retrieval all
+    --path ./scratch-bench-wiki --retrieval all \
+    --dump-raw /tmp/scifact-raw.jsonl
 ```
 
 Output is a 3-row × 5-metric table (bm25 / vector / hybrid × hit@3 /
 hit@10 / mrr / nDCG@10 / recall@100). Compare the `bm25` row's
 nDCG@10 to the published 0.665 baseline (treat ±0.10 as in-band —
 FTS5 is not Anserini), and check whether `hybrid` actually beats both
-single legs (it should, by a small margin).
+single legs.
+
+### Tuning RRF weights for your corpus
+
+The shipped defaults are calibrated on BEIR/SciFact (vector-heavy:
+`bm25_weight=0.3, vector_weight=1.5, rrf_k=60`). If your corpus has
+different BM25 / dense balance — keyword-heavy code bases want more
+BM25 influence, paraphrase-heavy prose wants more vector — tune via
+the offline sweep, which re-fuses the same `--dump-raw` JSONL at
+arbitrary weights in milliseconds:
+
+```bash
+uv run python evals/tools/sweep_rrf.py --raw-dump /tmp/scifact-raw.jsonl
+```
+
+The printed table shows the top-N (k, w_bm25, w_vec) combinations by
+nDCG@10 plus two reference rows — vanilla `(1, 1, 60)` RRF and the
+currently shipped defaults — so the absolute deltas are obvious. Pick
+a winning row and pin it in the wiki's `dikw.yml`:
+
+```yaml
+retrieval:
+  rrf_k: 60           # default; smaller = steeper rank decay
+  bm25_weight: 0.5    # raise for keyword-heavy corpora
+  vector_weight: 1.0  # raise for paraphrase / semantic match
+```
+
+No code change needed — `api.query` and the MCP `doc.search` tool pick
+up the block on next call.
 
 For a Chinese benchmark, repeat with `convert_cmteb.py` against a
 HuggingFace download — same workflow, see

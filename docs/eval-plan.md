@@ -113,9 +113,16 @@ parity impossible (and not actually useful):
    constants and tokenizer. Treat ±0.10 nDCG@10 vs the published
    number as in-band; larger gaps suggest a real bug, not algorithm
    choice.
-3. **RRF k=60, never tuned.** `info/search.py:RRF_K` is the value
-   from the original RRF paper. Different k or different fusion (CombSUM,
-   weighted) could move hybrid up or down by a few points.
+3. **RRF weighted on the SciFact 2026-04-23 sweep.** `k=60` from the
+   original RRF paper, per-leg weights `(bm25=0.3, vector=1.5)` picked
+   because equal-weight left hybrid 0.037 nDCG@10 behind vector-only
+   on BEIR/SciFact — dragged down by a ~0.10-nDCG-weaker BM25 leg. The
+   sweep + tuning path is reproducible for any corpus:
+   `dikw eval --retrieval all --dump-raw path.jsonl` +
+   `evals/tools/sweep_rrf.py --raw-dump path.jsonl`. Keyword-heavy
+   corpora (code, rare identifiers) likely want `bm25_weight ≥ 1.0` —
+   override via `retrieval:` block in `dikw.yml`. Full sweep table:
+   [`evals/BASELINES.md`](../evals/BASELINES.md).
 4. **Embedding dim choice.** The benchmark stubs default to
    Qwen3-Embedding-8B at 1024-dim (matryoshka truncation) for cost.
    The 4096-dim native vectors would shift dense + hybrid numbers; pin

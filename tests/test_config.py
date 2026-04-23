@@ -10,6 +10,7 @@ from dikw_core.config import (
     FilesystemStorageConfig,
     PostgresStorageConfig,
     ProviderConfig,
+    RetrievalConfig,
     SQLiteStorageConfig,
     default_config,
     dump_config_yaml,
@@ -149,3 +150,64 @@ sources: []
     cfg = load_config(path)
     assert cfg.provider.llm_max_retries == 3
     assert cfg.provider.embedding_max_retries == 7
+
+
+def test_retrieval_config_defaults_are_scifact_tuned() -> None:
+    """Defaults are the 2026-04-23 SciFact sweep winner, not equal weights.
+
+    Equal (1.0, 1.0) starting point left hybrid 0.037 nDCG@10 behind the
+    vector-only leg on BEIR/SciFact. Tuning to vector-heavy (0.3 / 1.5)
+    at k=60 closes that gap — see ``evals/BASELINES.md`` for the sweep.
+    This test pins those numbers so a silent drift doesn't reintroduce
+    the regression.
+    """
+    cfg = RetrievalConfig()
+    assert cfg.rrf_k == 60
+    assert cfg.bm25_weight == 0.3
+    assert cfg.vector_weight == 1.5
+
+
+def test_dikw_config_retrieval_block_omitted_fills_defaults(tmp_path: Path) -> None:
+    """A wiki whose dikw.yml predates this feature loads cleanly — the
+    runtime supplies the SciFact-tuned defaults, not an error.
+    """
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+provider:
+  llm: anthropic
+sources: []
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.retrieval.rrf_k == 60
+    assert cfg.retrieval.bm25_weight == 0.3
+    assert cfg.retrieval.vector_weight == 1.5
+
+
+def test_dikw_config_retrieval_block_round_trip(tmp_path: Path) -> None:
+    """Fusion knobs parse from YAML + survive dump → load."""
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+retrieval:
+  rrf_k: 40
+  bm25_weight: 0.5
+  vector_weight: 1.5
+sources: []
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.retrieval.rrf_k == 40
+    assert cfg.retrieval.bm25_weight == 0.5
+    assert cfg.retrieval.vector_weight == 1.5
+
+    # round-trip: dump → re-load yields identical values
+    yaml_text = dump_config_yaml(cfg)
+    path.write_text(yaml_text, encoding="utf-8")
+    cfg2 = load_config(path)
+    assert cfg2.retrieval.rrf_k == 40
+    assert cfg2.retrieval.bm25_weight == 0.5
+    assert cfg2.retrieval.vector_weight == 1.5

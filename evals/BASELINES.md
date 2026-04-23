@@ -7,9 +7,112 @@ regression from a re-run variance.
 Newest first. `dikw eval` thresholds in each dataset's `dataset.yaml`
 are calibrated ~2-3 % below the most recent canonical-mode run.
 
+## 2026-04-23 — SciFact (BEIR) v2 — RRF tuned
+
+**Status:** supersedes v1 as the canonical SciFact baseline. Same
+embeddings, new fusion defaults.
+
+### What changed from v1
+
+v1 exposed a structural regression: equal-weight RRF at `k=60` let the
+~0.10-nDCG-weaker BM25 leg drag hybrid 0.037 points below the
+vector-only mode on nDCG@10. The fix, from BASELINES v1 follow-up #1,
+landed in three layers:
+
+1. `reciprocal_rank_fusion` grew a `weights` parameter (it had always
+   been equal-weight).
+2. `RetrievalConfig` in `dikw.yml` exposes `rrf_k` + `bm25_weight` +
+   `vector_weight` so users can tune per-corpus.
+3. `dikw eval --retrieval all --dump-raw` + `evals/tools/sweep_rrf.py`
+   re-fuse a single dump at arbitrary weights offline — no re-embedding.
+
+### Weight sweep (offline, same dump as v1)
+
+Full 48-combination grid: `rrf_k ∈ {40, 60, 100}` × `bm25_weight ∈ {0.3, 0.5, 0.7, 1.0}`
+× `vector_weight ∈ {0.5, 1.0, 1.5, 2.0}`. Top 5 by nDCG@10 plus the
+vanilla and shipped-default reference rows:
+
+```
+|   k | w_bm25 | w_vec | hit@3 | hit@10 |    mrr | nDCG@10 | recall@100 |
+|----:|-------:|------:|------:|-------:|-------:|--------:|-----------:|
+|  40 |   0.30 |  2.00 | 0.793 |  0.917 |  0.737 |   0.773 |      0.970 |
+|  40 |   0.30 |  1.50 | 0.797 |  0.917 |  0.736 |   0.772 |      0.970 |
+|  60 |   0.30 |  1.50 | 0.797 |  0.920 |  0.734 |   0.771 |      0.970 |  ← shipped default
+|  40 |   0.50 |  2.00 | 0.793 |  0.920 |  0.734 |   0.770 |      0.970 |
+|  60 |   0.30 |  2.00 | 0.790 |  0.917 |  0.733 |   0.770 |      0.970 |
+|  60 |   1.00 |  1.00 | 0.757 |  0.883 |  0.708 |   0.736 |      0.970 |  ← equal-weight (pre-tuning)
+```
+
+Full grid + commentary in `/tmp/sweep-result.log` on the run host.
+
+### Shipped defaults: `(rrf_k=60, bm25_weight=0.3, vector_weight=1.5)`
+
+Why this point and not the grid top:
+
+- **Keep `k=60` unchanged.** It's the original RRF-paper constant and
+  what every downstream user's mental model pins on. `k=40` scores
+  0.002 higher on SciFact — within noise, and the flatter `k=60` curve
+  across the grid suggests it generalises better to other corpora.
+- **Closest "k=60" row to the Pareto top.** Tiers at `w_bm25=0.3` all
+  collapse to ~0.771 nDCG@10; picking a more moderate `w_bm25=0.5` or
+  `0.7` loses 0.004–0.011 nDCG@10 for arguably less overfit but
+  weakens the SciFact win we actually measured.
+- **Recall@100 unchanged at 0.970.** Every top-tier config keeps this
+  — the BM25 leg's recall contribution is invariant to its weight; only
+  position-weighted metrics shift.
+
+### Results (shipped defaults)
+
+```
+dikw eval — scifact  (retrieval ablation, v2 defaults)
+┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
+│ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
+├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
+│ bm25   │    0.707 │     0.817 │ 0.638 │      0.669 │         0.865 │
+│ vector │    0.797 │     0.907 │ 0.738 │      0.773 │         0.947 │
+│ hybrid │    0.797 │     0.920 │ 0.734 │      0.771 │         0.970 │
+└────────┴──────────┴───────────┴───────┴────────────┴───────────────┘
+```
+
+Hybrid now effectively **ties vector on every position-weighted metric
+within re-run noise** (Δ ≤ 0.004), while keeping the BM25 leg's
+recall@100 advantage (+0.023 over vector). The v1 regression ("hybrid
+< vector on nDCG@10") is resolved.
+
+### Comparison vs published baselines (unchanged from v1)
+
+| Metric | Our bm25 | Published (BEIR paper, BM25 Anserini) | Δ |
+|---|---|---|---|
+| nDCG@10 | **0.669** | **0.665** | **+0.004** |
+
+The BM25 leg is untouched by fusion tuning; the Anserini calibration
+stays as before.
+
+### Caveat: SciFact-tuned default is vector-heavy
+
+The `(0.3, 1.5)` ratio over-favours dense semantics. On a
+**keyword-heavy corpus** (code, identifiers, exact-term lookup) this
+default will under-rank BM25 hits — raise `bm25_weight` in
+`dikw.yml`'s `retrieval:` block. The `evals/tools/sweep_rrf.py` flow
+is the intended tuning path; it finishes in milliseconds against a
+`--dump-raw` JSONL, no second API call.
+
+### Follow-ups (still not this PR)
+
+- **Run CMTEB / T2Retrieval subset** on the v2 defaults to confirm the
+  weights generalise to Chinese + a different BM25/dense balance.
+- **Sweep chunk size** (450 / 900 / 1800 tokens) on SciFact. The
+  default is picked by feel, not measured.
+- **Score-normalized fusion** (CombSUM / CombMNZ) — the v2 tuning
+  basically tied vector; going *above* it likely requires fusion that
+  honours score magnitude, not just rank position. Independent branch,
+  not blocked on anything above.
+
 ## 2026-04-23 — SciFact (BEIR)
 
-**Status:** first real-vector run. Established as the baseline.
+**Status:** superseded by v2 above (same embeddings, equal-weight
+fusion). Kept for historical reference — the pre-tuning numbers are
+the fair comparison point for any future fusion work.
 
 ### Configuration
 

@@ -14,8 +14,10 @@ Parquet I/O is exercised only via integration (pyarrow is trusted).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
-from evals.tools.prep_cmteb_t2 import PrepError, subsample_queries
+from evals.tools.prep_cmteb_t2 import PrepError, main, subsample_queries
 
 
 def _mini_dataset(num_corpus: int = 20, num_queries: int = 10) -> tuple[
@@ -135,6 +137,33 @@ def test_subsample_excludes_orphan_queries_from_pool() -> None:
         num_queries=3, target_corpus_size=5, seed=0,
     )
     assert set(sampled_q.keys()) == {"0", "1", "2"}
+
+
+def test_main_returns_exit_code_2_on_missing_parquet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """User-facing CLI must surface missing/unreadable parquet bundles
+    as a clean ``error: ...`` line + exit 2, matching convert_beir.py
+    and convert_cmteb.py — not as a raw OSError traceback."""
+    rc = main(
+        [
+            "--src-dir",
+            str(tmp_path / "no-such-src"),
+            "--qrels-dir",
+            str(tmp_path / "no-such-qrels"),
+            "--out",
+            str(tmp_path / "out"),
+            "--num-queries",
+            "10",
+            "--target-size",
+            "100",
+            "--seed",
+            "0",
+        ]
+    )
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error:"), captured.err
 
 
 def test_subsample_handles_corpus_smaller_than_target() -> None:

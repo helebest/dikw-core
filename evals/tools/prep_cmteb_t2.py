@@ -288,36 +288,44 @@ def _build_argparser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
 
-    corpus = read_t2_corpus(args.src_dir)
-    queries = read_t2_queries(args.src_dir)
-    qrels = read_t2_qrels(args.qrels_dir, args.split)
-    print(
-        f"loaded: corpus={len(corpus):,} queries={len(queries):,} "
-        f"qrels={len(qrels):,}",
-        file=sys.stderr,
-    )
+    try:
+        corpus = read_t2_corpus(args.src_dir)
+        queries = read_t2_queries(args.src_dir)
+        qrels = read_t2_qrels(args.qrels_dir, args.split)
+        print(
+            f"loaded: corpus={len(corpus):,} queries={len(queries):,} "
+            f"qrels={len(qrels):,}",
+            file=sys.stderr,
+        )
+        sampled_corpus, sampled_queries, sampled_qrels, stats = subsample_queries(
+            corpus=corpus,
+            queries=queries,
+            qrels=qrels,
+            num_queries=args.num_queries,
+            target_corpus_size=args.target_size,
+            seed=args.seed,
+        )
+        print(
+            "sampled: " + " ".join(f"{k}={v}" for k, v in stats.items()),
+            file=sys.stderr,
+        )
+        _write_beir_bundle(
+            args.out,
+            corpus=sampled_corpus,
+            queries=sampled_queries,
+            qrels=sampled_qrels,
+            split=args.split,
+        )
+    except PrepError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # Missing parquet, unwritable --out, locked file, etc. The
+        # source-discovery / write paths can all raise OSError before
+        # the pure sampling logic is reached.
+        print(f"error: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 2
 
-    sampled_corpus, sampled_queries, sampled_qrels, stats = subsample_queries(
-        corpus=corpus,
-        queries=queries,
-        qrels=qrels,
-        num_queries=args.num_queries,
-        target_corpus_size=args.target_size,
-        seed=args.seed,
-    )
-    print(
-        "sampled: "
-        + " ".join(f"{k}={v}" for k, v in stats.items()),
-        file=sys.stderr,
-    )
-
-    _write_beir_bundle(
-        args.out,
-        corpus=sampled_corpus,
-        queries=sampled_queries,
-        qrels=sampled_qrels,
-        split=args.split,
-    )
     print(f"wrote BEIR-shape bundle → {args.out}", file=sys.stderr)
     return 0
 

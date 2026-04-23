@@ -107,10 +107,10 @@ def dump_dataset_yaml(
     if path.exists():
         try:
             existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        except (yaml.YAMLError, UnicodeDecodeError, OSError) as exc:
             raise ConverterError(
-                f"{path}: existing file is not readable as UTF-8 YAML "
-                f"({exc.__class__.__name__}); refusing to overwrite. "
+                f"{path}: cannot read existing file as UTF-8 YAML "
+                f"({exc.__class__.__name__}: {exc}); refusing to overwrite. "
                 f"Inspect or delete it manually."
             ) from exc
         if not isinstance(existing, Mapping):

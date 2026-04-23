@@ -22,6 +22,51 @@ def test_rrf_handles_disjoint_lists() -> None:
     assert set(fused) == {"a", "b", "c", "d"}
 
 
+def test_rrf_weights_default_preserves_legacy() -> None:
+    """weights=None must reproduce the pre-weighting numbers bit-for-bit.
+
+    Regression guard: a silent change to the default would shift every
+    existing hybrid ranking. Compute both paths with the same k and assert
+    they match at full float precision.
+    """
+    lists = [["a", "b", "c"], ["a", "c", "b"]]
+    legacy = reciprocal_rank_fusion(lists, k=60)
+    explicit = reciprocal_rank_fusion(lists, k=60, weights=[1.0, 1.0])
+    assert legacy == explicit
+
+
+def test_rrf_weights_shift_ranking_toward_weighted_leg() -> None:
+    """When one leg is weighted higher, its solo-discovered docs beat the
+    other leg's solo-discovered docs — what the SciFact fix needs.
+    """
+    # "bm25_only" appears only in list[0]; "vec_only" only in list[1].
+    # Both at rank 0, so equal weights → tie. Asymmetric weights → winner.
+    lists = [["bm25_only"], ["vec_only"]]
+
+    equal = reciprocal_rank_fusion(lists, k=60, weights=[1.0, 1.0])
+    assert equal["bm25_only"] == equal["vec_only"]
+
+    vec_heavy = reciprocal_rank_fusion(lists, k=60, weights=[0.5, 1.0])
+    assert vec_heavy["vec_only"] > vec_heavy["bm25_only"]
+
+    bm25_heavy = reciprocal_rank_fusion(lists, k=60, weights=[1.0, 0.5])
+    assert bm25_heavy["bm25_only"] > bm25_heavy["vec_only"]
+
+
+def test_rrf_weights_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError, match="length"):
+        reciprocal_rank_fusion([["a"], ["b"]], weights=[1.0])
+
+
+def test_rrf_k_controls_rank_decay() -> None:
+    """Smaller k = steeper decay; rank-1 doc wins by a larger margin."""
+    lists = [["first", "second"]]
+    tight = reciprocal_rank_fusion(lists, k=10)
+    loose = reciprocal_rank_fusion(lists, k=100)
+    # first/second ratio grows as k shrinks
+    assert tight["first"] / tight["second"] > loose["first"] / loose["second"]
+
+
 # ---- _sanitize_fts ----------------------------------------------------------
 
 

@@ -22,7 +22,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 # Metric keys accepted under ``thresholds:``. Mirrors what runner.py computes.
-SUPPORTED_METRICS = frozenset({"hit_at_3", "hit_at_10", "mrr"})
+# nDCG@10 and Recall@100 are added for public-benchmark calibration (BEIR /
+# CMTEB report nDCG@10 and Recall@100 as defaults); the dogfood mvp dataset
+# does not have to set them.
+SUPPORTED_METRICS = frozenset(
+    {"hit_at_3", "hit_at_10", "mrr", "ndcg_at_10", "recall_at_100"}
+)
 
 
 class DatasetError(RuntimeError):

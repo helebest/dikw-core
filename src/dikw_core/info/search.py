@@ -20,14 +20,26 @@ land a measurable baseline first.
 from __future__ import annotations
 
 import asyncio
+import re
+from typing import Literal
 
 from pydantic import BaseModel
 
 from ..providers import EmbeddingProvider
-from ..schemas import ChunkRecord, Layer, VecHit
+from ..schemas import ChunkRecord, FTSHit, Layer, VecHit
 from ..storage.base import NotSupported, Storage
 
 RRF_K = 60
+
+# FTS5 reserved query operators. Stripped from user queries because
+# `_sanitize_fts` builds an OR-of-tokens expression itself; an unwary
+# user word like "AND" would otherwise become syntax mid-query.
+_FTS_RESERVED = frozenset({"AND", "OR", "NOT", "NEAR"})
+
+# Which retrieval legs to fuse. ``hybrid`` is the historical default and
+# what `dikw query` uses; ``bm25`` and ``vector`` exist so eval can
+# ablate the contribution of each leg against public benchmarks.
+RetrievalMode = Literal["bm25", "vector", "hybrid"]
 
 
 class Hit(BaseModel):
@@ -73,18 +85,32 @@ class HybridSearcher:
         limit: int = 10,
         per_leg_limit: int = 40,
         layer: Layer | None = None,
+        mode: RetrievalMode = "hybrid",
     ) -> list[Hit]:
         if not q.strip():
             return []
 
-        fts_task = asyncio.create_task(
-            self._storage.fts_search(_sanitize_fts(q), limit=per_leg_limit, layer=layer)
-        )
+        run_fts = mode in ("bm25", "hybrid")
+        run_vec = mode in ("vector", "hybrid")
+        if mode == "vector" and (
+            self._embedder is None or self._embedding_model is None
+        ):
+            raise ValueError(
+                "mode='vector' requires both embedder and embedding_model"
+            )
+
+        fts_task: asyncio.Task[list[FTSHit]] | None = None
         vec_task: asyncio.Task[list[VecHit]] | None = None
-        if self._embedder is not None and self._embedding_model is not None:
+        if run_fts:
+            fts_task = asyncio.create_task(
+                self._storage.fts_search(_sanitize_fts(q), limit=per_leg_limit, layer=layer)
+            )
+        if run_vec and self._embedder is not None and self._embedding_model is not None:
             vec_task = asyncio.create_task(self._embed_and_search(q, per_leg_limit, layer))
 
-        fts_hits = await fts_task
+        fts_hits: list[FTSHit] = []
+        if fts_task is not None:
+            fts_hits = await fts_task
         vec_hits: list[VecHit] = []
         if vec_task is not None:
             try:
@@ -141,11 +167,37 @@ class HybridSearcher:
 
 
 def _sanitize_fts(q: str) -> str:
-    """FTS5 MATCH syntax treats certain punctuation specially.
+    """Tokenize a natural-language query into a bag-of-words FTS5 expression.
 
-    Quote the whole query as a phrase to avoid raw-user-input syntax errors
-    (e.g. a trailing hyphen). Phase 2's query expansion can build structured
-    MATCH expressions explicitly.
+    The Phase 1 implementation wrapped the whole query in quotes — a
+    phrase query — which never matched on multi-word natural-language
+    inputs and made BM25-only retrieval (and thus the FTS leg of hybrid
+    RRF) return 0 hits in eval.
+
+    Strategy:
+
+    1. Replace anything that isn't a word character, whitespace, or a
+       basic CJK ideograph with whitespace. Word characters (``\\w``)
+       cover ASCII letters, digits, and underscore, so identifiers like
+       ``expect_any`` survive intact; CJK pass-through keeps Chinese
+       (e.g. CMTEB) queries from being stripped to nothing.
+    2. Split on whitespace and drop FTS5 reserved tokens
+       (``AND``/``OR``/``NOT``/``NEAR``) so a user word doesn't accidentally
+       turn into an operator.
+    3. Quote each token (``"<token>"``) — FTS5 phrase quotes around a
+       single term are a no-op semantically but prevent column-qualifier
+       interpretation for tokens that happen to contain a colon.
+    4. Join with ``OR`` for bag-of-words BM25 retrieval — the same
+       semantics published BEIR / CMTEB BM25 baselines use.
+
+    Real CJK tokenization (jieba / character n-grams) is outside the
+    Phase A retrieval-only scope; CJK queries with whitespace separators
+    work, dense Chinese paragraphs as single tokens won't.
     """
-    escaped = q.replace('"', '""').strip()
-    return f'"{escaped}"' if escaped else ""
+    cleaned = re.sub(r"[^\w\s一-鿿]", " ", q)
+    tokens = [
+        t for t in cleaned.split() if t and t.upper() not in _FTS_RESERVED
+    ]
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{t}"' for t in tokens)

@@ -13,6 +13,12 @@ The runner is hermetic by default — ``FakeEmbeddings`` from
 ``dikw_core.eval.fake_embedder`` gives deterministic bag-of-words vectors
 with no network or API-key dependency. Callers who want real-vector eval
 pass their own embedder (e.g., via ``build_embedder(cfg.provider)``).
+
+A single eval can also fan out to all three retrieval modes
+(``mode="all"``) — the corpus is still ingested only once, and each
+query is then run once per mode against the same storage connection.
+This is the workflow used to compare bm25 vs vector vs hybrid against
+public-benchmark baselines (BEIR, CMTEB).
 """
 
 from __future__ import annotations
@@ -21,18 +27,29 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import api
 from ..config import CONFIG_FILENAME, ProviderConfig, dump_config_yaml
-from ..info.search import HybridSearcher
+from ..info.search import HybridSearcher, RetrievalMode
 from ..providers import EmbeddingProvider
 from ..storage import build_storage
 from .dataset import DatasetSpec
 from .fake_embedder import FakeEmbeddings
-from .metrics import mean_hit_at_k, mean_reciprocal_rank
+from .metrics import (
+    mean_hit_at_k,
+    mean_ndcg_at_k,
+    mean_recall_at_k,
+    mean_reciprocal_rank,
+)
+
+# Limit per query — large enough to compute recall@100. The same ranked
+# list feeds hit@k / nDCG@10 (which slice from the top).
+SEARCH_LIMIT = 100
+
+EvalMode = RetrievalMode | Literal["all"]
 
 
 class EvalError(RuntimeError):
@@ -43,7 +60,7 @@ class EvalError(RuntimeError):
 class PerQueryRow:
     q: str
     expect_any: list[str]
-    ranked: list[str]  # doc stems, top 10
+    ranked: list[str]  # doc stems, top SEARCH_LIMIT
 
     def to_dict(self) -> dict[str, Any]:
         return {"q": self.q, "expect_any": self.expect_any, "ranked": self.ranked}
@@ -58,14 +75,28 @@ class NegativeRow:
     """
 
     q: str
-    ranked: list[str]  # doc stems, top 10
+    ranked: list[str]  # doc stems, top SEARCH_LIMIT
 
     def to_dict(self) -> dict[str, Any]:
         return {"q": self.q, "ranked": self.ranked}
 
 
 class EvalReport(BaseModel):
-    """Result of a single ``run_eval`` invocation."""
+    """Result of a single ``run_eval`` invocation.
+
+    In single-mode runs (``mode="hybrid"`` etc.) ``metrics`` keys are
+    unprefixed (``hit_at_3``, …) — same shape as before this commit so
+    existing dataset thresholds continue to bind.
+
+    In ``mode="all"`` runs ``metrics`` carries both:
+
+    * ``f"{mode}/{key}"`` for every (mode, metric) combination — the
+      observational ablation surface.
+    * Unprefixed ``key`` mirroring the **hybrid** mode's value, so a
+      ``hit_at_10: 0.80`` threshold in ``dataset.yaml`` keeps gating on
+      hybrid (the historical default), and existing tooling/CI doesn't
+      break when a dataset is run with ``--retrieval all``.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -74,6 +105,10 @@ class EvalReport(BaseModel):
     thresholds: dict[str, float]
     per_query: list[dict[str, Any]] = Field(default_factory=list)
     negative_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    # Modes actually executed for this run. Single-element list for the
+    # default; three elements for ``mode="all"``. Used by the CLI to pick
+    # between the single-table and ablation-table renderings.
+    modes: list[str] = Field(default_factory=lambda: ["hybrid"])
 
     @property
     def passed(self) -> bool:
@@ -92,17 +127,17 @@ class EvalReport(BaseModel):
         """Plain-text per-query breakdown for test-assertion messages."""
         lines = [
             f"Dataset: {self.dataset_name}",
-            "metric      value    threshold   result",
-            "----------  -------  ----------  ------",
+            "metric         value    threshold   result",
+            "-------------  -------  ----------  ------",
         ]
-        for key in ("hit_at_3", "hit_at_10", "mrr"):
+        for key in ("hit_at_3", "hit_at_10", "mrr", "ndcg_at_10", "recall_at_100"):
             if key not in self.metrics and key not in self.thresholds:
                 continue
             val = self.metrics.get(key, float("nan"))
             thr = self.thresholds.get(key)
             verdict = "—" if thr is None else ("pass" if val >= thr else "FAIL")
             thr_str = f"{thr:.3f}" if thr is not None else "    -"
-            lines.append(f"{key:10s}  {val:6.3f}  {thr_str:9s}  {verdict}")
+            lines.append(f"{key:13s}  {val:6.3f}  {thr_str:9s}  {verdict}")
         lines.append("")
         lines.append("per-query top-5:")
         for row in self.per_query:
@@ -115,11 +150,31 @@ class EvalReport(BaseModel):
         return "\n".join(lines)
 
 
+def _resolve_modes(mode: EvalMode) -> list[RetrievalMode]:
+    if mode == "all":
+        return list(get_args(RetrievalMode))
+    return [mode]
+
+
+def _compute_metrics(positives: list[PerQueryRow]) -> dict[str, float]:
+    if not positives:
+        return {}
+    pairs = [(r.ranked, r.expect_any) for r in positives]
+    return {
+        "hit_at_3": mean_hit_at_k(pairs, 3),
+        "hit_at_10": mean_hit_at_k(pairs, 10),
+        "mrr": mean_reciprocal_rank(pairs),
+        "ndcg_at_10": mean_ndcg_at_k(pairs, 10),
+        "recall_at_100": mean_recall_at_k(pairs, 100),
+    }
+
+
 async def run_eval(
     spec: DatasetSpec,
     *,
     embedder: EmbeddingProvider | None = None,
     provider_config: ProviderConfig | None = None,
+    mode: EvalMode = "hybrid",
 ) -> EvalReport:
     """Run a single dataset end-to-end; return metrics + diagnostics.
 
@@ -138,12 +193,17 @@ async def run_eval(
     ``embedder`` set but ``provider_config`` None (or vice-versa) falls
     back to the default half — useful for tests that want a custom embedder
     on the hermetic config.
+
+    ``mode`` selects which retrieval leg(s) to score: ``"hybrid"``
+    (default, BM25+vec via RRF), ``"bm25"``, ``"vector"``, or ``"all"``
+    (run all three sequentially against the same ingested corpus).
     """
     if not spec.corpus_dir.is_dir():
         raise EvalError(f"corpus directory not found: {spec.corpus_dir}")
 
     effective_embedder: EmbeddingProvider = embedder or FakeEmbeddings()
     effective_provider_cfg = provider_config or ProviderConfig(embedding_model="fake")
+    modes = _resolve_modes(mode)
 
     with tempfile.TemporaryDirectory(prefix="dikw-eval-") as tmp:
         wiki = _materialise_wiki(Path(tmp), spec, provider_cfg=effective_provider_cfg)
@@ -151,31 +211,42 @@ async def run_eval(
 
         await api.ingest(wiki, embedder=effective_embedder)
 
-        positives, negatives = await _run_queries(
+        per_mode = await _run_queries(
             wiki,
             spec,
             embedder=effective_embedder,
             embedding_model=effective_provider_cfg.embedding_model,
+            modes=modes,
         )
 
-    # Metrics are scored only over positive queries. Including negatives
-    # would silently drag hit@k toward 0.0 (retrieval always returns
-    # something from a non-empty corpus) and make the pass/fail gate
-    # dependent on how many negatives happen to live in the dataset.
+    # Metrics scored only over positive queries. Including negatives would
+    # silently drag hit@k toward 0.0 (retrieval always returns something
+    # from a non-empty corpus) and tie pass/fail to negative count.
     metrics: dict[str, float] = {}
-    if positives:
-        hit10_pairs = [(r.ranked, r.expect_any) for r in positives]
-        metrics = {
-            "hit_at_3": mean_hit_at_k(hit10_pairs, 3),
-            "hit_at_10": mean_hit_at_k(hit10_pairs, 10),
-            "mrr": mean_reciprocal_rank(hit10_pairs),
-        }
+    canonical_mode: RetrievalMode = (
+        "hybrid" if "hybrid" in modes else modes[0]
+    )
+    canonical_positives = per_mode[canonical_mode][0]
+    canonical_negatives = per_mode[canonical_mode][1]
+
+    if len(modes) == 1:
+        metrics.update(_compute_metrics(canonical_positives))
+    else:
+        # Multi-mode: prefix every metric, plus mirror the canonical mode
+        # unprefixed so existing dataset thresholds keep gating.
+        for m in modes:
+            positives_m, _ = per_mode[m]
+            for k, v in _compute_metrics(positives_m).items():
+                metrics[f"{m}/{k}"] = v
+        metrics.update(_compute_metrics(canonical_positives))
+
     return EvalReport(
         dataset_name=spec.name,
         metrics=metrics,
         thresholds=dict(spec.thresholds),
-        per_query=[r.to_dict() for r in positives],
-        negative_diagnostics=[r.to_dict() for r in negatives],
+        per_query=[r.to_dict() for r in canonical_positives],
+        negative_diagnostics=[r.to_dict() for r in canonical_negatives],
+        modes=list(modes),
     )
 
 
@@ -221,28 +292,39 @@ async def _run_queries(
     *,
     embedder: EmbeddingProvider,
     embedding_model: str,
-) -> tuple[list[PerQueryRow], list[NegativeRow]]:
+    modes: list[RetrievalMode],
+) -> dict[RetrievalMode, tuple[list[PerQueryRow], list[NegativeRow]]]:
+    """Run every query in ``spec`` once per mode against a single storage
+    connection. Returns a dict keyed by mode.
+    """
     cfg, _root = api.load_wiki(wiki)
     storage = build_storage(cfg.storage, root=wiki)
     await storage.connect()
     await storage.migrate()
     try:
         searcher = HybridSearcher(storage, embedder, embedding_model=embedding_model)
-        positives: list[PerQueryRow] = []
-        negatives: list[NegativeRow] = []
-        for q in spec.queries:
-            hits = await searcher.search(q.q, limit=10)
-            ranked_stems = [
-                Path(h.path).stem if h.path else h.doc_id for h in hits
-            ]
-            if q.expect_none:
-                negatives.append(NegativeRow(q=q.q, ranked=ranked_stems))
-            else:
-                positives.append(
-                    PerQueryRow(
-                        q=q.q, expect_any=list(q.expect_any), ranked=ranked_stems
+        results: dict[
+            RetrievalMode, tuple[list[PerQueryRow], list[NegativeRow]]
+        ] = {}
+        for m in modes:
+            positives: list[PerQueryRow] = []
+            negatives: list[NegativeRow] = []
+            for q in spec.queries:
+                hits = await searcher.search(q.q, limit=SEARCH_LIMIT, mode=m)
+                ranked_stems = [
+                    Path(h.path).stem if h.path else h.doc_id for h in hits
+                ]
+                if q.expect_none:
+                    negatives.append(NegativeRow(q=q.q, ranked=ranked_stems))
+                else:
+                    positives.append(
+                        PerQueryRow(
+                            q=q.q,
+                            expect_any=list(q.expect_any),
+                            ranked=ranked_stems,
+                        )
                     )
-                )
-        return positives, negatives
+            results[m] = (positives, negatives)
+        return results
     finally:
         await storage.close()

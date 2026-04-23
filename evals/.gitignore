@@ -1,0 +1,8 @@
+# Public-benchmark datasets are materialised on demand via
+# evals/tools/convert_*.py — only the dataset.yaml stub is committed.
+# Regeneration command for each dataset is documented in its own
+# dataset.yaml description.
+datasets/scifact/corpus/
+datasets/scifact/queries.yaml
+datasets/cmteb-t2-subset/corpus/
+datasets/cmteb-t2-subset/queries.yaml

@@ -140,6 +140,60 @@ value. This looks redundant but prevents cross-wiring when the two
 legs diverge (the common case — MiniMax LLM + Gitee embeddings, or
 Anthropic LLM + OpenAI embeddings).
 
+## Public-benchmark calibration with Gitee AI
+
+Reproducible workflow for running BEIR / CMTEB benchmarks against
+dikw's hybrid retriever, using Gitee AI for embeddings (its free /
+low-cost tier makes the 5K–60K passage runs financially trivial). The
+benchmark datasets and the converter scripts live under `evals/`; the
+runner is the same `dikw eval` you use on the dogfood mvp set.
+
+Setup once:
+
+```bash
+uv run dikw init scratch-bench-wiki
+cd scratch-bench-wiki
+# Edit dikw.yml's provider block:
+#   embedding: openai_compat
+#   embedding_base_url: https://ai.gitee.com/v1
+#   embedding_model: Qwen3-Embedding-8B
+#   embedding_batch_size: 16          # gotcha #2 — Gitee caps at 25
+#   embedding_dimensions: 1024        # matryoshka truncation; cost/quality balance
+# Then in .env: DIKW_EMBEDDING_API_KEY=<your gitee-ai key>
+uv run --env-file .env dikw check --path . --embed-only
+```
+
+Materialise SciFact (BEIR English, 5K passages, ~1 minute on Gitee AI):
+
+```bash
+curl -L https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip \
+    -o /tmp/scifact.zip
+unzip /tmp/scifact.zip -d /tmp/scifact-src/
+uv run python evals/tools/convert_beir.py \
+    --source /tmp/scifact-src/scifact/ \
+    --out evals/datasets/scifact/ \
+    --baseline-bm25-ndcg10 0.665    # BEIR paper, Thakur et al. 2021
+```
+
+Run the full ablation:
+
+```bash
+uv run --env-file scratch-bench-wiki/.env \
+    dikw eval --dataset scifact --embedder provider \
+    --path ./scratch-bench-wiki --retrieval all
+```
+
+Output is a 3-row × 5-metric table (bm25 / vector / hybrid × hit@3 /
+hit@10 / mrr / nDCG@10 / recall@100). Compare the `bm25` row's
+nDCG@10 to the published 0.665 baseline (treat ±0.10 as in-band —
+FTS5 is not Anserini), and check whether `hybrid` actually beats both
+single legs (it should, by a small margin).
+
+For a Chinese benchmark, repeat with `convert_cmteb.py` against a
+HuggingFace download — same workflow, see
+[`evals/README.md`](../evals/README.md#public-benchmarks) for the
+full command.
+
 ## Pre-flight checklist for a new vendor
 
 Before running `dikw ingest` against a real corpus with a new vendor

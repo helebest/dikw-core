@@ -1,0 +1,7 @@
+query-id	corpus-id	score
+q-1	doc-1	1
+q-2	doc-2	1
+q-3	doc.4	1
+q-3	doc-5	0
+q-orphan	doc-1	0
+q-1	doc-missing-from-corpus	1

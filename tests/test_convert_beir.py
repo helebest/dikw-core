@@ -145,13 +145,33 @@ def test_converter_refuses_to_overwrite_unparseable_yaml(tmp_path: Path) -> None
         "name: ok\nbad: [unclosed\n",
         encoding="utf-8",
     )
-    with pytest.raises(ConverterError, match="not parseable as YAML"):
+    with pytest.raises(ConverterError, match="not readable as UTF-8 YAML"):
         convert(
             FIXTURE,
             out,
             qrels_split="test",
             name="beir-tiny",
             description="malformed probe",
+            published_baselines=None,
+        )
+
+
+def test_converter_refuses_to_overwrite_non_utf8_yaml(tmp_path: Path) -> None:
+    """A dataset.yaml containing non-UTF-8 bytes (saved in a local
+    code page or merge-junk) raises before yaml.safe_load runs — the
+    decode itself fails. Must surface as ConverterError, not a raw
+    UnicodeDecodeError traceback."""
+    out = tmp_path / "tiny"
+    out.mkdir()
+    # GBK-encoded "中文 description" (typical CN code page) — not valid UTF-8.
+    (out / "dataset.yaml").write_bytes(b"description: \xd6\xd0\xce\xc4\n")
+    with pytest.raises(ConverterError, match="not readable as UTF-8 YAML"):
+        convert(
+            FIXTURE,
+            out,
+            qrels_split="test",
+            name="beir-tiny",
+            description="non-utf8 probe",
             published_baselines=None,
         )
 

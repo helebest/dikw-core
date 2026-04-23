@@ -64,12 +64,22 @@ async def test_run_eval_returns_report_with_metrics_and_passed_flag(
     report = await run_eval(spec)
 
     assert isinstance(report, EvalReport)
-    assert set(report.metrics.keys()) == {"hit_at_3", "hit_at_10", "mrr"}
+    assert set(report.metrics.keys()) == {
+        "hit_at_3",
+        "hit_at_10",
+        "mrr",
+        "ndcg_at_10",
+        "recall_at_100",
+    }
     assert all(0.0 <= v <= 1.0 for v in report.metrics.values())
     # FakeEmbeddings' bag-of-words on a 2-doc corpus with keyword-rich
     # queries should land cleanly in top-3.
     assert report.metrics["hit_at_3"] == 1.0
     assert report.metrics["mrr"] == 1.0
+    assert report.metrics["ndcg_at_10"] == 1.0
+    assert report.metrics["recall_at_100"] == 1.0
+    # Single-mode default → modes carries the one mode that ran.
+    assert report.modes == ["hybrid"]
     assert report.thresholds == spec.thresholds
     assert report.passed is True
     # Per-query diagnostic data preserved for the CLI's failure table.
@@ -150,6 +160,37 @@ async def test_run_eval_synthetic_spec_direct(tmp_path: Path) -> None:
     )
     report = await run_eval(spec)
     assert report.metrics["hit_at_3"] == 1.0
+    assert report.passed
+
+
+@pytest.mark.asyncio
+async def test_run_eval_mode_all_emits_per_mode_and_canonical_metrics(
+    tmp_path: Path,
+) -> None:
+    """``mode='all'`` runs each retrieval leg, emits prefixed metrics for
+    every (mode, key) pair, and mirrors the hybrid mode unprefixed so
+    existing dataset thresholds keep gating.
+    """
+    ds = _write_dataset(
+        tmp_path,
+        queries=[
+            ("foo and bar topics", ["alpha"]),
+            ("baz and qux", ["beta"]),
+        ],
+    )
+    spec = load_dataset(ds)
+    report = await run_eval(spec, mode="all")
+
+    assert sorted(report.modes) == ["bm25", "hybrid", "vector"]
+    base_keys = {"hit_at_3", "hit_at_10", "mrr", "ndcg_at_10", "recall_at_100"}
+    for m in ("bm25", "vector", "hybrid"):
+        for k in base_keys:
+            assert f"{m}/{k}" in report.metrics, f"missing {m}/{k}"
+    # Unprefixed mirror equals the hybrid mode (canonical) — gating
+    # against existing thresholds keeps working under --retrieval all.
+    for k in base_keys:
+        assert report.metrics[k] == report.metrics[f"hybrid/{k}"]
+    # Sanity: this hermetic 2-doc corpus passes its 0.5 thresholds on hybrid.
     assert report.passed
 
 

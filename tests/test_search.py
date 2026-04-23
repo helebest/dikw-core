@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dikw_core.info.search import HybridSearcher, reciprocal_rank_fusion
+from dikw_core.info.search import HybridSearcher, _sanitize_fts, reciprocal_rank_fusion
 from dikw_core.storage.sqlite import SQLiteStorage
 
 from .fakes import FakeEmbeddings
@@ -20,6 +20,52 @@ def test_rrf_favors_consensus() -> None:
 def test_rrf_handles_disjoint_lists() -> None:
     fused = reciprocal_rank_fusion([["a", "b"], ["c", "d"]])
     assert set(fused) == {"a", "b", "c", "d"}
+
+
+# ---- _sanitize_fts ----------------------------------------------------------
+
+
+def test_sanitize_fts_or_joins_word_tokens() -> None:
+    # Natural-language query → bag-of-words OR. The Phase 1 phrase-quote
+    # implementation returned `"foo bar baz"` and matched ~nothing in real
+    # corpora; this is the regression guard.
+    assert _sanitize_fts("foo bar baz") == '"foo" OR "bar" OR "baz"'
+
+
+def test_sanitize_fts_strips_punctuation() -> None:
+    # Hyphens, question marks, parentheses → whitespace; tokens preserved.
+    assert _sanitize_fts("DIKW-core (what is it?)") == (
+        '"DIKW" OR "core" OR "what" OR "is" OR "it"'
+    )
+
+
+def test_sanitize_fts_drops_fts5_reserved_tokens() -> None:
+    # AND / OR / NOT / NEAR are FTS5 operators — silently dropping them
+    # avoids syntax errors when a user query happens to contain them.
+    assert _sanitize_fts("cats AND dogs OR birds") == '"cats" OR "dogs" OR "birds"'
+    assert _sanitize_fts("just NOT a phrase") == '"just" OR "a" OR "phrase"'
+
+
+def test_sanitize_fts_preserves_underscores() -> None:
+    # Identifier-like tokens (e.g., "expect_any") survive intact because
+    # \w matches underscore.
+    assert _sanitize_fts("test expect_any field") == (
+        '"test" OR "expect_any" OR "field"'
+    )
+
+
+def test_sanitize_fts_preserves_cjk() -> None:
+    # CJK Unified Ideographs survive the punctuation strip. Whitespace-
+    # separated CJK tokens are still tokenized at whitespace; running text
+    # without spaces becomes a single token (a known FTS5 limitation, not
+    # something this sanitizer can fix without a real CJK tokenizer).
+    assert _sanitize_fts("机器 学习 入门") == '"机器" OR "学习" OR "入门"'
+
+
+def test_sanitize_fts_empty_or_punctuation_only_returns_empty() -> None:
+    assert _sanitize_fts("") == ""
+    assert _sanitize_fts("   ") == ""
+    assert _sanitize_fts("???") == ""
 
 
 @pytest.mark.asyncio

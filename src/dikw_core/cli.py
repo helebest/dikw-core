@@ -426,12 +426,30 @@ def eval_cmd(
             help="A path inside a wiki; required when --embedder provider.",
         ),
     ] = Path("."),
+    retrieval: Annotated[
+        str,
+        typer.Option(
+            "--retrieval",
+            help=(
+                "Retrieval mode to score: 'hybrid' (default), 'bm25', "
+                "'vector', or 'all' (run all three for ablation)."
+            ),
+        ),
+    ] = "hybrid",
 ) -> None:
     """Run retrieval-quality evaluation against one or every packaged dataset."""
     # Lazy imports: keep top-of-module `from . import api` light for the
     # non-eval commands and avoid circular imports with dikw_core.eval.
     from .eval.dataset import DatasetError
     from .eval.runner import run_eval
+
+    valid_modes = {"bm25", "vector", "hybrid", "all"}
+    if retrieval not in valid_modes:
+        console.print(
+            f"[red]error:[/red] --retrieval must be one of {sorted(valid_modes)}, "
+            f"got {retrieval!r}"
+        )
+        raise typer.Exit(code=2)
 
     # Resolve which datasets to run.
     try:
@@ -476,7 +494,12 @@ def eval_cmd(
     for spec in specs:
         try:
             report = asyncio.run(
-                run_eval(spec, embedder=embedder, provider_config=provider_cfg)
+                run_eval(
+                    spec,
+                    embedder=embedder,
+                    provider_config=provider_cfg,
+                    mode=retrieval,  # type: ignore[arg-type]
+                )
             )
         except Exception as e:  # runner-level error — report, fail this dataset
             console.print(f"[red]error in {spec.name}:[/red] {e}")
@@ -514,15 +537,44 @@ def _collect_eval_specs(dataset: str | None) -> list[Any]:
     return specs
 
 
+_METRIC_KEYS = ("hit_at_3", "hit_at_10", "mrr", "ndcg_at_10", "recall_at_100")
+
+
 def _print_eval_report(report: Any) -> None:
-    """Render an ``EvalReport`` as a rich table with per-metric verdict."""
+    """Render an ``EvalReport`` as a rich table with per-metric verdict.
+
+    Two layouts depending on how many retrieval modes were exercised:
+    - 1 mode (the default): a single metric table with threshold gating.
+    - 3 modes ("all"): an ablation table with one row per mode and one
+      column per metric. Threshold gating still applies to the canonical
+      (hybrid) mode via the unprefixed metric mirror.
+    """
     title = f"dikw eval — {report.dataset_name}"
+    modes = list(getattr(report, "modes", []) or ["hybrid"])
+
+    if len(modes) > 1:
+        ablation = Table(
+            title=f"{title}  (retrieval ablation: {' / '.join(modes)})",
+            show_header=True,
+            header_style="bold",
+        )
+        ablation.add_column("mode")
+        for k in _METRIC_KEYS:
+            ablation.add_column(k, justify="right")
+        for m in modes:
+            cells: list[str] = [m]
+            for k in _METRIC_KEYS:
+                v = report.metrics.get(f"{m}/{k}")
+                cells.append(f"{v:.3f}" if v is not None else "-")
+            ablation.add_row(*cells)
+        console.print(ablation)
+
     table = Table(title=title, show_header=True, header_style="bold")
     table.add_column("metric")
     table.add_column("value", justify="right")
     table.add_column("threshold", justify="right")
     table.add_column("result")
-    for key in ("hit_at_3", "hit_at_10", "mrr"):
+    for key in _METRIC_KEYS:
         if key not in report.metrics and key not in report.thresholds:
             continue
         val = report.metrics.get(key)

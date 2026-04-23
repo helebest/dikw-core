@@ -92,13 +92,76 @@ Three steps:
    values so corpus tweaks don't flake the gate while a real regression
    still fails it.
 
-## Public benchmarks (future)
+## Public benchmarks
 
-Not yet wired up; BEIR / MS-MARCO / TriviaQA come in their own formats
-(JSONL + qrels). The plan is a one-shot converter (e.g.,
-`tools/convert_beir.py`) that reads the public bundle and emits our
-three-file shape into `evals/datasets/<name>/`. Once the directory
-exists, `dikw eval` finds it automatically — no runtime format plugin.
+Two converters under [`tools/`](./tools/) materialise public bundles
+into the three-file shape above. Once the directory exists,
+`dikw eval` picks it up automatically — there is no runtime format
+plugin.
+
+### BEIR (English) — e.g., SciFact
+
+Bundle source: <https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/>
+
+```bash
+curl -L https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip \
+    -o /tmp/scifact.zip
+unzip /tmp/scifact.zip -d /tmp/scifact-src/
+uv run python evals/tools/convert_beir.py \
+    --source /tmp/scifact-src/scifact/ \
+    --out evals/datasets/scifact/ \
+    --baseline-bm25-ndcg10 0.665   # BEIR paper baseline; printed in dataset.yaml
+```
+
+The committed `evals/datasets/scifact/dataset.yaml` carries the
+`published_baselines` block and the regen command; `corpus/` and
+`queries.yaml` are gitignored — re-run the converter locally.
+
+### CMTEB (Chinese) — e.g., T2Retrieval subset
+
+CMTEB corpora are huge (T2Retrieval ~2.3M passages); the converter
+adds **stratified sampling** that always preserves every passage
+referenced by a positive qrel:
+
+```bash
+huggingface-cli download C-MTEB/T2Retrieval --repo-type dataset \
+    --local-dir /tmp/t2-src/
+# Convert any parquet shards to BEIR-shape JSONL first if needed
+# (one-liner with pandas.to_json).
+uv run python evals/tools/convert_cmteb.py \
+    --source /tmp/t2-src/ \
+    --out evals/datasets/cmteb-t2-subset/ \
+    --sample-size 5000 \
+    --random-seed 42
+```
+
+The seed and source totals land in the generated `dataset.yaml`'s
+`_sampling` block so re-runs against the same source bundle reproduce
+the same sample.
+
+### Running with real embeddings + ablation
+
+After conversion, run all three retrieval modes for an apples-to-apples
+comparison against published BM25 baselines:
+
+```bash
+uv run --env-file scratch-bench-wiki/.env \
+    dikw eval --dataset scifact --embedder provider \
+    --path ./scratch-bench-wiki --retrieval all
+```
+
+See [`docs/providers.md`](../docs/providers.md#public-benchmark-calibration-with-gitee-ai)
+for the donor-wiki setup against Gitee AI (the cheapest currently-tested
+embedder for benchmark-scale work).
+
+### Comparability caveats
+
+These numbers are **calibration**, not exact reproduction. See
+[`docs/eval-plan.md`](../docs/eval-plan.md#公开-benchmark-校准) for
+the full list (chunking at 900 tokens, FTS5 vs Anserini BM25, RRF
+k=60 untuned, embedding dimension choice). The useful signal is the
+*trend* — does dikw's bm25 land near published BM25, does hybrid
+actually win — not the third decimal place.
 
 ## See also
 

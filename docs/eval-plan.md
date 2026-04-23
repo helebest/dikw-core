@@ -93,3 +93,49 @@ Adopt an LLM-as-judge framework (default: RAGAS) when **any** of:
 
 Until then: grow the Q/A set, keep Phase A green, don't spin up a
 judge harness.
+
+## 公开 benchmark 校准
+
+Phase A also covers comparing dikw's retriever against published BEIR
+/ CMTEB baselines via [`evals/tools/convert_{beir,cmteb}.py`](../evals/README.md#public-benchmarks)
++ `dikw eval --retrieval {bm25,vector,hybrid,all}`. The framing is
+**calibration, not reproduction** — five things make exact-number
+parity impossible (and not actually useful):
+
+1. **Chunking at 900 tokens.** dikw runs every ingested doc through
+   `info/chunk.py` before embedding / indexing. Most BEIR passages
+   are 100–500 tokens (no fragmentation), but longer CMTEB passages
+   split into multiple chunks; the doc-level hit@k still works
+   correctly (chunks of the same doc share a stem) but the underlying
+   index shape diverges from "passage retrieval as published".
+2. **FTS5 ≠ Anserini BM25.** Our `bm25` mode goes through SQLite's
+   FTS5 `bm25()` — same family of formulas, different IDF / length-norm
+   constants and tokenizer. Treat ±0.10 nDCG@10 vs the published
+   number as in-band; larger gaps suggest a real bug, not algorithm
+   choice.
+3. **RRF k=60, never tuned.** `info/search.py:RRF_K` is the value
+   from the original RRF paper. Different k or different fusion (CombSUM,
+   weighted) could move hybrid up or down by a few points.
+4. **Embedding dim choice.** The benchmark stubs default to
+   Qwen3-Embedding-8B at 1024-dim (matryoshka truncation) for cost.
+   The 4096-dim native vectors would shift dense + hybrid numbers; pin
+   the dim in `dataset.yaml`'s comments so re-runs reproduce.
+5. **CMTEB sample sizing.** The Chinese benchmarks ship at 1M+
+   passages; we sample down to ~5K. Fewer distractors → higher
+   absolute metrics than the published full-corpus numbers. The
+   sampling preserves all relevant docs (recall is honest), but
+   precision-style metrics like hit@k will read higher than they
+   would at full scale.
+
+The useful signal across all five caveats is the **trend**:
+
+* Does `bm25` land near published BM25 (within ±0.10)?
+* Does `hybrid` beat both `bm25` and `vector` on the same chunking,
+  on the same dataset?
+* Does the same embedder do equally well on English (BEIR) and
+  Chinese (CMTEB)?
+
+If the answer to any of those is "no", the gap is informative — go
+look at the FTS leg, the RRF weighting, or the embedder. If the
+absolute number doesn't match the BEIR paper, that is *expected* and
+not by itself a bug.

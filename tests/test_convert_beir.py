@@ -114,3 +114,102 @@ def test_converter_writes_published_baselines_block(tmp_path: Path) -> None:
     )
     payload = yaml.safe_load((out / "dataset.yaml").read_text(encoding="utf-8"))
     assert payload["published_baselines"]["bm25_anserini"]["ndcg_at_10"] == 0.665
+
+
+def test_converter_refuses_to_overwrite_non_mapping_yaml(tmp_path: Path) -> None:
+    """A corrupted dataset.yaml (list, scalar, etc.) must not be
+    silently overwritten — surface it as ConverterError so the user
+    can investigate before losing data."""
+    out = tmp_path / "tiny"
+    out.mkdir()
+    (out / "dataset.yaml").write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+    with pytest.raises(ConverterError, match="not a YAML mapping"):
+        convert(
+            FIXTURE,
+            out,
+            qrels_split="test",
+            name="beir-tiny",
+            description="overwrite probe",
+            published_baselines=None,
+        )
+
+
+def test_converter_refuses_to_overwrite_unparseable_yaml(tmp_path: Path) -> None:
+    """Syntactically broken YAML (mid-edit, garbled bytes) raises a
+    ConverterError instead of leaking the raw yaml.YAMLError to the
+    CLI, which would surface as a stack trace rather than the
+    documented refusal."""
+    out = tmp_path / "tiny"
+    out.mkdir()
+    (out / "dataset.yaml").write_text(
+        "name: ok\nbad: [unclosed\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConverterError, match="cannot read existing file"):
+        convert(
+            FIXTURE,
+            out,
+            qrels_split="test",
+            name="beir-tiny",
+            description="malformed probe",
+            published_baselines=None,
+        )
+
+
+def test_converter_refuses_to_overwrite_non_utf8_yaml(tmp_path: Path) -> None:
+    """A dataset.yaml containing non-UTF-8 bytes (saved in a local
+    code page or merge-junk) raises before yaml.safe_load runs — the
+    decode itself fails. Must surface as ConverterError, not a raw
+    UnicodeDecodeError traceback."""
+    out = tmp_path / "tiny"
+    out.mkdir()
+    # GBK-encoded "中文 description" (typical CN code page) — not valid UTF-8.
+    (out / "dataset.yaml").write_bytes(b"description: \xd6\xd0\xce\xc4\n")
+    with pytest.raises(ConverterError, match="cannot read existing file"):
+        convert(
+            FIXTURE,
+            out,
+            qrels_split="test",
+            name="beir-tiny",
+            description="non-utf8 probe",
+            published_baselines=None,
+        )
+
+
+def test_converter_preserves_existing_curated_keys(tmp_path: Path) -> None:
+    """Re-conversion preserves description, thresholds, and
+    published_baselines if dataset.yaml is already populated."""
+    import yaml
+
+    out = tmp_path / "tiny"
+    out.mkdir()
+    curated_description = "SciFact stub — regenerate via convert_beir.py."
+    curated_thresholds = {"hit_at_3": 0.72, "ndcg_at_10": 0.70}
+    curated_baselines = {"bm25_anserini": {"ndcg_at_10": 0.665}}
+    (out / "dataset.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "beir-tiny",
+                "description": curated_description,
+                "thresholds": curated_thresholds,
+                "published_baselines": curated_baselines,
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    convert(
+        FIXTURE,
+        out,
+        qrels_split="test",
+        name="beir-tiny",
+        description="converter-supplied description THAT SHOULD LOSE",
+        published_baselines={"bm25_anserini": {"ndcg_at_10": 0.999}},
+    )
+
+    payload = yaml.safe_load((out / "dataset.yaml").read_text(encoding="utf-8"))
+    assert payload["description"] == curated_description
+    assert payload["thresholds"] == curated_thresholds
+    assert payload["published_baselines"] == curated_baselines

@@ -112,3 +112,54 @@ def test_convert_records_sampling_block_in_dataset_yaml(tmp_path: Path) -> None:
     assert sampling["sample_size"] == 4
     assert sampling["random_seed"] == 7
     assert sampling["source_corpus_total"] == 5
+
+
+def test_convert_preserves_existing_description_and_thresholds(tmp_path: Path) -> None:
+    """Re-conversion preserves curated description + thresholds; only
+    the converter-owned ``_sampling`` block refreshes."""
+    import yaml
+
+    out = tmp_path / "tiny"
+    out.mkdir()
+    curated_description = "Hand-curated 中文 description with regen instructions."
+    curated_thresholds = {"hit_at_3": 0.45, "ndcg_at_10": 0.5}
+    (out / "dataset.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "tiny-cmteb",
+                "description": curated_description,
+                "thresholds": curated_thresholds,
+                "_sampling": {
+                    "sample_size": 999,
+                    "random_seed": 999,
+                    "source_corpus_total": 999,
+                },
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    convert(
+        FIXTURE,
+        out,
+        qrels_split="test",
+        name="tiny-cmteb",
+        description="converter-supplied description THAT SHOULD LOSE",
+        sample_size=4,
+        random_seed=7,
+        published_baselines=None,
+    )
+
+    payload = yaml.safe_load((out / "dataset.yaml").read_text(encoding="utf-8"))
+    assert payload["description"] == curated_description, (
+        "curated description was clobbered by the converter"
+    )
+    assert payload["thresholds"] == curated_thresholds, (
+        "calibrated thresholds were clobbered by the converter"
+    )
+    # _sampling is converter-owned: always refreshed with the current run.
+    assert payload["_sampling"]["sample_size"] == 4
+    assert payload["_sampling"]["random_seed"] == 7
+    assert payload["_sampling"]["source_corpus_total"] == 5

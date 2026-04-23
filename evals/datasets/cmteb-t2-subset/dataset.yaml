@@ -1,37 +1,87 @@
 name: cmteb-t2-subset
 description: >
-  C-MTEB / T2Retrieval (sampled) — Chinese passage retrieval over a
-  question-answering corpus. The full T2Retrieval ships ~2.3M passages,
-  far too large to embed on a paid Chinese provider for calibration; this
-  stub samples down to 5,000 passages while preserving every passage
-  referenced by a positive qrel, so the relevant set is intact and only
-  the distractor density changes.
+  C-MTEB / T2Retrieval — Chinese passage retrieval over a question-
+  answering corpus. 118,605 passages, 22,812 queries, ~5.2 positive
+  qrels per query. Unlike BEIR/SciFact, **every corpus passage is a
+  positive qrel for at least one query** — there are no distractor
+  documents in the upstream corpus. Naive corpus-level stratified
+  sampling therefore degenerates (it preserves the relevant set, which
+  equals the whole corpus). This subset is produced by query-first
+  sampling + synthetic distractor padding.
 
-  Generated via:
-    huggingface-cli download C-MTEB/T2Retrieval --repo-type dataset \
+  Sampling procedure (matches SciFact's 300-query slice for apples-to-
+  apples comparison on fusion-weight generalisation):
+
+  1. Deterministically sample 300 queries (seed=42) from the dev split.
+     T2Retrieval only ships dev qrels — no test split exists.
+  2. Collect the union of those 300 queries' positive pids (~1,582
+     unique docs at seed=42).
+  3. Pad with ~3,418 non-relevant pids (sampled uniformly with the
+     same RNG) to reach exactly 5,000 corpus docs. These "distractors"
+     are relevant to OTHER queries in the full dataset but are
+     distractors from the perspective of the sampled 300 queries.
+  4. Filter qrels to rows where both qid ∈ sampled-queries and
+     pid ∈ sampled-corpus.
+
+  Regeneration:
+    # 1. Download both sub-repos (corpus+queries + qrels):
+    hf download C-MTEB/T2Retrieval --repo-type dataset \
         --local-dir /tmp/t2-src/
-    # If the bundle ships parquet, convert to JSONL first (one-liner with
-    # pandas.to_json or pyarrow). Final layout must match BEIR shape:
-    #   /tmp/t2-src/{corpus.jsonl,queries.jsonl,qrels/test.tsv}
+    hf download C-MTEB/T2Retrieval-qrels --repo-type dataset \
+        --local-dir /tmp/t2-qrels/
+    # 2. Parquet → query-first-sampled BEIR bundle:
+    uv run python evals/tools/prep_cmteb_t2.py \
+        --src-dir /tmp/t2-src/ \
+        --qrels-dir /tmp/t2-qrels/ \
+        --out /tmp/t2-src-sampled/ \
+        --num-queries 300 --seed 42 \
+        --target-size 5000 --split dev
+    # 3. Run the generic converter (sample-size 10000 keeps all 5K):
     uv run python evals/tools/convert_cmteb.py \
-        --source /tmp/t2-src/ \
+        --source /tmp/t2-src-sampled/ \
         --out evals/datasets/cmteb-t2-subset/ \
-        --sample-size 5000 \
-        --random-seed 42
+        --sample-size 10000 --random-seed 42 --qrels-split dev
 
-  ``corpus/`` and ``queries.yaml`` are gitignored — re-run the command
-  above to materialise. The ``_sampling`` block in dataset.yaml after
-  generation pins the seed and source totals for reproducibility.
+  ``corpus/`` and ``queries.yaml`` are gitignored — re-run the pipeline
+  above to materialise. The ``_preprocessing`` block pins the query-
+  sampling parameters; the ``_sampling`` block pins the (pass-through)
+  converter invariants.
 
-  Thresholds: left empty until the first real-vector run lands. With
-  5K passages instead of 2.3M, expect higher hit@k than published
-  benchmarks would show (fewer distractors). Treat as a calibration
-  floor, not a direct comparison.
+  Thresholds: left empty until the first real-vector run lands. This
+  subset has denser distractor coverage than the full CMTEB test bed
+  (5K vs 118K), so expect higher hit@k than published CMTEB leaderboard
+  runs; treat as a calibration floor, not a direct comparison.
 
   Published baselines: C-MTEB / T2Retrieval leaderboard numbers vary
   by model and shift over time, so this dataset intentionally omits a
   ``published_baselines`` block. Compare observed dikw runs against
   the latest leaderboard entries at
-  https://huggingface.co/spaces/mteb/leaderboard manually.
+  https://huggingface.co/spaces/mteb/leaderboard manually — and
+  remember this is a 300-query subset, not the full benchmark.
 
 thresholds: {}
+_sampling:
+  sample_size: 10000
+  random_seed: 42
+  source_qrels_split: dev
+  source_corpus_total: 5000
+  relevant_kept: 1582
+_preprocessing:
+  source_repos:
+    - C-MTEB/T2Retrieval
+    - C-MTEB/T2Retrieval-qrels
+  source_corpus_total: 118605
+  source_queries_total: 22812
+  source_qrels_split: dev
+  query_sample_size: 300
+  query_random_seed: 42
+  relevant_pids_unique: 1582
+  distractor_pids_added: 3418
+  target_corpus_size: 5000
+  note: >
+    Every T2Retrieval corpus doc is a positive for ≥1 query, so
+    corpus-level stratified sampling is a no-op. Query-first sampling
+    + synthetic distractor padding replaces the usual flow documented
+    in evals/README.md. Relevant set is drawn from the 300 sampled
+    queries' qrels; distractors are corpus docs not referenced by any
+    of the sampled 300 (but may be relevant to OTHER queries).

@@ -23,13 +23,15 @@ description: >
   above to materialise. The ``_sampling`` block in dataset.yaml after
   generation pins the seed and source totals for reproducibility.
 
-# Thresholds left empty until the first real-vector run lands. With
-# 5K passages instead of 2.3M, expect higher hit@k than published
-# benchmarks would show (fewer distractors). Treat as a calibration
-# floor, not a comparison.
-thresholds: {}
+  Thresholds: left empty until the first real-vector run lands. With
+  5K passages instead of 2.3M, expect higher hit@k than published
+  benchmarks would show (fewer distractors). Treat as a calibration
+  floor, not a direct comparison.
 
-# C-MTEB / T2Retrieval published baselines vary by model and shift over
-# time on the leaderboard; we don't pin a number here. Compare the
-# observed dikw run against the latest leaderboard entries at
-# https://huggingface.co/spaces/mteb/leaderboard manually.
+  Published baselines: C-MTEB / T2Retrieval leaderboard numbers vary
+  by model and shift over time, so this dataset intentionally omits a
+  ``published_baselines`` block. Compare observed dikw runs against
+  the latest leaderboard entries at
+  https://huggingface.co/spaces/mteb/leaderboard manually.
+
+thresholds: {}

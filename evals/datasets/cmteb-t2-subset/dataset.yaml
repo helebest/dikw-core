@@ -59,7 +59,19 @@ description: >
   https://huggingface.co/spaces/mteb/leaderboard manually — and
   remember this is a 300-query subset, not the full benchmark.
 
-thresholds: {}
+# Calibrated 2026-04-24 against the first real-vector run (hybrid mode,
+# Qwen3-Embedding-8B @ 4096-dim via Gitee AI). Hybrid happens to equal
+# vector-only here because BM25 on CJK is currently broken (FTS5
+# `unicode61` tokenizer does not segment Chinese — see BASELINES.md
+# 2026-04-24 known issue #1); these thresholds therefore guard the
+# vector leg specifically until the BM25 fix lands and they get
+# re-calibrated on a real hybrid run.
+thresholds:
+  hit_at_3: 0.94
+  hit_at_10: 0.96
+  mrr: 0.93
+  ndcg_at_10: 0.92
+  recall_at_100: 0.96
 _sampling:
   sample_size: 10000
   random_seed: 42

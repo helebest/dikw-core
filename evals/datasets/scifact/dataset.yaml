@@ -15,18 +15,32 @@ description: >
   above to materialise them locally. Published baselines below come from
   the BEIR paper (Thakur et al., 2021, Table 6).
 
-# Thresholds left empty until the first real-vector run lands. The
-# user is expected to set them ~1-2 queries below observed values per
-# the calibration guidance in evals/README.md.
-thresholds: {}
+  Note: the converter currently rewrites this file on every run, which
+  strips the curated description. See ``evals/BASELINES.md`` for the
+  observed numbers and follow-ups.
+
+# Calibrated from the first real-embedder run on 2026-04-23 (Qwen3-
+# Embedding-8B @ 4096-dim via Gitee AI, commit 62b596f). Thresholds
+# leave ~2-3% slack below observed so an honest retrieval regression
+# fails the gate while a small re-run variance does not. These bind
+# when running with ``--retrieval hybrid`` (canonical) or ``--retrieval
+# all`` (mirrored from hybrid).
+thresholds:
+  hit_at_3: 0.73
+  hit_at_10: 0.85
+  mrr: 0.68
+  ndcg_at_10: 0.70
+  recall_at_100: 0.94
 
 published_baselines:
   source: "BEIR paper (Thakur et al., 2021)"
   bm25_anserini:
     ndcg_at_10: 0.665
   notes: >
-    Dense retrieval baselines on BEIR/SciFact span roughly nDCG@10 0.55–0.75
-    depending on model. Reproduction of the exact BM25 number is not
-    expected — FTS5 is not Anserini and dikw chunks at 900 tokens —
-    treat ±0.10 nDCG@10 as in-band; the useful signal is whether
-    ``hybrid`` beats ``bm25`` on the same chunking.
+    Our bm25 mode reproduced Anserini's nDCG@10 within 0.004 on the
+    2026-04-23 run (0.669 observed vs 0.665 published) — FTS5 is
+    effectively on-par with Anserini for this dataset once the
+    OR-of-tokens sanitizer is applied. Dense retrieval baselines on
+    BEIR/SciFact span roughly nDCG@10 0.55-0.75 in the original paper;
+    modern strong embedders (Qwen3, BGE-M3, E5-mistral) land above 0.75.
+    See evals/BASELINES.md for the full run report.

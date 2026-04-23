@@ -115,11 +115,8 @@ def test_convert_records_sampling_block_in_dataset_yaml(tmp_path: Path) -> None:
 
 
 def test_convert_preserves_existing_description_and_thresholds(tmp_path: Path) -> None:
-    """Re-running the converter against an already-populated dataset.yaml
-    must keep curated keys (description, calibrated thresholds) while
-    refreshing only the converter-owned ``_sampling`` block. Without this
-    guarantee, shipping a stub + re-running the regeneration command wipes
-    the stub's intent every time."""
+    """Re-conversion preserves curated description + thresholds; only
+    the converter-owned ``_sampling`` block refreshes."""
     import yaml
 
     out = tmp_path / "tiny"

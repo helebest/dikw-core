@@ -59,13 +59,8 @@ description: >
   https://huggingface.co/spaces/mteb/leaderboard manually — and
   remember this is a 300-query subset, not the full benchmark.
 
-# Calibrated 2026-04-24 against the first real-vector run (hybrid mode,
-# Qwen3-Embedding-8B @ 4096-dim via Gitee AI). Hybrid happens to equal
-# vector-only here because BM25 on CJK is currently broken (FTS5
-# `unicode61` tokenizer does not segment Chinese — see BASELINES.md
-# 2026-04-24 known issue #1); these thresholds therefore guard the
-# vector leg specifically until the BM25 fix lands and they get
-# re-calibrated on a real hybrid run.
+# Calibrated 2026-04-24; effectively guards the vector leg because BM25
+# on CJK is currently broken (see BASELINES.md 2026-04-24 known issue #1).
 thresholds:
   hit_at_3: 0.94
   hit_at_10: 0.96
@@ -82,18 +77,11 @@ _preprocessing:
   source_repos:
     - C-MTEB/T2Retrieval
     - C-MTEB/T2Retrieval-qrels
-  source_corpus_total: 118605
-  source_queries_total: 22812
-  source_qrels_split: dev
+  upstream_corpus_total: 118605
+  upstream_queries_total: 22812
+  upstream_qrels_split: dev
   query_sample_size: 300
   query_random_seed: 42
   relevant_pids_unique: 1582
   distractor_pids_added: 3418
   target_corpus_size: 5000
-  note: >
-    Every T2Retrieval corpus doc is a positive for ≥1 query, so
-    corpus-level stratified sampling is a no-op. Query-first sampling
-    + synthetic distractor padding replaces the usual flow documented
-    in evals/README.md. Relevant set is drawn from the 300 sampled
-    queries' qrels; distractors are corpus docs not referenced by any
-    of the sampled 300 (but may be relevant to OTHER queries).

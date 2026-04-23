@@ -116,11 +116,27 @@ def test_converter_writes_published_baselines_block(tmp_path: Path) -> None:
     assert payload["published_baselines"]["bm25_anserini"]["ndcg_at_10"] == 0.665
 
 
+def test_converter_refuses_to_overwrite_non_mapping_yaml(tmp_path: Path) -> None:
+    """A corrupted dataset.yaml (list, scalar, etc.) must not be
+    silently overwritten — surface it as ConverterError so the user
+    can investigate before losing data."""
+    out = tmp_path / "tiny"
+    out.mkdir()
+    (out / "dataset.yaml").write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+    with pytest.raises(ConverterError, match="not a YAML mapping"):
+        convert(
+            FIXTURE,
+            out,
+            qrels_split="test",
+            name="beir-tiny",
+            description="overwrite probe",
+            published_baselines=None,
+        )
+
+
 def test_converter_preserves_existing_curated_keys(tmp_path: Path) -> None:
-    """Re-running the BEIR converter against a pre-populated dataset.yaml
-    must keep curated keys (description, calibrated thresholds,
-    published_baselines) — the regression that would wipe SciFact's v2
-    thresholds on the next conversion."""
+    """Re-conversion preserves description, thresholds, and
+    published_baselines if dataset.yaml is already populated."""
     import yaml
 
     out = tmp_path / "tiny"

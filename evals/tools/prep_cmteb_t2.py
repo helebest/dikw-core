@@ -49,6 +49,19 @@ class PrepError(RuntimeError):
     """Raised when the pipeline can't find, read, or produce valid output."""
 
 
+def _id_sort_key(x: str) -> tuple[int, int | str]:
+    """Numeric sort when IDs parse as int, lexical fallback otherwise.
+
+    T2Retrieval IDs are stringified ints; sorting them as strings would
+    interleave "10" between "1" and "2". Lexical fallback keeps the
+    helper safe for non-numeric upstream IDs.
+    """
+    try:
+        return (0, int(x))
+    except ValueError:
+        return (1, x)
+
+
 # ---------------------------------------------------------------------------
 # Pure sampling — no parquet, no filesystem. Exercised by tests/test_prep_cmteb_t2.
 # ---------------------------------------------------------------------------
@@ -86,27 +99,15 @@ def subsample_queries(
             f"num_queries={num_queries} exceeds queries available ({len(queries)})"
         )
 
-    # Materialise qrels once; we iterate twice.
     qrel_rows = list(qrels)
     qrels_by_qid: dict[str, list[tuple[str, int]]] = {}
     for qid, pid, score in qrel_rows:
         qrels_by_qid.setdefault(qid, []).append((pid, score))
 
-    # Deterministic query sample — sort numerically when possible so
-    # the order is stable across Python versions that differ on dict
-    # iteration. Fallback to string sort for non-numeric IDs.
-    def _key(x: str) -> tuple[int, int | str]:
-        try:
-            return (0, int(x))
-        except ValueError:
-            return (1, x)
-
     rng = random.Random(seed)
-    all_qids = sorted(queries.keys(), key=_key)
-    sampled_qids_list = rng.sample(all_qids, num_queries)
-    sampled_qids = set(sampled_qids_list)
+    all_qids = sorted(queries.keys(), key=_id_sort_key)
+    sampled_qids = set(rng.sample(all_qids, num_queries))
 
-    # Relevant set = union of positive pids for sampled queries.
     relevant_pids: set[str] = set()
     for qid in sampled_qids:
         for pid, score in qrels_by_qid.get(qid, []):
@@ -120,11 +121,15 @@ def subsample_queries(
             f"the target or lower num_queries."
         )
 
-    # Pad with uniformly-random non-referenced corpus docs.
     distractor_budget = target_corpus_size - len(relevant_pids)
-    non_relevant_pool = sorted(set(corpus.keys()) - relevant_pids, key=_key)
+    non_relevant_pool = sorted(set(corpus.keys()) - relevant_pids, key=_id_sort_key)
     if distractor_budget > len(non_relevant_pool):
-        # Corpus smaller than target — keep whatever's available.
+        print(
+            f"WARNING: non-relevant corpus pool ({len(non_relevant_pool)}) smaller than "
+            f"requested distractor budget ({distractor_budget}); final corpus will be "
+            f"{len(relevant_pids) + len(non_relevant_pool)} not {target_corpus_size}.",
+            file=sys.stderr,
+        )
         distractor_pids: set[str] = set(non_relevant_pool)
     else:
         distractor_pids = set(rng.sample(non_relevant_pool, distractor_budget))
@@ -133,12 +138,11 @@ def subsample_queries(
     sampled_corpus = {pid: corpus[pid] for pid in sampled_pids}
     sampled_queries = {qid: queries[qid] for qid in sampled_qids}
 
-    # Filter qrels to the sampled universe. Preserve all (qid, pid)
-    # rows where both ends survive, positive or negative.
-    sampled_qrels: list[tuple[str, str, int]] = []
-    for qid, pid, score in qrel_rows:
-        if qid in sampled_qids and pid in sampled_pids:
-            sampled_qrels.append((qid, pid, score))
+    sampled_qrels: list[tuple[str, str, int]] = [
+        (qid, pid, score)
+        for qid, pid, score in qrel_rows
+        if qid in sampled_qids and pid in sampled_pids
+    ]
 
     stats = {
         "relevant_pids_unique": len(relevant_pids),
@@ -165,8 +169,8 @@ def _load_parquet_rows(path: Path, cols: tuple[str, ...]) -> list[dict[str, Any]
             "this prep script, not a dikw runtime requirement)."
         ) from exc
     tbl = pq.read_table(str(path), columns=list(cols))  # type: ignore[no-untyped-call]
-    col_lists = {c: tbl.column(c).to_pylist() for c in cols}
-    return [dict(zip(cols, row, strict=True)) for row in zip(*col_lists.values(), strict=True)]
+    rows: list[dict[str, Any]] = tbl.to_pylist()
+    return rows
 
 
 def _find_parquet(root: Path, pattern: str) -> Path:
@@ -205,6 +209,12 @@ def read_t2_qrels(qrels_dir: Path, split: str) -> list[tuple[str, str, int]]:
 # ---------------------------------------------------------------------------
 
 
+def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def _write_beir_bundle(
     out_dir: Path,
     *,
@@ -216,19 +226,14 @@ def _write_beir_bundle(
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "qrels").mkdir(exist_ok=True)
 
-    def _sort_key(x: str) -> tuple[int, int | str]:
-        try:
-            return (0, int(x))
-        except ValueError:
-            return (1, x)
-
-    with (out_dir / "corpus.jsonl").open("w", encoding="utf-8") as f:
-        for pid in sorted(corpus.keys(), key=_sort_key):
-            f.write(json.dumps({"_id": pid, "text": corpus[pid]}, ensure_ascii=False) + "\n")
-
-    with (out_dir / "queries.jsonl").open("w", encoding="utf-8") as f:
-        for qid in sorted(queries.keys(), key=_sort_key):
-            f.write(json.dumps({"_id": qid, "text": queries[qid]}, ensure_ascii=False) + "\n")
+    _write_jsonl(
+        out_dir / "corpus.jsonl",
+        ({"_id": pid, "text": corpus[pid]} for pid in sorted(corpus.keys(), key=_id_sort_key)),
+    )
+    _write_jsonl(
+        out_dir / "queries.jsonl",
+        ({"_id": qid, "text": queries[qid]} for qid in sorted(queries.keys(), key=_id_sort_key)),
+    )
 
     with (out_dir / "qrels" / f"{split}.tsv").open("w", encoding="utf-8") as f:
         f.write("query-id\tcorpus-id\tscore\n")

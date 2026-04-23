@@ -81,16 +81,18 @@ def dump_dataset_yaml(
 ) -> Path:
     """Render ``dataset.yaml`` to ``out_dir / 'dataset.yaml'``.
 
-    ``thresholds`` defaults to an empty mapping (exploratory mode — the
-    runner skips threshold gating on first runs). ``published_baselines``
-    is an optional informational block; the loader ignores unknown
-    top-level keys, so it round-trips safely.
+    ``name`` / ``description`` / ``thresholds`` / ``published_baselines``
+    are first-creation defaults — used verbatim when the file does not
+    yet exist. On re-conversion against an existing file, every key
+    already on disk wins; only keys passed via ``extra`` (the
+    converter's per-run fingerprint, e.g. CMTEB's ``_sampling``) are
+    unconditionally refreshed. This protects curated descriptions,
+    calibrated thresholds, and published-baseline annotations from
+    being wiped when someone re-runs the converter.
 
-    If ``out_dir/dataset.yaml`` already exists, its top-level keys are
-    preserved — only keys passed via ``extra`` (the converter's
-    run-fingerprint block, e.g. CMTEB's ``_sampling``) are refreshed.
-    This keeps curated descriptions, calibrated thresholds, and
-    published-baseline annotations from being wiped on re-conversion.
+    Raises ``ConverterError`` if the existing file parses to anything
+    other than a YAML mapping — silently overwriting a corrupted file
+    would lose user data.
     """
     payload: dict[str, Any] = {
         "name": name,
@@ -104,11 +106,15 @@ def dump_dataset_yaml(
     path = out_dir / "dataset.yaml"
     if path.exists():
         existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if isinstance(existing, Mapping):
-            refresh_keys = set(extra.keys()) if extra else set()
-            for key, value in existing.items():
-                if key not in refresh_keys:
-                    payload[key] = value
+        if not isinstance(existing, Mapping):
+            raise ConverterError(
+                f"{path}: existing file is not a YAML mapping ({type(existing).__name__}); "
+                f"refusing to overwrite. Inspect or delete it manually."
+            )
+        refresh_keys = set(extra.keys()) if extra else set()
+        for key, value in existing.items():
+            if key not in refresh_keys:
+                payload[key] = value
     path.write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
         encoding="utf-8",

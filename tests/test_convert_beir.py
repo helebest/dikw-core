@@ -114,3 +114,44 @@ def test_converter_writes_published_baselines_block(tmp_path: Path) -> None:
     )
     payload = yaml.safe_load((out / "dataset.yaml").read_text(encoding="utf-8"))
     assert payload["published_baselines"]["bm25_anserini"]["ndcg_at_10"] == 0.665
+
+
+def test_converter_preserves_existing_curated_keys(tmp_path: Path) -> None:
+    """Re-running the BEIR converter against a pre-populated dataset.yaml
+    must keep curated keys (description, calibrated thresholds,
+    published_baselines) — the regression that would wipe SciFact's v2
+    thresholds on the next conversion."""
+    import yaml
+
+    out = tmp_path / "tiny"
+    out.mkdir()
+    curated_description = "SciFact stub — regenerate via convert_beir.py."
+    curated_thresholds = {"hit_at_3": 0.72, "ndcg_at_10": 0.70}
+    curated_baselines = {"bm25_anserini": {"ndcg_at_10": 0.665}}
+    (out / "dataset.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "beir-tiny",
+                "description": curated_description,
+                "thresholds": curated_thresholds,
+                "published_baselines": curated_baselines,
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    convert(
+        FIXTURE,
+        out,
+        qrels_split="test",
+        name="beir-tiny",
+        description="converter-supplied description THAT SHOULD LOSE",
+        published_baselines={"bm25_anserini": {"ndcg_at_10": 0.999}},
+    )
+
+    payload = yaml.safe_load((out / "dataset.yaml").read_text(encoding="utf-8"))
+    assert payload["description"] == curated_description
+    assert payload["thresholds"] == curated_thresholds
+    assert payload["published_baselines"] == curated_baselines

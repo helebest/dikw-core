@@ -85,6 +85,12 @@ def dump_dataset_yaml(
     runner skips threshold gating on first runs). ``published_baselines``
     is an optional informational block; the loader ignores unknown
     top-level keys, so it round-trips safely.
+
+    If ``out_dir/dataset.yaml`` already exists, its top-level keys are
+    preserved — only keys passed via ``extra`` (the converter's
+    run-fingerprint block, e.g. CMTEB's ``_sampling``) are refreshed.
+    This keeps curated descriptions, calibrated thresholds, and
+    published-baseline annotations from being wiped on re-conversion.
     """
     payload: dict[str, Any] = {
         "name": name,
@@ -96,6 +102,13 @@ def dump_dataset_yaml(
     if extra:
         payload.update(extra)
     path = out_dir / "dataset.yaml"
+    if path.exists():
+        existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if isinstance(existing, Mapping):
+            refresh_keys = set(extra.keys()) if extra else set()
+            for key, value in existing.items():
+                if key not in refresh_keys:
+                    payload[key] = value
     path.write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
         encoding="utf-8",

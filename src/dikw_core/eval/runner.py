@@ -23,6 +23,7 @@ public-benchmark baselines (BEIR, CMTEB).
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -176,6 +177,7 @@ async def run_eval(
     provider_config: ProviderConfig | None = None,
     retrieval_config: RetrievalConfig | None = None,
     mode: EvalMode = "hybrid",
+    raw_dump_path: Path | None = None,
 ) -> EvalReport:
     """Run a single dataset end-to-end; return metrics + diagnostics.
 
@@ -198,6 +200,15 @@ async def run_eval(
     ``mode`` selects which retrieval leg(s) to score: ``"hybrid"``
     (default, BM25+vec via RRF), ``"bm25"``, ``"vector"``, or ``"all"``
     (run all three sequentially against the same ingested corpus).
+
+    ``raw_dump_path`` — when set (and ``mode="all"``), appends one JSONL
+    row per (query, mode) capturing the top-``SEARCH_LIMIT`` ranked doc
+    stems plus ``expect_any`` / ``expect_none``. Callers supply a path
+    they've already truncated (or never existed); the runner only
+    appends. Downstream ``evals/tools/sweep_rrf.py`` reads this to
+    re-fuse offline at arbitrary ``(rrf_k, weights)`` — avoiding a
+    second expensive embedding pass. For single-mode runs the flag is
+    silently a no-op since sweep needs both legs' rankings.
     """
     if not spec.corpus_dir.is_dir():
         raise EvalError(f"corpus directory not found: {spec.corpus_dir}")
@@ -247,6 +258,9 @@ async def run_eval(
                 metrics[f"{m}/{k}"] = v
         metrics.update(_compute_metrics(canonical_positives))
 
+    if raw_dump_path is not None and len(modes) > 1:
+        _dump_raw_ranked(raw_dump_path, spec.name, per_mode)
+
     return EvalReport(
         dataset_name=spec.name,
         metrics=metrics,
@@ -283,6 +297,53 @@ def _materialise_wiki(
     cfg.retrieval = retrieval_cfg
     (wiki / CONFIG_FILENAME).write_text(dump_config_yaml(cfg), encoding="utf-8")
     return wiki
+
+
+def _dump_raw_ranked(
+    path: Path,
+    dataset_name: str,
+    per_mode: dict[RetrievalMode, tuple[list[PerQueryRow], list[NegativeRow]]],
+) -> None:
+    """Append per-mode ranked lists as JSONL.
+
+    One row per (query, mode). Positive queries carry ``expect_any``;
+    negatives carry ``expect_none: true`` with an empty ``expect_any``.
+    A consumer groups by ``q`` (or ``q_id`` if we ever add one) to get
+    each query's bm25/vector/hybrid rankings side-by-side.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for mode, (positives, negatives) in per_mode.items():
+            for row in positives:
+                f.write(
+                    json.dumps(
+                        {
+                            "dataset": dataset_name,
+                            "mode": mode,
+                            "q": row.q,
+                            "expect_any": row.expect_any,
+                            "expect_none": False,
+                            "ranked": row.ranked,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            for neg in negatives:
+                f.write(
+                    json.dumps(
+                        {
+                            "dataset": dataset_name,
+                            "mode": mode,
+                            "q": neg.q,
+                            "expect_any": [],
+                            "expect_none": True,
+                            "ranked": neg.ranked,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
 
 
 def _copy_corpus(src: Path, dest: Path) -> None:

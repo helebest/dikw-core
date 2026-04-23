@@ -153,6 +153,51 @@ def test_cli_eval_all_skips_incomplete_stub_with_warning(
     assert result_explicit.exit_code == 2, result_explicit.stdout
 
 
+def test_cli_eval_dump_raw_writes_jsonl(tmp_path: Path) -> None:
+    """`--dump-raw PATH --retrieval all` writes one JSONL row per
+    (query, mode). The CLI truncates the file before the run so repeated
+    invocations don't contaminate.
+    """
+    import json
+
+    ds = _write_toy_dataset(tmp_path)
+    dump = tmp_path / "raw.jsonl"
+
+    # Pre-seed with stale content to prove CLI truncation works.
+    dump.write_text('{"stale": "row"}\n', encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["eval", "--dataset", str(ds), "--retrieval", "all", "--dump-raw", str(dump)],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    lines = dump.read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(line) for line in lines]
+    # No stale row survived.
+    assert all("stale" not in r for r in rows)
+    # 2 queries x 3 modes = 6 rows.
+    assert len(rows) == 6
+    assert {r["mode"] for r in rows} == {"bm25", "vector", "hybrid"}
+
+
+def test_cli_eval_dump_raw_warns_and_skips_in_single_mode(tmp_path: Path) -> None:
+    """Single-mode --dump-raw has no paired legs to sweep; warn + skip."""
+    ds = _write_toy_dataset(tmp_path)
+    dump = tmp_path / "raw.jsonl"
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["eval", "--dataset", str(ds), "--retrieval", "hybrid", "--dump-raw", str(dump)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "ignored" in result.stdout.lower() or "warning" in result.stdout.lower()
+    # File either missing or empty — both acceptable.
+    if dump.exists():
+        assert dump.read_text(encoding="utf-8") == ""
+
+
 def test_cli_eval_prints_negative_diagnostics_section(tmp_path: Path) -> None:
     """When the dataset has ``expect_none`` queries, the report ends with a
     diagnostic section listing each negative query and its top-k observed

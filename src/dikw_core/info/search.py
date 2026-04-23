@@ -20,14 +20,20 @@ land a measurable baseline first.
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 
 from pydantic import BaseModel
 
 from ..providers import EmbeddingProvider
-from ..schemas import ChunkRecord, Layer, VecHit
+from ..schemas import ChunkRecord, FTSHit, Layer, VecHit
 from ..storage.base import NotSupported, Storage
 
 RRF_K = 60
+
+# Which retrieval legs to fuse. ``hybrid`` is the historical default and
+# what `dikw query` uses; ``bm25`` and ``vector`` exist so eval can
+# ablate the contribution of each leg against public benchmarks.
+RetrievalMode = Literal["bm25", "vector", "hybrid"]
 
 
 class Hit(BaseModel):
@@ -73,18 +79,32 @@ class HybridSearcher:
         limit: int = 10,
         per_leg_limit: int = 40,
         layer: Layer | None = None,
+        mode: RetrievalMode = "hybrid",
     ) -> list[Hit]:
         if not q.strip():
             return []
 
-        fts_task = asyncio.create_task(
-            self._storage.fts_search(_sanitize_fts(q), limit=per_leg_limit, layer=layer)
-        )
+        run_fts = mode in ("bm25", "hybrid")
+        run_vec = mode in ("vector", "hybrid")
+        if mode == "vector" and (
+            self._embedder is None or self._embedding_model is None
+        ):
+            raise ValueError(
+                "mode='vector' requires both embedder and embedding_model"
+            )
+
+        fts_task: asyncio.Task[list[FTSHit]] | None = None
         vec_task: asyncio.Task[list[VecHit]] | None = None
-        if self._embedder is not None and self._embedding_model is not None:
+        if run_fts:
+            fts_task = asyncio.create_task(
+                self._storage.fts_search(_sanitize_fts(q), limit=per_leg_limit, layer=layer)
+            )
+        if run_vec and self._embedder is not None and self._embedding_model is not None:
             vec_task = asyncio.create_task(self._embed_and_search(q, per_leg_limit, layer))
 
-        fts_hits = await fts_task
+        fts_hits: list[FTSHit] = []
+        if fts_task is not None:
+            fts_hits = await fts_task
         vec_hits: list[VecHit] = []
         if vec_task is not None:
             try:

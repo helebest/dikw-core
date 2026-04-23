@@ -144,14 +144,16 @@ this subset. Wall-time and cost track SciFact (5,183 passages →
 docs/providers.md's recommendation that Qwen3 handles both languages
 without per-corpus retuning.
 
-**4. Sampling caveat for re-runs.** The 5K subset is materially
-denser-relevant than full T2Retrieval (1,582 / 5,000 = 31.6% of
-docs are positive for some sampled query, vs 22,812 / 118,605 =
-19.2% across the full benchmark). Higher hit@k vs the leaderboard
-is structural, not a quality claim. The leaderboard comparison only
-becomes meaningful after the BM25 fix lets us actually exercise both
-legs — at which point we can also widen to the full corpus if we're
-willing to spend ~¥10 / 10 hours embedding.
+**4. Sampling caveat for re-runs.** Per-query retrieval is structurally
+easier on this subset than at full scale. Each sampled query has ~5
+relevant docs on average (matches full-T2R's 5.2 qrels/query), but the
+candidate pool shrinks from 118,605 → 5,000 — a single relevant doc is
+~24× easier to surface by chance, and the same dense embedder will
+land more of them in the top-10 / top-100 windows. Higher hit@k vs the
+leaderboard is therefore structural, not a quality claim. The
+leaderboard comparison only becomes meaningful after the BM25 fix lets
+us actually exercise both legs — at which point we can also widen to
+the full corpus if we're willing to spend ~¥10 / 10 hours embedding.
 
 ### Verdict on the original follow-up
 

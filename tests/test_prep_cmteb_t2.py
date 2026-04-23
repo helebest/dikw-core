@@ -101,11 +101,40 @@ def test_subsample_qrel_filtering_drops_out_of_scope_rows() -> None:
 
 def test_subsample_rejects_oversized_num_queries() -> None:
     corpus, queries, qrels = _mini_dataset(num_corpus=10, num_queries=5)
-    with pytest.raises(PrepError, match="exceeds queries available"):
+    with pytest.raises(PrepError, match="exceeds queries with positive qrels"):
         subsample_queries(
             corpus=corpus, queries=queries, qrels=qrels,
             num_queries=100, target_corpus_size=5, seed=0,
         )
+
+
+def test_subsample_excludes_orphan_queries_from_pool() -> None:
+    """If queries.jsonl has IDs absent from the chosen qrels split (or
+    with all-non-positive scores), they must be excluded from the
+    sampling pool — otherwise the final bundle silently ends up with
+    fewer queries than requested after convert_cmteb drops the orphans."""
+    corpus = {str(i): f"doc {i}" for i in range(10)}
+    # 5 queries total, but only q0/q1/q2 have positive qrels.
+    queries = {str(i): f"q {i}" for i in range(5)}
+    qrels: list[tuple[str, str, int]] = [
+        ("0", "0", 1),
+        ("1", "1", 1),
+        ("2", "2", 1),
+        ("3", "3", 0),  # explicit zero — judged but non-relevant
+        # qid 4 has no qrel at all
+    ]
+    # Asking for 4 queries must fail — only 3 are judgable.
+    with pytest.raises(PrepError, match="exceeds queries with positive qrels"):
+        subsample_queries(
+            corpus=corpus, queries=queries, qrels=qrels,
+            num_queries=4, target_corpus_size=5, seed=0,
+        )
+    # Asking for 3 must succeed and pick exactly the judgable ones.
+    _, sampled_q, _, _ = subsample_queries(
+        corpus=corpus, queries=queries, qrels=qrels,
+        num_queries=3, target_corpus_size=5, seed=0,
+    )
+    assert set(sampled_q.keys()) == {"0", "1", "2"}
 
 
 def test_subsample_handles_corpus_smaller_than_target() -> None:

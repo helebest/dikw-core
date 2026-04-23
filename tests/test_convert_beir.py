@@ -134,6 +134,28 @@ def test_converter_refuses_to_overwrite_non_mapping_yaml(tmp_path: Path) -> None
         )
 
 
+def test_converter_refuses_to_overwrite_unparseable_yaml(tmp_path: Path) -> None:
+    """Syntactically broken YAML (mid-edit, garbled bytes) raises a
+    ConverterError instead of leaking the raw yaml.YAMLError to the
+    CLI, which would surface as a stack trace rather than the
+    documented refusal."""
+    out = tmp_path / "tiny"
+    out.mkdir()
+    (out / "dataset.yaml").write_text(
+        "name: ok\nbad: [unclosed\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConverterError, match="not parseable as YAML"):
+        convert(
+            FIXTURE,
+            out,
+            qrels_split="test",
+            name="beir-tiny",
+            description="malformed probe",
+            published_baselines=None,
+        )
+
+
 def test_converter_preserves_existing_curated_keys(tmp_path: Path) -> None:
     """Re-conversion preserves description, thresholds, and
     published_baselines if dataset.yaml is already populated."""

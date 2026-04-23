@@ -94,19 +94,33 @@ def subsample_queries(
     the relevant set would exceed ``target_corpus_size`` (we never
     silently drop gold docs — the caller must widen the target).
     """
-    if num_queries > len(queries):
-        raise PrepError(
-            f"num_queries={num_queries} exceeds queries available ({len(queries)})"
-        )
-
     qrel_rows = list(qrels)
     qrels_by_qid: dict[str, list[tuple[str, int]]] = {}
     for qid, pid, score in qrel_rows:
         qrels_by_qid.setdefault(qid, []).append((pid, score))
 
+    # Pool we sample from = queries that BOTH appear in queries.jsonl AND have at
+    # least one positive qrel pointing at a corpus row we have. Sampling from
+    # `queries.keys()` alone is wrong if the qrels split is narrower than the
+    # full query catalogue — orphan qids would silently produce zero-relevant
+    # samples that downstream convert_cmteb.py then drops, leaving the bundle
+    # with fewer than `num_queries` queries.
+    judgable_qids = sorted(
+        (
+            qid
+            for qid in queries
+            if any(score > 0 and pid in corpus for pid, score in qrels_by_qid.get(qid, []))
+        ),
+        key=_id_sort_key,
+    )
+    if num_queries > len(judgable_qids):
+        raise PrepError(
+            f"num_queries={num_queries} exceeds queries with positive qrels in this "
+            f"split ({len(judgable_qids)} of {len(queries)} total queries)"
+        )
+
     rng = random.Random(seed)
-    all_qids = sorted(queries.keys(), key=_id_sort_key)
-    sampled_qids = set(rng.sample(all_qids, num_queries))
+    sampled_qids = set(rng.sample(judgable_qids, num_queries))
 
     relevant_pids: set[str] = set()
     for qid in sampled_qids:

@@ -105,7 +105,13 @@ def dump_dataset_yaml(
         payload.update(extra)
     path = out_dir / "dataset.yaml"
     if path.exists():
-        existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        try:
+            existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise ConverterError(
+                f"{path}: existing file is not parseable as YAML ({exc.__class__.__name__}); "
+                f"refusing to overwrite. Inspect or delete it manually."
+            ) from exc
         if not isinstance(existing, Mapping):
             raise ConverterError(
                 f"{path}: existing file is not a YAML mapping ({type(existing).__name__}); "

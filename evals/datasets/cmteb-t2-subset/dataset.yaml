@@ -1,0 +1,35 @@
+name: cmteb-t2-subset
+description: >
+  C-MTEB / T2Retrieval (sampled) — Chinese passage retrieval over a
+  question-answering corpus. The full T2Retrieval ships ~2.3M passages,
+  far too large to embed on a paid Chinese provider for calibration; this
+  stub samples down to 5,000 passages while preserving every passage
+  referenced by a positive qrel, so the relevant set is intact and only
+  the distractor density changes.
+
+  Generated via:
+    huggingface-cli download C-MTEB/T2Retrieval --repo-type dataset \
+        --local-dir /tmp/t2-src/
+    # If the bundle ships parquet, convert to JSONL first (one-liner with
+    # pandas.to_json or pyarrow). Final layout must match BEIR shape:
+    #   /tmp/t2-src/{corpus.jsonl,queries.jsonl,qrels/test.tsv}
+    uv run python evals/tools/convert_cmteb.py \
+        --source /tmp/t2-src/ \
+        --out evals/datasets/cmteb-t2-subset/ \
+        --sample-size 5000 \
+        --random-seed 42
+
+  ``corpus/`` and ``queries.yaml`` are gitignored — re-run the command
+  above to materialise. The ``_sampling`` block in dataset.yaml after
+  generation pins the seed and source totals for reproducibility.
+
+# Thresholds left empty until the first real-vector run lands. With
+# 5K passages instead of 2.3M, expect higher hit@k than published
+# benchmarks would show (fewer distractors). Treat as a calibration
+# floor, not a comparison.
+thresholds: {}
+
+# C-MTEB / T2Retrieval published baselines vary by model and shift over
+# time on the leaderboard; we don't pin a number here. Compare the
+# observed dikw run against the latest leaderboard entries at
+# https://huggingface.co/spaces/mteb/leaderboard manually.

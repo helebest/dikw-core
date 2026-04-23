@@ -183,6 +183,15 @@ verdict requires a re-run after the BM25 CJK fix.
 4. **Optional — full-corpus run** for an apples-to-apples leaderboard
    comparison. ~10× the cost and time. Probably only worth it after
    #1 + #2 produce a credible single-corpus baseline.
+5. **`eval/runner.py --dump-raw` should key by query ID, not text.**
+   Surfaced by the final-verification codex review on this branch.
+   `runner.py:323` writes only the query text into the dump JSONL;
+   `evals/tools/sweep_rrf.py` then keys `per_dataset[ds][q]` by that
+   string. Datasets with duplicate query text (rare on T2Retrieval,
+   common on some public IR benchmarks) silently overwrite — sweep
+   scores fewer queries than the real eval and may pick the wrong
+   fusion weights. Add a stable query ID to the dump and key by it.
+   Independent branch; touches eval runner + sweep_rrf in lockstep.
 
 ## 2026-04-23 — SciFact (BEIR) v2 — RRF tuned
 

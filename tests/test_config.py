@@ -10,6 +10,7 @@ from dikw_core.config import (
     FilesystemStorageConfig,
     PostgresStorageConfig,
     ProviderConfig,
+    RetrievalConfig,
     SQLiteStorageConfig,
     default_config,
     dump_config_yaml,
@@ -149,3 +150,59 @@ sources: []
     cfg = load_config(path)
     assert cfg.provider.llm_max_retries == 3
     assert cfg.provider.embedding_max_retries == 7
+
+
+def test_retrieval_config_defaults_match_legacy_behavior() -> None:
+    """Default RetrievalConfig = pre-weighting behaviour (k=60, weights=1.0).
+
+    Regression guard: a silent default change would shift every hybrid
+    ranking across every user wiki.
+    """
+    cfg = RetrievalConfig()
+    assert cfg.rrf_k == 60
+    assert cfg.bm25_weight == 1.0
+    assert cfg.vector_weight == 1.0
+
+
+def test_dikw_config_retrieval_block_omitted_fills_defaults(tmp_path: Path) -> None:
+    """A wiki whose dikw.yml predates this feature loads cleanly."""
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+provider:
+  llm: anthropic
+sources: []
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.retrieval.rrf_k == 60
+    assert cfg.retrieval.bm25_weight == 1.0
+    assert cfg.retrieval.vector_weight == 1.0
+
+
+def test_dikw_config_retrieval_block_round_trip(tmp_path: Path) -> None:
+    """Fusion knobs parse from YAML + survive dump → load."""
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+retrieval:
+  rrf_k: 40
+  bm25_weight: 0.5
+  vector_weight: 1.5
+sources: []
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.retrieval.rrf_k == 40
+    assert cfg.retrieval.bm25_weight == 0.5
+    assert cfg.retrieval.vector_weight == 1.5
+
+    # round-trip: dump → re-load yields identical values
+    yaml_text = dump_config_yaml(cfg)
+    path.write_text(yaml_text, encoding="utf-8")
+    cfg2 = load_config(path)
+    assert cfg2.retrieval.rrf_k == 40
+    assert cfg2.retrieval.bm25_weight == 0.5
+    assert cfg2.retrieval.vector_weight == 1.5

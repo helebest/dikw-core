@@ -57,6 +57,28 @@ class ProviderConfig(BaseModel):
     embedding_max_retries: int = 5
 
 
+class RetrievalConfig(BaseModel):
+    """Fusion knobs for ``HybridSearcher``.
+
+    Defaults match the pre-2026-04 behaviour (equal-weight RRF, k=60) so
+    a wiki whose ``dikw.yml`` omits the ``retrieval:`` block sees zero
+    change. Tune these per-corpus when one leg is systematically stronger
+    than the other — SciFact/BEIR benefits from a vector-heavier setting
+    because dense retrieval beats the BM25 leg by ~0.10 nDCG@10 there.
+    See ``docs/eval-plan.md`` + ``evals/BASELINES.md`` for how to measure.
+    """
+
+    # Reciprocal Rank Fusion's rank-offset constant. Smaller = steeper
+    # decay (rank-1 wins by more). 60 is the value used in the original
+    # RRF paper and by both reference projects.
+    rrf_k: int = 60
+    # Per-leg contribution factor. 1.0 each = vanilla RRF. Lowering one
+    # leg's weight keeps its recall contribution (docs it alone found
+    # still enter the fused pool) while shrinking its rank influence.
+    bm25_weight: float = 1.0
+    vector_weight: float = 1.0
+
+
 class SQLiteStorageConfig(BaseModel):
     backend: Literal["sqlite"] = "sqlite"
     path: str = ".dikw/index.sqlite"
@@ -102,6 +124,7 @@ class SourceConfig(BaseModel):
 class DikwConfig(BaseModel):
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     storage: StorageConfig = Field(default_factory=SQLiteStorageConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     schema_: SchemaConfig = Field(default_factory=SchemaConfig, alias="schema")
     sources: list[SourceConfig] = Field(default_factory=list)
 

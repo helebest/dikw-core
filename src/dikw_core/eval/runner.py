@@ -32,7 +32,7 @@ from typing import Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import api
-from ..config import CONFIG_FILENAME, ProviderConfig, dump_config_yaml
+from ..config import CONFIG_FILENAME, ProviderConfig, RetrievalConfig, dump_config_yaml
 from ..info.search import HybridSearcher, RetrievalMode
 from ..providers import EmbeddingProvider
 from ..storage import build_storage
@@ -174,6 +174,7 @@ async def run_eval(
     *,
     embedder: EmbeddingProvider | None = None,
     provider_config: ProviderConfig | None = None,
+    retrieval_config: RetrievalConfig | None = None,
     mode: EvalMode = "hybrid",
 ) -> EvalReport:
     """Run a single dataset end-to-end; return metrics + diagnostics.
@@ -203,10 +204,16 @@ async def run_eval(
 
     effective_embedder: EmbeddingProvider = embedder or FakeEmbeddings()
     effective_provider_cfg = provider_config or ProviderConfig(embedding_model="fake")
+    effective_retrieval_cfg = retrieval_config or RetrievalConfig()
     modes = _resolve_modes(mode)
 
     with tempfile.TemporaryDirectory(prefix="dikw-eval-") as tmp:
-        wiki = _materialise_wiki(Path(tmp), spec, provider_cfg=effective_provider_cfg)
+        wiki = _materialise_wiki(
+            Path(tmp),
+            spec,
+            provider_cfg=effective_provider_cfg,
+            retrieval_cfg=effective_retrieval_cfg,
+        )
         _copy_corpus(spec.corpus_dir, wiki / "sources")
 
         await api.ingest(wiki, embedder=effective_embedder)
@@ -251,15 +258,20 @@ async def run_eval(
 
 
 def _materialise_wiki(
-    tmp_root: Path, spec: DatasetSpec, *, provider_cfg: ProviderConfig
+    tmp_root: Path,
+    spec: DatasetSpec,
+    *,
+    provider_cfg: ProviderConfig,
+    retrieval_cfg: RetrievalConfig,
 ) -> Path:
     """Scaffold a throwaway wiki + dikw.yml that matches ``spec``.
 
-    The provider block is copied verbatim from ``provider_cfg`` (either the
-    caller's real ``cfg.provider`` from a user wiki, or the fake-default).
-    This is the single source of truth for downstream ``api.ingest`` — it
-    reads ``embedding_model`` / ``embedding_batch_size`` / ``embedding_dimensions``
-    from this file.
+    ``provider_cfg`` and ``retrieval_cfg`` are copied verbatim into the
+    written ``dikw.yml``. Downstream ``api.ingest`` reads the provider
+    block; ``_run_queries`` re-loads the whole file to build
+    ``HybridSearcher``, which picks up the retrieval block. This means
+    eval reproducibly measures whatever fusion knobs the caller passed,
+    without the runner having to thread them through a second path.
     """
     wiki = tmp_root / "wiki"
     api.init_wiki(wiki, description=f"eval/{spec.name}")
@@ -268,6 +280,7 @@ def _materialise_wiki(
 
     cfg = default_config(description=f"eval/{spec.name}")
     cfg.provider = provider_cfg
+    cfg.retrieval = retrieval_cfg
     (wiki / CONFIG_FILENAME).write_text(dump_config_yaml(cfg), encoding="utf-8")
     return wiki
 
@@ -302,7 +315,14 @@ async def _run_queries(
     await storage.connect()
     await storage.migrate()
     try:
-        searcher = HybridSearcher(storage, embedder, embedding_model=embedding_model)
+        searcher = HybridSearcher(
+            storage,
+            embedder,
+            embedding_model=embedding_model,
+            rrf_k=cfg.retrieval.rrf_k,
+            bm25_weight=cfg.retrieval.bm25_weight,
+            vector_weight=cfg.retrieval.vector_weight,
+        )
         results: dict[
             RetrievalMode, tuple[list[PerQueryRow], list[NegativeRow]]
         ] = {}

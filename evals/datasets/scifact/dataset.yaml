@@ -1,0 +1,32 @@
+name: scifact
+description: >
+  BEIR/SciFact — scientific claim verification on PubMed paper abstracts.
+  5,183 corpus passages, 300 test queries, binary qrels.
+
+  Generated via:
+    curl -L https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip -o /tmp/scifact.zip
+    unzip /tmp/scifact.zip -d /tmp/scifact-src/
+    uv run python evals/tools/convert_beir.py \
+        --source /tmp/scifact-src/scifact/ \
+        --out evals/datasets/scifact/ \
+        --baseline-bm25-ndcg10 0.665
+
+  ``corpus/`` and ``queries.yaml`` are gitignored — re-run the command
+  above to materialise them locally. Published baselines below come from
+  the BEIR paper (Thakur et al., 2021, Table 6).
+
+# Thresholds left empty until the first real-vector run lands. The
+# user is expected to set them ~1-2 queries below observed values per
+# the calibration guidance in evals/README.md.
+thresholds: {}
+
+published_baselines:
+  source: "BEIR paper (Thakur et al., 2021)"
+  bm25_anserini:
+    ndcg_at_10: 0.665
+  notes: >
+    Dense retrieval baselines on BEIR/SciFact span roughly nDCG@10 0.55–0.75
+    depending on model. Reproduction of the exact BM25 number is not
+    expected — FTS5 is not Anserini and dikw chunks at 900 tokens —
+    treat ±0.10 nDCG@10 as in-band; the useful signal is whether
+    ``hybrid`` beats ``bm25`` on the same chunking.

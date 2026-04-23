@@ -121,6 +121,38 @@ def test_cli_eval_empty_datasets_root_exits_two(
     assert "no datasets" in result.stdout.lower()
 
 
+def test_cli_eval_all_skips_incomplete_stub_with_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto-discovery must tolerate stub-only dataset directories.
+
+    Public-benchmark datasets ship as a committed dataset.yaml plus a
+    converter the user runs locally. ``uv run dikw eval`` (no --dataset)
+    must still succeed for users who haven't materialised every
+    benchmark; the incomplete dirs surface as a yellow warning, not as
+    a hard failure that takes down the whole run.
+    """
+    _write_toy_dataset(tmp_path, name="ok_ds")
+    # Stub: dataset.yaml only, no corpus/, no queries.yaml.
+    stub = tmp_path / "stub_ds"
+    stub.mkdir()
+    (stub / "dataset.yaml").write_text(
+        "name: stub_ds\ndescription: stub\nthresholds: {}\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("dikw_core.eval.dataset.datasets_root", lambda: tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["eval"])
+    assert result.exit_code == 0, result.stdout
+    assert "skipping stub_ds" in result.stdout
+    assert "ok_ds" in result.stdout
+
+    # Explicit --dataset on the same stub *does* fail clearly — auto
+    # discovery is permissive, explicit selection is not.
+    result_explicit = runner.invoke(app, ["eval", "--dataset", str(stub)])
+    assert result_explicit.exit_code == 2, result_explicit.stdout
+
+
 def test_cli_eval_prints_negative_diagnostics_section(tmp_path: Path) -> None:
     """When the dataset has ``expect_none`` queries, the report ends with a
     diagnostic section listing each negative query and its top-k observed

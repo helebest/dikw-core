@@ -516,10 +516,16 @@ def _collect_eval_specs(dataset: str | None) -> list[Any]:
     """Resolve the CLI ``--dataset`` option to a list of loaded ``DatasetSpec``.
 
     - ``None`` → every subdirectory of ``datasets_root()`` that contains a
-      ``dataset.yaml`` (so a partially-built dataset dir doesn't explode the run).
-    - ``"<name>"`` or ``"<path>"`` → a single loaded spec.
+      ``dataset.yaml``. Incomplete stubs (missing ``corpus/`` or
+      ``queries.yaml``) are *skipped with a warning*, not a hard failure
+      — public-benchmark datasets ship as a committed ``dataset.yaml``
+      stub plus a converter the user runs locally to materialise the
+      corpus, and a stub-only ``scifact/`` directory shouldn't break
+      ``dikw eval`` for someone who hasn't downloaded it yet.
+    - ``"<name>"`` or ``"<path>"`` → a single loaded spec; missing pieces
+      raise ``DatasetError`` so the user sees the exact problem.
     """
-    from .eval.dataset import DatasetSpec, datasets_root, load_dataset
+    from .eval.dataset import DatasetError, DatasetSpec, datasets_root, load_dataset
 
     if dataset is not None:
         return [load_dataset(dataset)]
@@ -533,7 +539,12 @@ def _collect_eval_specs(dataset: str | None) -> list[Any]:
             continue
         if not (child / "dataset.yaml").is_file():
             continue
-        specs.append(load_dataset(child))
+        try:
+            specs.append(load_dataset(child))
+        except DatasetError as e:
+            console.print(
+                f"[yellow]skipping {child.name}: {e}[/yellow]"
+            )
     return specs
 
 

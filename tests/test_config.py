@@ -152,20 +152,25 @@ sources: []
     assert cfg.provider.embedding_max_retries == 7
 
 
-def test_retrieval_config_defaults_match_legacy_behavior() -> None:
-    """Default RetrievalConfig = pre-weighting behaviour (k=60, weights=1.0).
+def test_retrieval_config_defaults_are_scifact_tuned() -> None:
+    """Defaults are the 2026-04-23 SciFact sweep winner, not equal weights.
 
-    Regression guard: a silent default change would shift every hybrid
-    ranking across every user wiki.
+    Equal (1.0, 1.0) starting point left hybrid 0.037 nDCG@10 behind the
+    vector-only leg on BEIR/SciFact. Tuning to vector-heavy (0.3 / 1.5)
+    at k=60 closes that gap — see ``evals/BASELINES.md`` for the sweep.
+    This test pins those numbers so a silent drift doesn't reintroduce
+    the regression.
     """
     cfg = RetrievalConfig()
     assert cfg.rrf_k == 60
-    assert cfg.bm25_weight == 1.0
-    assert cfg.vector_weight == 1.0
+    assert cfg.bm25_weight == 0.3
+    assert cfg.vector_weight == 1.5
 
 
 def test_dikw_config_retrieval_block_omitted_fills_defaults(tmp_path: Path) -> None:
-    """A wiki whose dikw.yml predates this feature loads cleanly."""
+    """A wiki whose dikw.yml predates this feature loads cleanly — the
+    runtime supplies the SciFact-tuned defaults, not an error.
+    """
     path = tmp_path / CONFIG_FILENAME
     path.write_text(
         """
@@ -177,8 +182,8 @@ sources: []
     )
     cfg = load_config(path)
     assert cfg.retrieval.rrf_k == 60
-    assert cfg.retrieval.bm25_weight == 1.0
-    assert cfg.retrieval.vector_weight == 1.0
+    assert cfg.retrieval.bm25_weight == 0.3
+    assert cfg.retrieval.vector_weight == 1.5
 
 
 def test_dikw_config_retrieval_block_round_trip(tmp_path: Path) -> None:

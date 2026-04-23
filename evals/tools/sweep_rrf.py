@@ -35,6 +35,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from dikw_core.config import RetrievalConfig  # noqa: E402
 from dikw_core.eval.metrics import (  # noqa: E402
     mean_hit_at_k,
     mean_ndcg_at_k,
@@ -166,21 +167,28 @@ def sweep(
 
 
 def format_table(
-    results: Sequence[SweepResult], *, top_n: int = 10
+    results: Sequence[SweepResult],
+    legs: Sequence[QueryLegs] | None = None,
+    *,
+    top_n: int = 10,
 ) -> str:
-    """Render the top-N by nDCG@10 plus the equal-weight baseline row.
+    """Render the top-N by nDCG@10 plus two pinned reference rows.
+
+    Reference rows: the equal-weight (1,1,60) row — the "before tuning"
+    comparison point — and the current ``RetrievalConfig()`` defaults —
+    what ``dikw query`` actually ships with. Showing both tells the user
+    both "how much tuning bought us vs vanilla RRF" and "how far my
+    corpus's best config sits from the shipped default".
+
+    ``legs`` lets the formatter compute the current-default row on the
+    fly when it's not in the grid (e.g. if defaults shift to 0.25 and
+    the grid has 0.30). Pass ``None`` to skip that — the legacy path
+    that just reports whichever rows landed in the grid.
 
     Layout matches the other ablation tables in the eval CLI output —
     markdown-ish pipe columns, fixed 3-digit precision so a 0.002 nDCG@10
     difference is visible.
     """
-    baseline = next(
-        (r for r in results if r.rrf_k == 60 and r.bm25_weight == 1.0 and r.vector_weight == 1.0),
-        None,
-    )
-    ordered = sorted(results, key=lambda r: -r.ndcg_at_10)
-    picked = ordered[:top_n]
-
     header = (
         "|   k | w_bm25 | w_vec | hit@3 | hit@10 |    mrr | nDCG@10 | recall@100 |"
     )
@@ -196,15 +204,44 @@ def format_table(
             + (f"  {tag}" if tag else "")
         )
 
+    ordered = sorted(results, key=lambda r: -r.ndcg_at_10)
+    picked = ordered[:top_n]
+
+    def find_or_compute(rrf_k: int, wb: float, wv: float) -> SweepResult | None:
+        for r in results:
+            if r.rrf_k == rrf_k and r.bm25_weight == wb and r.vector_weight == wv:
+                return r
+        if legs is None:
+            return None
+        return evaluate_weights(legs, rrf_k=rrf_k, bm25_weight=wb, vector_weight=wv)
+
+    vanilla = find_or_compute(60, 1.0, 1.0)
+    default_cfg = RetrievalConfig()
+    shipped = find_or_compute(
+        default_cfg.rrf_k, default_cfg.bm25_weight, default_cfg.vector_weight
+    )
+
     lines: list[str] = [f"Top {len(picked)} by nDCG@10:", header, sep]
     for r in picked:
         lines.append(row(r))
-    if baseline is not None:
+
+    reference_rows: list[tuple[SweepResult, str]] = []
+    if vanilla is not None:
+        reference_rows.append((vanilla, "← equal-weight (pre-tuning)"))
+    if shipped is not None and (
+        vanilla is None
+        or (shipped.rrf_k, shipped.bm25_weight, shipped.vector_weight)
+        != (vanilla.rrf_k, vanilla.bm25_weight, vanilla.vector_weight)
+    ):
+        reference_rows.append((shipped, "← shipped default"))
+
+    if reference_rows:
         lines.append("")
-        lines.append("Equal-weight baseline (current default):")
+        lines.append("Reference points:")
         lines.append(header)
         lines.append(sep)
-        lines.append(row(baseline, tag="← current default"))
+        for r, tag in reference_rows:
+            lines.append(row(r, tag=tag))
     return "\n".join(lines)
 
 
@@ -229,7 +266,7 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     for ds, legs in per_ds.items():
         print(f"\n=== {ds}  ({len(legs)} positive queries) ===")
         results = sweep(legs)
-        print(format_table(results, top_n=args.top_n))
+        print(format_table(results, legs, top_n=args.top_n))
     return 0
 
 

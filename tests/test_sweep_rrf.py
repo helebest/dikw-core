@@ -197,7 +197,13 @@ def test_sweep_grid_covers_all_combinations(tmp_path: Path) -> None:
     assert (60, 1.0, 1.5) in combos
 
 
-def test_format_table_includes_baseline_row(tmp_path: Path) -> None:
+def test_format_table_includes_reference_rows(tmp_path: Path) -> None:
+    """Output pins the vanilla (1,1,60) row AND the shipped default row.
+
+    The sweep tool's job is to let a user see how their own tuning
+    compares to (a) the naive starting point and (b) what dikw actually
+    ships with by default. Both rows must surface.
+    """
     dump = tmp_path / "raw.jsonl"
     _write_dump(
         dump,
@@ -214,7 +220,8 @@ def test_format_table_includes_baseline_row(tmp_path: Path) -> None:
     )
     legs = load_raw_dump(dump)["d"]
     results = sweep(legs)
-    out = format_table(results, top_n=3)
+    out = format_table(results, legs, top_n=3)
     assert "Top 3 by nDCG@10" in out
-    assert "Equal-weight baseline" in out
-    assert "current default" in out
+    assert "Reference points" in out
+    assert "equal-weight (pre-tuning)" in out
+    assert "shipped default" in out

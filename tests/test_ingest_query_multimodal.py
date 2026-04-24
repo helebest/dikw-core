@@ -107,18 +107,22 @@ async def test_query_returns_asset_refs_for_image_bearing_chunk(
     # which we don't want to invoke here). The Phase L wiring is what
     # makes this work end-to-end through the SQLite storage on disk.
     from dikw_core.api import _with_storage
-    from dikw_core.info.search import HybridSearcher
+    from dikw_core.info.search import HybridSearcher, MultimodalSearch
 
     cfg, _root, storage = await _with_storage(project_with_image_doc)
     try:
         active = await storage.get_active_embed_version(modality="multimodal")
         assert active is not None
+        assert active.version_id is not None
+        assert cfg.assets.multimodal is not None
         searcher = HybridSearcher(
             storage,
             embedder=None,
-            multimodal_embedder=mm,
-            multimodal_model=cfg.assets.multimodal.model,  # type: ignore[union-attr]
-            asset_version_id=active.version_id,
+            multimodal=MultimodalSearch(
+                embedder=mm,
+                model=cfg.assets.multimodal.model,
+                asset_version_id=active.version_id,
+            ),
         )
         hits = await searcher.search("alpha beta", limit=5)
         assert hits, "FTS leg should retrieve the chunk on 'alpha beta'"

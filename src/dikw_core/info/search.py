@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -38,6 +39,21 @@ from ..schemas import (
     VecHit,
 )
 from ..storage.base import NotSupported, Storage
+
+
+@dataclass(frozen=True)
+class MultimodalSearch:
+    """Wires the asset-vector retrieval channel into ``HybridSearcher``.
+
+    All three fields are required to activate the channel — the embedder
+    embeds the query into the multimodal vector space, the model is the
+    name passed to the embedder, and the version_id selects which
+    ``vec_assets_v<id>`` table to search.
+    """
+
+    embedder: MultimodalEmbeddingProvider
+    model: str
+    asset_version_id: int
 
 RRF_K = 60
 
@@ -78,12 +94,9 @@ def reciprocal_rank_fusion(
 class HybridSearcher:
     """Composes FTS + vector search(es) on top of a ``Storage`` backend.
 
-    The ``multimodal_embedder`` / ``multimodal_model`` / ``asset_version_id``
-    triple is optional. When all three are supplied the searcher activates
-    a third RRF leg over the per-version asset vector table — text queries
-    can then promote chunks via the assets they reference. Omitting any
-    of them keeps the original 2-leg behavior; this lets installations on
-    the legacy text embedder upgrade to multimodal as a config-only change.
+    Pass a ``MultimodalSearch`` to activate the asset-vector retrieval
+    leg; otherwise the searcher runs the FTS + (optional) text-vector
+    legs only.
     """
 
     def __init__(
@@ -92,16 +105,12 @@ class HybridSearcher:
         embedder: EmbeddingProvider | None,
         *,
         embedding_model: str | None = None,
-        multimodal_embedder: MultimodalEmbeddingProvider | None = None,
-        multimodal_model: str | None = None,
-        asset_version_id: int | None = None,
+        multimodal: MultimodalSearch | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
         self._embedding_model = embedding_model
-        self._mm_embedder = multimodal_embedder
-        self._mm_model = multimodal_model
-        self._asset_version_id = asset_version_id
+        self._mm = multimodal
 
     async def search(
         self,
@@ -117,29 +126,22 @@ class HybridSearcher:
 
         run_fts = mode in ("bm25", "hybrid")
         run_vec = mode in ("vector", "hybrid")
-        mm_active = (
-            self._mm_embedder is not None
-            and self._mm_model is not None
-            and self._asset_version_id is not None
-        )
-        legacy_vec_active = (
+        text_vec_active = (
             self._embedder is not None and self._embedding_model is not None
         )
-        if mode == "vector" and not (mm_active or legacy_vec_active):
+        if mode == "vector" and not (self._mm is not None or text_vec_active):
             raise ValueError(
-                "mode='vector' requires either a (multimodal_embedder, "
-                "multimodal_model, asset_version_id) triple or a "
+                "mode='vector' requires either a MultimodalSearch or an "
                 "(embedder, embedding_model) pair"
             )
 
-        # Embed query via whichever pathway is configured. Multimodal
-        # takes precedence so installations with both configured drive
-        # all retrieval through the unified vector space.
+        # Multimodal takes precedence so installations with both configured
+        # drive all retrieval through the unified vector space.
         q_vec: list[float] | None = None
         if run_vec:
-            if mm_active:
+            if self._mm is not None:
                 q_vec = await self._embed_query_multimodal(q)
-            elif legacy_vec_active:
+            elif text_vec_active:
                 q_vec = await self._embed_query_legacy(q)
 
         fts_task: asyncio.Task[list[FTSHit]] | None = None
@@ -153,11 +155,11 @@ class HybridSearcher:
             vec_task = asyncio.create_task(
                 self._storage.vec_search(q_vec, limit=per_leg_limit, layer=layer)
             )
-            if mm_active and self._asset_version_id is not None:
+            if self._mm is not None:
                 asset_task = asyncio.create_task(
                     self._storage.vec_search_assets(
                         q_vec,
-                        version_id=self._asset_version_id,
+                        version_id=self._mm.asset_version_id,
                         limit=per_leg_limit,
                         layer=layer,
                     )
@@ -177,9 +179,8 @@ class HybridSearcher:
             except NotSupported:
                 asset_hits = []
 
-        # Asset-channel reverse lookup: each asset hit promotes the
-        # chunks that reference it. We rank chunks by their asset's
-        # rank in the asset vec results.
+        # Asset hits promote the chunks that reference them. Rank a chunk
+        # by its asset's rank in the asset-vec results.
         asset_doc_ranked: list[str] = []
         asset_chunk_lookup: dict[str, int] = {}  # doc_id → first promoted chunk_id
         if asset_hits:
@@ -187,10 +188,22 @@ class HybridSearcher:
             chunks_by_asset = await self._storage.chunks_referencing_assets(
                 asset_ids_ordered
             )
+            # Pre-fetch all promoted chunks in parallel — each asset hit
+            # would otherwise trigger a serial get_chunk on the query path.
+            promoted_chunk_ids = list(
+                {cid for cids in chunks_by_asset.values() for cid in cids}
+            )
+            chunks = await asyncio.gather(
+                *(self._storage.get_chunk(cid) for cid in promoted_chunk_ids)
+            )
+            chunk_by_id = {
+                cid: c for cid, c in zip(promoted_chunk_ids, chunks, strict=True)
+                if c is not None
+            }
             seen_docs: set[str] = set()
             for asset_id in asset_ids_ordered:
                 for cid in chunks_by_asset.get(asset_id, []):
-                    chunk = await self._storage.get_chunk(cid)
+                    chunk = chunk_by_id.get(cid)
                     if chunk is None or chunk.doc_id in seen_docs:
                         continue
                     asset_doc_ranked.append(chunk.doc_id)
@@ -228,15 +241,19 @@ class HybridSearcher:
         refs_by_chunk = await self._storage.chunk_asset_refs_for_chunks(
             retrieved_chunk_ids
         )
-        # Materialize each unique asset_id once.
-        all_asset_ids = {
-            r.asset_id for refs in refs_by_chunk.values() for r in refs
+        # Materialize each unique asset_id once, in parallel — sequential
+        # awaits would serialize one network/disk round-trip per asset.
+        all_asset_ids = list(
+            {r.asset_id for refs in refs_by_chunk.values() for r in refs}
+        )
+        fetched = await asyncio.gather(
+            *(self._storage.get_asset(aid) for aid in all_asset_ids)
+        )
+        assets_by_id: dict[str, AssetRecord] = {
+            aid: a
+            for aid, a in zip(all_asset_ids, fetched, strict=True)
+            if a is not None
         }
-        assets_by_id: dict[str, AssetRecord] = {}
-        for aid in all_asset_ids:
-            a = await self._storage.get_asset(aid)
-            if a is not None:
-                assets_by_id[aid] = a
 
         hits: list[Hit] = []
         for doc_id, score in top:
@@ -269,10 +286,9 @@ class HybridSearcher:
         return vectors[0] if vectors else None
 
     async def _embed_query_multimodal(self, q: str) -> list[float] | None:
-        assert self._mm_embedder is not None
-        assert self._mm_model is not None
-        vectors = await self._mm_embedder.embed(
-            [MultimodalInput(text=q)], model=self._mm_model
+        assert self._mm is not None
+        vectors = await self._mm.embedder.embed(
+            [MultimodalInput(text=q)], model=self._mm.model
         )
         return vectors[0] if vectors else None
 

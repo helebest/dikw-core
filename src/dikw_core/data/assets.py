@@ -97,26 +97,18 @@ def _truncate_to_utf8_bytes(s: str, byte_cap: int) -> str:
 
 
 def _sanitize_stem(stem: str) -> str:
-    """The 10-step sanitize pipeline from the design doc.
-
-    NFC-normalize, whitelist-filter, hyphen-collapse, byte-truncate,
-    Windows-reserved guard, leading/trailing hyphen+dot strip.
-    """
-    # 3. NFC normalize. APFS NFD → unified NFC so the same logical filename
-    # produces the same sanitize output across platforms.
+    """NFC-normalize, whitelist-filter, hyphen-collapse, byte-truncate,
+    Windows-reserved guard, leading/trailing hyphen+dot strip."""
+    # NFC folds APFS-style NFD so the same logical filename produces the
+    # same sanitize output across platforms.
     stem = unicodedata.normalize("NFC", stem)
-    # 4. Character whitelist.
     out = "".join(ch if _is_allowed_char(ch) else "-" for ch in stem)
-    # 5. Compress hyphen runs.
     out = _HYPHEN_RUN.sub("-", out)
-    # 6. Strip leading/trailing hyphens and dots (dots may slip through
-    #    when stem ends with `.foo.bar` and we split off `.bar` as ext).
+    # Strip dots too — when the original ends with `.foo.bar`, splitting
+    # off `.bar` as ext leaves a trailing `.` to clean up.
     out = out.strip("-.")
-    # 7. Byte-length cap, UTF-8 boundary safe.
     out = _truncate_to_utf8_bytes(out, _STEM_BYTE_CAP)
-    # Truncation may have left a dangling hyphen at the new tail; re-strip.
-    out = out.strip("-.")
-    # 8. Windows reserved name → underscore prefix (case-insensitive match).
+    out = out.strip("-.")  # truncation may leave a dangling separator
     if out.upper() in _WIN_RESERVED:
         out = "_" + out
     return out

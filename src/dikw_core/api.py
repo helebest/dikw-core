@@ -50,7 +50,7 @@ from .info.embed import (
     embed_chunks,
     embed_chunks_multimodal,
 )
-from .info.search import Hit, HybridSearcher
+from .info.search import Hit, HybridSearcher, MultimodalSearch
 from .knowledge.indexgen import regenerate_index
 from .knowledge.links import parse_links, resolve_links
 from .knowledge.lint import LintReport, run_lint
@@ -473,10 +473,17 @@ async def ingest(
             await storage.put_content(parsed.hash, parsed.body)
             await storage.upsert_document(_to_document(parsed, doc_id=doc_id))
 
-            # Materialize image references first so asset_ids are known when
-            # we wire up chunk_asset_refs after chunking.
-            ref_assets: dict[int, AssetRecord] = {}  # ref index → AssetRecord
+            # Materialize image references first so asset_ids are known
+            # when we wire up chunk_asset_refs after chunking. Dedupe by
+            # original_path so a doc that references the same image N
+            # times only reads + hashes the file once.
+            ref_assets: dict[int, AssetRecord] = {}
+            by_original_path: dict[str, AssetRecord] = {}
             for ref_idx, ref in enumerate(parsed.asset_refs):
+                cached = by_original_path.get(ref.original_path)
+                if cached is not None:
+                    ref_assets[ref_idx] = cached
+                    continue
                 rec = await materialize_asset(
                     ref,
                     source_md_path=abs_path,
@@ -486,6 +493,7 @@ async def ingest(
                 )
                 if rec is not None:
                     ref_assets[ref_idx] = rec
+                    by_original_path[ref.original_path] = rec
                     new_assets_by_id.setdefault(rec.asset_id, rec)
 
             atomic_spans = [(r.start, r.end) for r in parsed.asset_refs]
@@ -647,6 +655,7 @@ async def query(
     references contribute to retrieval.
     """
     cfg, _root, storage = await _with_storage(path)
+    owned_mm: MultimodalEmbeddingProvider | None = None
     try:
         _embedder = embedder
         _llm = llm
@@ -655,30 +664,30 @@ async def query(
         if _llm is None:
             _llm = build_llm(cfg.provider)
 
-        # Multimodal wiring: opt-in. If config has a multimodal section
-        # and either an embedder was injected or one can be built, the
-        # searcher gets the 3-leg setup; otherwise it stays in the
-        # legacy 2-leg mode.
+        mm_search: MultimodalSearch | None = None
         mm_cfg = cfg.assets.multimodal
-        mm_embedder = multimodal_embedder
-        mm_version_id: int | None = None
         if mm_cfg is not None:
+            mm_embedder = multimodal_embedder
             if mm_embedder is None:
                 mm_embedder = build_multimodal_embedder(
                     mm_cfg.provider,
                     base_url=mm_cfg.base_url,
                     batch=mm_cfg.batch,
                 )
+                owned_mm = mm_embedder  # close it ourselves below
             active = await storage.get_active_embed_version(modality="multimodal")
-            mm_version_id = active.version_id if active is not None else None
+            if active is not None and active.version_id is not None:
+                mm_search = MultimodalSearch(
+                    embedder=mm_embedder,
+                    model=mm_cfg.model,
+                    asset_version_id=active.version_id,
+                )
 
         searcher = HybridSearcher(
             storage,
             _embedder,
             embedding_model=cfg.provider.embedding_model,
-            multimodal_embedder=mm_embedder if mm_cfg is not None else None,
-            multimodal_model=mm_cfg.model if mm_cfg is not None else None,
-            asset_version_id=mm_version_id,
+            multimodal=mm_search,
         )
         hits = await searcher.search(q, limit=limit)
 
@@ -710,6 +719,8 @@ async def query(
             applied_wisdom=applied_refs,
         )
     finally:
+        if owned_mm is not None and hasattr(owned_mm, "aclose"):
+            await owned_mm.aclose()
         await storage.close()
 
 

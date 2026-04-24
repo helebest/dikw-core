@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from dikw_core.info.search import HybridSearcher
+from dikw_core.info.search import HybridSearcher, MultimodalSearch
 from dikw_core.schemas import (
     AssetEmbeddingRow,
     AssetKind,
@@ -183,9 +183,9 @@ async def test_asset_hit_promotes_parent_chunk(
     searcher = HybridSearcher(
         storage,
         embedder=None,
-        multimodal_embedder=mm,
-        multimodal_model="fake-mm",
-        asset_version_id=version_id,
+        multimodal=MultimodalSearch(
+            embedder=mm, model="fake-mm", asset_version_id=version_id
+        ),
     )
     # Query text doesn't include any of the chunk's tokens; only the
     # asset vector match should pull the chunk in.
@@ -251,9 +251,9 @@ async def test_asset_refs_attached_for_text_match_too(
     searcher = HybridSearcher(
         storage,
         embedder=None,
-        multimodal_embedder=mm,
-        multimodal_model="fake-mm",
-        asset_version_id=version_id,
+        multimodal=MultimodalSearch(
+            embedder=mm, model="fake-mm", asset_version_id=version_id
+        ),
     )
     hits = await searcher.search("alpha", limit=5)
     assert hits, "FTS should find the chunk via 'alpha'"
@@ -290,9 +290,9 @@ async def test_search_handles_no_asset_index(storage: SQLiteStorage) -> None:
     searcher = HybridSearcher(
         storage,
         embedder=None,
-        multimodal_embedder=mm,
-        multimodal_model="fake-mm",
-        asset_version_id=version_id,
+        multimodal=MultimodalSearch(
+            embedder=mm, model="fake-mm", asset_version_id=version_id
+        ),
     )
     hits = await searcher.search("hello", limit=5)
     assert any(h.doc_id == doc.doc_id for h in hits)

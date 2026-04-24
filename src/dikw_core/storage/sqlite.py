@@ -12,6 +12,7 @@ import asyncio
 import json
 import sqlite3
 import struct
+import time
 from collections.abc import Iterable, Sequence
 from importlib import resources
 from pathlib import Path
@@ -716,9 +717,6 @@ class SQLiteStorage:
 
         def _run() -> None:
             conn = self._require_conn()
-            # Group rows by version_id so each per-version vec table is
-            # ensured exactly once and dim mismatches inside a single call
-            # raise loudly.
             by_version: dict[int, list[AssetEmbeddingRow]] = {}
             for r in rows:
                 by_version.setdefault(r.version_id, []).append(r)
@@ -736,33 +734,43 @@ class SQLiteStorage:
                             f"version {version_id} dim {version.dim}"
                         )
                 self._ensure_asset_vec_table(conn, version_id, version.dim)
-                table = f"vec_assets_v{version_id}"
+                rowid_table = f"asset_vec_rowid_v{version_id}"
+                conn.execute(
+                    f"CREATE TABLE IF NOT EXISTS {rowid_table}("
+                    "rowid INTEGER PRIMARY KEY, "
+                    "asset_id TEXT NOT NULL UNIQUE)"
+                )
+                vec_table = f"vec_assets_v{version_id}"
                 with conn:
                     for r in batch:
+                        # sqlite-vec needs an integer rowid; derive a stable
+                        # 60-bit int from the sha256 asset_id. Birthday
+                        # collisions are ~2^-30 even at 10^9 assets, but
+                        # detect them explicitly so a hit corrupts no data.
+                        rowid = _asset_id_to_rowid(r.asset_id)
+                        existing = conn.execute(
+                            f"SELECT asset_id FROM {rowid_table} WHERE rowid = ?",
+                            (rowid,),
+                        ).fetchone()
+                        if existing is not None and existing["asset_id"] != r.asset_id:
+                            raise StorageError(
+                                f"asset rowid collision in version {version_id}: "
+                                f"rowid {rowid} already used by "
+                                f"{existing['asset_id']!r}, refused for "
+                                f"{r.asset_id!r}"
+                            )
                         conn.execute(
                             "INSERT OR REPLACE INTO asset_embed_meta"
                             "(asset_id, version_id) VALUES (?, ?)",
                             (r.asset_id, r.version_id),
                         )
-                        # sqlite-vec rowid must be a stable integer; use
-                        # the asset_id's int hash modded into INT64 space.
-                        # Same asset_id always maps to same rowid so REPLACE
-                        # works.
-                        rowid = _asset_id_to_rowid(r.asset_id)
                         conn.execute(
-                            f"INSERT OR REPLACE INTO {table}(rowid, embedding) "
+                            f"INSERT OR REPLACE INTO {vec_table}(rowid, embedding) "
                             "VALUES (?, ?)",
                             (rowid, _serialize_vec(r.embedding)),
                         )
-                        # Stash the asset_id ↔ rowid mapping for vec_search
-                        # join-back. Tiny side table per version.
                         conn.execute(
-                            "CREATE TABLE IF NOT EXISTS asset_vec_rowid_v"
-                            f"{version_id}(rowid INTEGER PRIMARY KEY, "
-                            "asset_id TEXT NOT NULL UNIQUE)"
-                        )
-                        conn.execute(
-                            f"INSERT OR REPLACE INTO asset_vec_rowid_v{version_id}"
+                            f"INSERT OR REPLACE INTO {rowid_table}"
                             "(rowid, asset_id) VALUES (?, ?)",
                             (rowid, r.asset_id),
                         )
@@ -852,9 +860,7 @@ class SQLiteStorage:
                     (v.modality,),
                 )
                 created_ts = (
-                    v.created_ts
-                    if v.created_ts is not None
-                    else _now_seconds()
+                    v.created_ts if v.created_ts is not None else time.time()
                 )
                 cur = conn.execute(
                     """
@@ -1069,9 +1075,3 @@ def _asset_id_to_rowid(asset_id: str) -> int:
     always non-negative and safely below 2**63.
     """
     return int(asset_id[:15], 16)
-
-
-def _now_seconds() -> float:
-    import time
-
-    return time.time()

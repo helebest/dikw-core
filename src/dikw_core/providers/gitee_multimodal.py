@@ -35,20 +35,10 @@ import httpx
 
 from ..schemas import MultimodalInput
 from .base import ProviderError
+from .openai_compat import _resolve_embedding_api_key
 
 _DEFAULT_BASE_URL = "https://ai.gitee.com/v1"
 _DEFAULT_TIMEOUT = 60.0
-
-
-def _resolve_api_key(explicit: str | None) -> str:
-    key = explicit or os.environ.get("DIKW_EMBEDDING_API_KEY")
-    if not key:
-        raise ProviderError(
-            "DIKW_EMBEDDING_API_KEY is not set. Export it or pass `api_key` "
-            "explicitly. The embedding leg never falls back to "
-            "OPENAI_API_KEY (so LLM and embedding keys can differ)."
-        )
-    return key
 
 
 def _serialize_input(inp: MultimodalInput) -> Any:
@@ -126,7 +116,7 @@ class GiteeMultimodalEmbedding:
                 base_url=self._base_url,
                 timeout=self._timeout,
                 headers={
-                    "Authorization": f"Bearer {_resolve_api_key(self._api_key_explicit)}",
+                    "Authorization": f"Bearer {_resolve_embedding_api_key(self._api_key_explicit)}",
                     "Content-Type": "application/json",
                 },
             )

@@ -514,24 +514,32 @@ async def ingest(
             # when we wire up chunk_asset_refs after chunking. Dedupe by
             # original_path so a doc that references the same image N
             # times only reads + hashes the file once.
+            #
+            # Asset materialization requires a storage backend that
+            # implements the asset APIs. mm_cfg above is set to None
+            # when the backend raised NotSupported on upsert_embed_version,
+            # so this gate also degrades gracefully on filesystem /
+            # postgres until those adapters land their asset impls.
             ref_assets: dict[int, AssetRecord] = {}
-            by_original_path: dict[str, AssetRecord] = {}
-            for ref_idx, ref in enumerate(parsed.asset_refs):
-                cached = by_original_path.get(ref.original_path)
-                if cached is not None:
-                    ref_assets[ref_idx] = cached
-                    continue
-                rec = await materialize_asset(
-                    ref,
-                    source_md_path=abs_path,
-                    project_root=root,
-                    get_asset=storage.get_asset,
-                    upsert_asset=storage.upsert_asset,
-                )
-                if rec is not None:
-                    ref_assets[ref_idx] = rec
-                    by_original_path[ref.original_path] = rec
-                    new_assets_by_id.setdefault(rec.asset_id, rec)
+            if mm_cfg is not None:
+                by_original_path: dict[str, AssetRecord] = {}
+                for ref_idx, ref in enumerate(parsed.asset_refs):
+                    cached = by_original_path.get(ref.original_path)
+                    if cached is not None:
+                        ref_assets[ref_idx] = cached
+                        continue
+                    rec = await materialize_asset(
+                        ref,
+                        source_md_path=abs_path,
+                        project_root=root,
+                        get_asset=storage.get_asset,
+                        upsert_asset=storage.upsert_asset,
+                        dir_=cfg.assets.dir,
+                    )
+                    if rec is not None:
+                        ref_assets[ref_idx] = rec
+                        by_original_path[ref.original_path] = rec
+                        new_assets_by_id.setdefault(rec.asset_id, rec)
 
             atomic_spans = [(r.start, r.end) for r in parsed.asset_refs]
             chunks = chunk_markdown(parsed.body, atomic_spans=atomic_spans)
@@ -706,16 +714,26 @@ async def query(
         mm_search: MultimodalSearch | None = None
         mm_cfg = cfg.assets.multimodal
         if mm_cfg is not None:
-            mm_embedder = multimodal_embedder
-            if mm_embedder is None:
-                mm_embedder = build_multimodal_embedder(
-                    mm_cfg.provider,
-                    base_url=mm_cfg.base_url,
-                    batch=mm_cfg.batch,
+            try:
+                active = await storage.get_active_embed_version(
+                    modality="multimodal"
                 )
-                owned_mm = mm_embedder  # close it ourselves below
-            active = await storage.get_active_embed_version(modality="multimodal")
+            except NotSupported as e:
+                logger.warning(
+                    "storage backend doesn't support multimodal versioning "
+                    "(%s); querying with text-only retrieval",
+                    e,
+                )
+                active = None
             if active is not None and active.version_id is not None:
+                mm_embedder = multimodal_embedder
+                if mm_embedder is None:
+                    mm_embedder = build_multimodal_embedder(
+                        mm_cfg.provider,
+                        base_url=mm_cfg.base_url,
+                        batch=mm_cfg.batch,
+                    )
+                    owned_mm = mm_embedder  # close it ourselves below
                 mm_search = MultimodalSearch(
                     embedder=mm_embedder,
                     model=mm_cfg.model,

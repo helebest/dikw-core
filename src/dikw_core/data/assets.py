@@ -266,6 +266,7 @@ async def materialize_asset(
     project_root: Path,
     get_asset: Callable[[str], Awaitable[AssetRecord | None]],
     upsert_asset: Callable[[AssetRecord], Awaitable[None]],
+    dir_: str = "assets",
 ) -> AssetRecord | None:
     """Resolve a single ``AssetRef`` to an on-disk binary, copy it into the
     engine vault under ``project_root/assets/…`` (deduped by sha256), probe
@@ -340,7 +341,7 @@ async def materialize_asset(
 
     width, height = _probe_dimensions(data, mime)
     rel_stored = assets_relative_path(
-        hash_=sha, original_path=ref.original_path
+        hash_=sha, original_path=ref.original_path, dir_=dir_
     )
     abs_stored = project_root / rel_stored
     if not abs_stored.exists():

@@ -7,9 +7,149 @@ regression from a re-run variance.
 Newest first. `dikw eval` thresholds in each dataset's `dataset.yaml`
 are calibrated ~2-3 % below the most recent canonical-mode run.
 
+## 2026-04-24 — CMTEB / T2Retrieval v2 — CJK BM25 via jieba
+
+**Status:** supersedes v1 as the canonical CMTEB baseline. Same
+embeddings, same sampling, same fusion weights; what changed is
+`retrieval.cjk_tokenizer: jieba` — the P0 from v1's "Follow-ups".
+
+### What changed from v1
+
+v1 exposed a broken BM25 leg on Chinese: SQLite FTS5's default
+`unicode61` tokenizer segments CJK one character at a time, which
+collapses BM25 to single-char IDF. 275 / 300 queries (91.7 %)
+returned zero hits; nDCG@10 sat at 0.031 vs the published
+Anserini+jieba baselines of 0.50–0.65. Hybrid degenerated to
+vector-only because RRF had no signal from the BM25 leg to fuse with.
+
+The fix landed across four commits on `feat/fts5-cjk-tokenizer`:
+
+1. `info/tokenize.py` — `preprocess_for_fts(text, tokenizer=...)`
+   runs `jieba.cut_for_search` over CJK runs only (regex-sliced so
+   ASCII identifiers like `retrieval.rrf_k` pass through intact).
+2. `RetrievalConfig.cjk_tokenizer: "none" | "jieba"` (default
+   `"none"` — existing ASCII-only wikis unchanged).
+3. `SQLiteStorage` preprocesses title + body before the FTS insert;
+   `_sanitize_fts` preprocesses the query identically. Locked at
+   first ingest (same shape as `embedding_dimensions`).
+4. CLI fix (`699abb6`, surfaced by the first v2 run producing
+   identical numbers to v1): `dikw eval --embedder provider` now
+   forwards `cfg.retrieval` from the scratch wiki to `run_eval`. The
+   original CLI only threaded `cfg.provider` and silently dropped
+   the retrieval block — the first v2 rerun wasted ~4h + ~¥0.5
+   before this was caught. Regression test
+   `test_cli_eval_provider_mode_threads_retrieval_config` pins it.
+
+### Results
+
+```
+dikw eval — cmteb-t2-subset  (retrieval ablation, v2 defaults + jieba)
+┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
+│ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
+├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
+│ bm25   │    0.933 │     0.967 │ 0.922 │      0.840 │         0.908 │
+│ vector │    0.967 │     0.983 │ 0.952 │      0.942 │         0.987 │
+│ hybrid │    0.980 │     0.987 │ 0.978 │      0.952 │         0.990 │
+└────────┴──────────┴───────────┴───────┴────────────┴───────────────┘
+```
+
+BM25: **0.031 → 0.840 nDCG@10 (27×)** — the broken leg is healed.
+Hybrid now genuinely beats vector (+0.010 nDCG@10, +0.013 hit@3,
++0.026 MRR) instead of just matching it — the fusion is finally
+doing useful work on Chinese.
+
+### Weight sweep (offline, same dump)
+
+Same 48-combination grid as v1. Top 5 + reference rows:
+
+```
+|   k | w_bm25 | w_vec | hit@3 | hit@10 |    mrr | nDCG@10 | recall@100 |
+|----:|-------:|------:|------:|-------:|-------:|--------:|-----------:|
+|  40 |   0.30 |  2.00 | 0.980 |  0.983 |  0.978 |   0.954 |      0.990 |
+|  40 |   0.30 |  1.50 | 0.980 |  0.987 |  0.978 |   0.953 |      0.990 |
+|  60 |   0.30 |  2.00 | 0.980 |  0.987 |  0.978 |   0.953 |      0.990 |
+|  40 |   0.30 |  1.00 | 0.983 |  0.990 |  0.979 |   0.953 |      0.990 |
+|  40 |   0.50 |  2.00 | 0.980 |  0.987 |  0.978 |   0.953 |      0.990 |
+|  60 |   0.30 |  1.50 | 0.980 |  0.987 |  0.978 |   0.952 |      0.990 |  ← shipped default
+|  60 |   1.00 |  1.00 | 0.983 |  0.990 |  0.974 |   0.930 |      0.990 |  ← equal-weight (pre-tuning)
+```
+
+The shipped default `(k=60, bm25_weight=0.3, vector_weight=1.5)` —
+tuned on SciFact v2 back on 2026-04-23 — lands 0.002 below the grid
+maximum on CMTEB and 0.022 above the equal-weight baseline. **The
+v1 "generalisation" question is answered: the SciFact-tuned RRF
+defaults generalise cleanly to Chinese.**
+
+### Comparison vs published baselines
+
+For BM25 on CJK, the published Anserini+jieba baselines on T2Retrieval
+sit around nDCG@10 ≈ 0.50–0.65 (model- and configuration-dependent).
+Our **0.840** on a 300-query / 5K-passage subset is naturally above
+that range because the smaller corpus reduces distractor density
+(only 1 in ~3× more chances for a random dense distractor to displace
+a real hit). Treat as a calibration floor for re-runs, not a
+leaderboard comparison.
+
+For hybrid, our 0.952 is above the dense-only MTEB-CN leaderboard
+cluster (0.85–0.93) for the same reason. The **directional signal**
+— hybrid > vector > bm25, bm25 reaches usable signal on CJK — is
+what matters.
+
+### Wall time
+
+~1 h end-to-end (embedding ~28 min; query phase ~30 min). Much
+faster than v1's ~4 h because the query phase's BM25 leg was
+actually returning hits instead of timing out through empty result
+sets, so RRF fusion could terminate promptly. The jieba
+preprocessing added ~0.3 s dictionary-load on first use and
+negligible per-query / per-chunk overhead.
+
+### Known issues / observations
+
+**1. `retrieval.cjk_tokenizer: jieba` requires the `cjk` optional
+extra.** Install with `uv sync --extra cjk`. Failing to install it
+and flipping the config produces an `ImportError` on first CJK
+preprocessing. No runtime regression for ASCII-only users who leave
+`cjk_tokenizer: none`.
+
+**2. The fix is locked at first ingest.** Existing CJK wikis that
+were ingested under `unicode61` have `documents_fts` rows reflecting
+per-char tokenization. Flipping `cjk_tokenizer: jieba` without
+wiping `.dikw/index.sqlite` produces a mismatch between query-side
+(jieba-segmented) and index-side (per-char) tokens, silently
+dropping hits. Documented as gotcha #7 in `docs/providers.md`.
+
+**3. Sampling caveat (unchanged from v1).** 5K-passage subset is
+structurally easier than the full 118K corpus. Per-query retrieval
+metrics read higher than leaderboard numbers — see the full caveat
+in the v1 entry below. The BM25 fix does not change this subsampling
+limitation.
+
+### Follow-ups (priority-ordered)
+
+1. **`--dump-raw` should key by query ID, not text.** Inherited
+   from v1's follow-up list; still open. Datasets with duplicate
+   query text silently lose queries in the dump.
+2. **Full-corpus CMTEB run.** Now meaningful because BM25 is
+   working. ~10× cost and time (~¥5 / ~10 h). Gate on whether we
+   actually want to chase leaderboard parity.
+3. **Score-normalised fusion (CombSUM / CombMNZ).** Same as v1 +
+   SciFact v2 follow-ups; RRF is rank-based and may not beat
+   vector-only on future datasets where one leg is much stronger.
+4. **Japanese / Korean corpora.** jieba covers Chinese only.
+   Japanese (MeCab) or Korean (MeCab-ko) would need additional
+   tokenizer modes in `cjk_tokenizer`.
+
 ## 2026-04-24 — CMTEB / T2Retrieval (sampled, 300 queries)
 
-**Status:** First real-vector run on Chinese. **BM25 leg unusable on
+**Status:** superseded by v2 above. Kept for historical reference —
+the pre-jieba BM25 numbers are the fair comparison point for future
+tokenizer work, and the known-issues section documents the root
+cause the v2 patch addresses.
+
+### Original context (unchanged below)
+
+First real-vector run on Chinese. **BM25 leg unusable on
 CJK with the current FTS5 tokenizer** — see "Known issues" #1. The
 fusion-weight generalisation question that motivated this run
 (BASELINES v2 follow-up) is therefore **deferred** to a re-run after

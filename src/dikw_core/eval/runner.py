@@ -385,6 +385,7 @@ async def _run_queries(
             rrf_k=cfg.retrieval.rrf_k,
             bm25_weight=cfg.retrieval.bm25_weight,
             vector_weight=cfg.retrieval.vector_weight,
+            cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
         )
         results: dict[
             RetrievalMode, tuple[list[PerQueryRow], list[NegativeRow]]

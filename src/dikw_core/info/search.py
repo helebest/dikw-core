@@ -39,6 +39,7 @@ from ..schemas import (
     VecHit,
 )
 from ..storage.base import NotSupported, Storage, StorageError
+from .tokenize import CjkTokenizer, preprocess_for_fts
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,7 @@ class HybridSearcher:
         rrf_k: int = RRF_K,
         bm25_weight: float = 1.0,
         vector_weight: float = 1.0,
+        cjk_tokenizer: CjkTokenizer = "none",
     ) -> None:
         self._storage = storage
         self._embedder = embedder
@@ -140,6 +142,12 @@ class HybridSearcher:
         self._rrf_k = rrf_k
         self._bm25_weight = bm25_weight
         self._vector_weight = vector_weight
+        # Must match what the storage adapter applied at ingest — see
+        # `storage.sqlite.SQLiteStorage.__init__`. A mismatched pair
+        # silently drops CJK hits (index uses segmented tokens, query
+        # uses per-char tokens) so `RetrievalConfig.cjk_tokenizer` is
+        # the single wiki-level knob that feeds both sites.
+        self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
 
     async def search(
         self,
@@ -178,7 +186,11 @@ class HybridSearcher:
         asset_task: asyncio.Task[list[AssetVecHit]] | None = None
         if run_fts:
             fts_task = asyncio.create_task(
-                self._storage.fts_search(_sanitize_fts(q), limit=per_leg_limit, layer=layer)
+                self._storage.fts_search(
+                    _sanitize_fts(q, cjk_tokenizer=self._cjk_tokenizer),
+                    limit=per_leg_limit,
+                    layer=layer,
+                )
             )
         if q_vec is not None:
             vec_task = asyncio.create_task(
@@ -360,7 +372,7 @@ class HybridSearcher:
         return snippet[:240] + ("…" if len(snippet) > 240 else "")
 
 
-def _sanitize_fts(q: str) -> str:
+def _sanitize_fts(q: str, *, cjk_tokenizer: CjkTokenizer = "none") -> str:
     """Tokenize a natural-language query into a bag-of-words FTS5 expression.
 
     The Phase 1 implementation wrapped the whole query in quotes — a
@@ -370,6 +382,11 @@ def _sanitize_fts(q: str) -> str:
 
     Strategy:
 
+    0. If ``cjk_tokenizer != "none"``, pre-segment CJK runs (via the
+       same ``preprocess_for_fts`` the ingest path uses) so that the
+       whitespace-split below picks up word-level Chinese tokens.
+       Symmetry with the indexed form is the whole point; see the
+       ``SQLiteStorage.__init__`` note.
     1. Replace anything that isn't a word character, whitespace, or a
        basic CJK ideograph with whitespace. Word characters (``\\w``)
        cover ASCII letters, digits, and underscore, so identifiers like
@@ -383,11 +400,9 @@ def _sanitize_fts(q: str) -> str:
        interpretation for tokens that happen to contain a colon.
     4. Join with ``OR`` for bag-of-words BM25 retrieval — the same
        semantics published BEIR / CMTEB BM25 baselines use.
-
-    Real CJK tokenization (jieba / character n-grams) is outside the
-    Phase A retrieval-only scope; CJK queries with whitespace separators
-    work, dense Chinese paragraphs as single tokens won't.
     """
+    if cjk_tokenizer != "none":
+        q = preprocess_for_fts(q, tokenizer=cjk_tokenizer)
     cleaned = re.sub(r"[^\w\s一-鿿]", " ", q)
     tokens = [
         t for t in cleaned.split() if t and t.upper() not in _FTS_RESERVED

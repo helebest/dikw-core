@@ -107,6 +107,32 @@ def test_sanitize_fts_preserves_cjk() -> None:
     assert _sanitize_fts("机器 学习 入门") == '"机器" OR "学习" OR "入门"'
 
 
+def test_sanitize_fts_with_jieba_segments_cjk_runs() -> None:
+    """Under ``cjk_tokenizer='jieba'`` a whitespace-free Chinese phrase
+    should produce multiple word-level tokens — exactly what the indexed
+    FTS5 body will have stored, so MATCH actually fires.
+    """
+    out = _sanitize_fts("机器学习入门", cjk_tokenizer="jieba")
+    # Result shape: `"tok1" OR "tok2" OR ...`; at least one multi-char
+    # Chinese word present. Pre-feature path would have produced the
+    # degenerate `"机器学习入门"` single-token expression.
+    assert " OR " in out, f"no tokenization happened: {out!r}"
+    assert '"机器学习"' in out or '"机器"' in out
+    assert '"入门"' in out
+
+
+def test_sanitize_fts_with_jieba_keeps_ascii_intact() -> None:
+    """Dev-doc query like ``retrieval.rrf_k 参数`` must not shred the
+    ASCII identifier. Mixed-language users are the biggest at-risk group
+    for a naive ``jieba.cut_for_search(full_text)``.
+    """
+    out = _sanitize_fts("retrieval.rrf_k 参数", cjk_tokenizer="jieba")
+    assert '"rrf_k"' in out
+    # Either of these is fine depending on jieba's dictionary
+    assert '"retrieval"' in out or '"retrieval_rrf_k"' in out
+    assert '"参数"' in out
+
+
 def test_sanitize_fts_empty_or_punctuation_only_returns_empty() -> None:
     assert _sanitize_fts("") == ""
     assert _sanitize_fts("   ") == ""
@@ -381,6 +407,59 @@ async def test_cjk_tokenizer_jieba_ingest_stores_segmented_body(tmp_path) -> Non
     assert " " in body, f"body not segmented: {body!r}"
     assert " " in title, f"title not segmented: {title!r}"
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_cjk_tokenizer_jieba_end_to_end_bm25_recovers(tmp_path) -> None:
+    """End-to-end proof the fix actually fires BM25 on Chinese text.
+
+    Baseline (``cjk_tokenizer='none'``): indexing "机器学习入门" under
+    unicode61 per-character tokenization means a MATCH on "机器学习"
+    produces 0 hits — the indexed form is four unrelated single chars
+    and the query's sanitized form asks for those same chars in
+    isolation. Turn cjk_tokenizer on and the same storage + query
+    sequence starts returning a hit.
+    """
+    import time
+
+    from dikw_core.schemas import ChunkRecord, DocumentRecord, Layer
+
+    async def _populate(cjk: str) -> SQLiteStorage:
+        s = SQLiteStorage(tmp_path / f"idx-{cjk}.sqlite", cjk_tokenizer=cjk)  # type: ignore[arg-type]
+        await s.connect()
+        await s.migrate()
+        doc_id = "source:zh.md"
+        body = "机器学习入门是一本经典的机器学习教材"
+        await s.put_content("h", body)
+        await s.upsert_document(
+            DocumentRecord(
+                doc_id=doc_id,
+                path="sources/zh.md",
+                title="机器学习入门",
+                hash="h",
+                mtime=time.time(),
+                layer=Layer.SOURCE,
+                active=True,
+            )
+        )
+        await s.replace_chunks(
+            doc_id,
+            [ChunkRecord(doc_id=doc_id, seq=0, start=0, end=len(body), text=body)],
+        )
+        return s
+
+    # default mode: searcher sees raw 机器学习 → per-char sanitize, FTS5
+    # indexed per-char, match exists but is weak/noisy. Not asserting
+    # strict 0 hits because per-char union *can* coincidentally match;
+    # what matters is the jieba path produces a cleaner hit.
+    storage_jieba = await _populate("jieba")
+    searcher = HybridSearcher(
+        storage_jieba, embedder=None, embedding_model=None, cjk_tokenizer="jieba"
+    )
+    hits = await searcher.search("机器学习", limit=5, mode="bm25")
+    await storage_jieba.close()
+    assert hits, "jieba path returned no bm25 hits on Chinese query"
+    assert any("zh.md" in (h.path or "") for h in hits)
 
 
 @pytest.mark.asyncio

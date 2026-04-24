@@ -267,6 +267,7 @@ async def build_server() -> Any:
                     rrf_k=cfg.retrieval.rrf_k,
                     bm25_weight=cfg.retrieval.bm25_weight,
                     vector_weight=cfg.retrieval.vector_weight,
+                    cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
                 )
                 layer_arg = arguments.get("layer")
                 layer = Layer(layer_arg) if layer_arg else None

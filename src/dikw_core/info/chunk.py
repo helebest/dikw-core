@@ -20,6 +20,7 @@ for retrieval. Swap in a real tokenizer later if the Phase-1 eval shows drift.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import NamedTuple
 
 from pydantic import BaseModel
@@ -81,8 +82,19 @@ def chunk_markdown(
     *,
     max_tokens: int = 900,
     overlap_ratio: float = 0.15,
+    atomic_spans: Sequence[tuple[int, int]] = (),
 ) -> list[MarkdownChunk]:
-    """Chunk ``body`` into (mostly) ``max_tokens``-sized paragraph-aligned windows."""
+    """Chunk ``body`` into (mostly) ``max_tokens``-sized paragraph-aligned windows.
+
+    ``atomic_spans`` declares ``(start, end)`` byte ranges that must NOT be
+    split across chunk boundaries — typically the spans of image references
+    (``![…](…)`` / ``![[…]]``) returned by ``extract_image_refs``. The v1
+    paragraph-aligned chunker honors this naturally for any single-line
+    reference; the explicit parameter (a) documents the guarantee on the
+    API surface and (b) hard-fails (rather than silently corrupting) if a
+    pathological input would split a span. Each span must lie fully within
+    at least one chunk; an unsatisfiable span raises ``ValueError``.
+    """
     if not body:
         return []
     if max_tokens <= 0:
@@ -166,4 +178,31 @@ def chunk_markdown(
             )
         )
 
+    _verify_atomic_spans(chunks, atomic_spans, body)
     return chunks
+
+
+def _verify_atomic_spans(
+    chunks: list[MarkdownChunk],
+    atomic_spans: Sequence[tuple[int, int]],
+    body: str,
+) -> None:
+    """Hard-fail if any atomic span crosses a chunk boundary.
+
+    This is a post-condition check, not a corrective pass — the
+    paragraph-aligned chunker should never produce a violation for normal
+    single-line image refs, so a violation indicates either a pathological
+    input (e.g. a multi-line image reference) or a future chunker variant
+    that broke the invariant. Either way, silent corruption is worse than
+    a loud abort.
+    """
+    if not atomic_spans:
+        return
+    for s_start, s_end in atomic_spans:
+        if not any(c.start <= s_start and s_end <= c.end for c in chunks):
+            preview = body[s_start:s_end][:80]
+            raise ValueError(
+                f"atomic span [{s_start}:{s_end}] = {preview!r} would be "
+                f"split across chunk boundaries; chunks here are "
+                f"{[(c.start, c.end) for c in chunks]}"
+            )

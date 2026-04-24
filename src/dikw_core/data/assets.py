@@ -12,9 +12,19 @@ with the original file name preserved for human/Obsidian readability.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import re
+import time
 import unicodedata
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from urllib.parse import urlparse
+
+from ..schemas import AssetKind, AssetRecord, AssetRef
+
+logger = logging.getLogger(__name__)
 
 # Windows reserved device names. Compared case-insensitively against the
 # sanitized stem so a literal `con.png` in markdown doesn't break a
@@ -146,4 +156,222 @@ def assets_relative_path(
     return f"{dir_}/{h2}/{name}"
 
 
-__all__ = ["assets_relative_path"]
+__all__ = [
+    "assets_relative_path",
+    "materialize_asset",
+]
+
+
+# ---- Image MIME + dimension probe (stdlib, no Pillow) --------------------
+
+_EXT_TO_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "svg": "image/svg+xml",
+}
+
+
+def _detect_image_mime(data: bytes, ext_hint: str = "") -> str | None:
+    """Detect image MIME from magic bytes; fall back to file extension.
+
+    Returns ``None`` for anything that isn't a v1-supported image format,
+    which the caller treats as a signal to skip materialization.
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    # SVG is text-based; sniff the first ~200 bytes for the root tag.
+    head = data[:200].lower()
+    if b"<svg" in head or (b"<?xml" in head and b"svg" in data[:1000].lower()):
+        return "image/svg+xml"
+    return _EXT_TO_MIME.get(ext_hint.lower())
+
+
+def _probe_dimensions(data: bytes, mime: str) -> tuple[int | None, int | None]:
+    """Stdlib image (width, height) probe. Returns ``(None, None)`` for
+    formats not parsed in v1 (SVG, WebP) or malformed data.
+
+    PNG/JPEG/GIF only — no Pillow dependency. Each format's parser reads
+    only the bytes it needs to resolve dimensions; nothing decodes pixels.
+    """
+    try:
+        if mime == "image/png" and len(data) >= 24:
+            # 8-byte signature, then IHDR chunk: 4-byte length, 4-byte type,
+            # then width (uint32 BE), height (uint32 BE).
+            w = int.from_bytes(data[16:20], "big")
+            h = int.from_bytes(data[20:24], "big")
+            return w, h
+        if mime == "image/jpeg":
+            # Walk segment headers (FF marker + 1 byte type + 2 byte length)
+            # until a Start-of-Frame marker is found, then read precision +
+            # height + width.
+            i = 2  # skip SOI
+            n = len(data)
+            while i < n - 9:
+                if data[i] != 0xFF:
+                    return None, None
+                marker = data[i + 1]
+                # Restart markers (D0-D7) and SOI/EOI/etc carry no payload.
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                # SOFn: 0xC0..0xCF except 0xC4 (DHT), 0xC8 (JPG), 0xCC (DAC).
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h = int.from_bytes(data[i + 5 : i + 7], "big")
+                    w = int.from_bytes(data[i + 7 : i + 9], "big")
+                    return w, h
+                seg_len = int.from_bytes(data[i + 2 : i + 4], "big")
+                i += 2 + seg_len
+            return None, None
+        if mime == "image/gif" and len(data) >= 10:
+            # Header: 6-byte signature + Logical Screen Descriptor's first
+            # 4 bytes are width (uint16 LE) + height (uint16 LE).
+            w = int.from_bytes(data[6:8], "little")
+            h = int.from_bytes(data[8:10], "little")
+            return w, h
+    except (IndexError, ValueError):
+        # Defensive: malformed image bytes shouldn't crash ingest.
+        return None, None
+    return None, None
+
+
+# ---- Asset materialization -----------------------------------------------
+
+
+def _is_remote(original_path: str) -> bool:
+    """Treat anything with a non-empty scheme (http, https, ftp, data, …)
+    as remote. Plain relative paths and bare filenames stay local."""
+    parsed = urlparse(original_path)
+    return bool(parsed.scheme) and parsed.scheme not in ("file",)
+
+
+def _resolve_local(
+    original_path: str, *, source_md_path: Path, project_root: Path
+) -> Path | None:
+    """Find the binary on disk. Tries source_md_path's parent first
+    (Obsidian-native), then project_root (vault-root fallback)."""
+    candidate = (source_md_path.parent / original_path).resolve()
+    if candidate.is_file():
+        return candidate
+    candidate = (project_root / original_path).resolve()
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+async def materialize_asset(
+    ref: AssetRef,
+    *,
+    source_md_path: Path,
+    project_root: Path,
+    get_asset: Callable[[str], Awaitable[AssetRecord | None]],
+    upsert_asset: Callable[[AssetRecord], Awaitable[None]],
+) -> AssetRecord | None:
+    """Resolve a single ``AssetRef`` to an on-disk binary, copy it into the
+    engine vault under ``project_root/assets/…`` (deduped by sha256), probe
+    its MIME + dimensions, and persist the metadata.
+
+    The function is idempotent by content hash:
+      * Same hash already in storage → returns the existing record after
+        appending the current ``original_path`` to ``original_paths``
+        (deduplicating identical entries). The binary is *not* re-written.
+      * New hash → writes ``assets/<h2>/<h8>-<sanitized>.<ext>`` atomically
+        (``.tmp.<rand>`` → rename) and inserts a fresh ``AssetRecord``.
+
+    Returns ``None`` (and logs at WARNING) for remote URLs, missing files,
+    or unrecognizable formats — the caller decides how to surface skips
+    to the user.
+
+    ``get_asset`` / ``upsert_asset`` are passed in as callables (rather
+    than a full Storage handle) so this function stays decoupled from the
+    storage Protocol additions, which land in a later phase.
+    """
+    if _is_remote(ref.original_path):
+        logger.warning(
+            "skipping remote image reference: %s", ref.original_path
+        )
+        return None
+
+    abs_path = _resolve_local(
+        ref.original_path,
+        source_md_path=source_md_path,
+        project_root=project_root,
+    )
+    if abs_path is None:
+        logger.warning(
+            "skipping unresolvable image reference: %r relative to %s",
+            ref.original_path,
+            source_md_path,
+        )
+        return None
+
+    try:
+        data = abs_path.read_bytes()
+    except OSError as e:
+        logger.warning("failed to read %s: %s", abs_path, e)
+        return None
+
+    sha = hashlib.sha256(data).hexdigest()
+
+    existing = await get_asset(sha)
+    if existing is not None:
+        if ref.original_path not in existing.original_paths:
+            updated = existing.model_copy(
+                update={
+                    "original_paths": [
+                        *existing.original_paths,
+                        ref.original_path,
+                    ]
+                }
+            )
+            await upsert_asset(updated)
+            return updated
+        return existing
+
+    _, ext_hint = _split_basename_and_ext(ref.original_path)
+    mime = _detect_image_mime(data, ext_hint=ext_hint)
+    if mime is None:
+        logger.warning(
+            "skipping unrecognized image format at %s (ext=%r)",
+            abs_path,
+            ext_hint,
+        )
+        return None
+
+    width, height = _probe_dimensions(data, mime)
+    rel_stored = assets_relative_path(
+        hash_=sha, original_path=ref.original_path
+    )
+    abs_stored = project_root / rel_stored
+    if not abs_stored.exists():
+        abs_stored.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write: copy via temp file then rename so a crash in the
+        # middle never leaves a half-written asset visible at stored_path.
+        tmp = abs_stored.with_name(f".tmp.{os.urandom(6).hex()}{abs_stored.suffix}")
+        tmp.write_bytes(data)
+        os.replace(tmp, abs_stored)
+
+    record = AssetRecord(
+        asset_id=sha,
+        hash=sha,
+        kind=AssetKind.IMAGE,
+        mime=mime,
+        stored_path=rel_stored,
+        original_paths=[ref.original_path],
+        bytes=len(data),
+        width=width,
+        height=height,
+        caption=None,
+        caption_model=None,
+        created_ts=time.time(),
+    )
+    await upsert_asset(record)
+    return record

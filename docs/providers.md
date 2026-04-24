@@ -215,3 +215,64 @@ config:
   end-to-end walkthrough.
 - [`docs/architecture.md`](./architecture.md) — where the provider
   seam sits in the module map.
+
+
+## Multimodal embedding (v1: Gitee AI default)
+
+When `dikw.yml` declares an `assets.multimodal` block, the engine
+routes both chunk text and image bytes through one
+`MultimodalEmbeddingProvider` so they land in the same vector space.
+Without the block, the legacy 2-leg text-embedding path is used
+exactly as before — multimodal is opt-in.
+
+```yaml
+assets:
+  dir: assets                 # relative to project root
+  multimodal:
+    provider: gitee_multimodal
+    model: jina-clip-v2       # or whatever multimodal model your endpoint serves
+    revision: ""              # bump (e.g., "2026-04") if the vendor silently
+                              # refreshes weights behind a stable model name
+    dim: 1024                 # MUST match the model's actual output dim
+    normalize: true           # whether the model returns L2-normalized vectors
+    distance: cosine          # cosine | l2 | dot
+    batch: 16                 # per-request input cap; tighten for stricter vendors
+    base_url: null            # override the provider default if needed
+```
+
+The provider reads `DIKW_EMBEDDING_API_KEY` (the same env var the legacy
+text embedder uses) — never `OPENAI_API_KEY`. If the LLM and embedding
+legs target different vendors, set them as two distinct keys.
+
+### What the multimodal pipeline buys you
+
+- Image binaries referenced from your markdown (`![alt](path)` or
+  `![[file]]`) are materialized into `assets/<h2>/<h8>-<name>.<ext>`
+  inside your project root, visible in Obsidian.
+- Each binary gets a vector via the multimodal model and lives in a
+  per-version `vec_assets_v<id>` table (so dim/model changes don't
+  collide with prior data).
+- Hybrid search adds a third RRF leg over asset vectors that promotes
+  chunks via the `chunk_asset_refs` reverse lookup — text queries
+  retrieve chunks based on the images they reference even when the
+  surrounding prose doesn't match the query.
+
+### Switching the multimodal model
+
+Change `model` (and `dim` if it differs) in `dikw.yml` and re-run
+`dikw ingest`. The engine sees a new identity tuple, mints a new
+version row, creates a fresh `vec_assets_v<new_id>` table, and writes
+to it. The previous version's data stays in `vec_assets_v<old_id>`
+until you run `dikw embed reindex` (v1 ships a stub; v1.5 implements
+the real migration).
+
+### Trying another multimodal provider
+
+Drop a new file under `src/dikw_core/providers/` that implements the
+`MultimodalEmbeddingProvider` Protocol (one method: `async embed(inputs:
+list[MultimodalInput], *, model: str) -> list[list[float]]`), then
+add a branch to `build_multimodal_embedder` in
+`providers/__init__.py`. The Protocol signature accepts arbitrary
+combinations of text and image inputs already — Voyage v3, Cohere v4,
+Jina-direct, and self-hosted Nomic Embed Vision all slot in without
+engine changes.

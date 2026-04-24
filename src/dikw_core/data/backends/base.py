@@ -16,6 +16,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from ...schemas import AssetRef
+
 
 class ParsedDocument(BaseModel):
     """Backend-agnostic representation of a parsed source file."""
@@ -26,6 +28,7 @@ class ParsedDocument(BaseModel):
     frontmatter: dict[str, Any] = Field(default_factory=dict)
     hash: str
     mtime: float
+    asset_refs: list[AssetRef] = Field(default_factory=list)
 
 
 @runtime_checkable

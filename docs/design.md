@@ -528,3 +528,80 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 - Whether `knowledge/links.py` parses MDX-style links (probably no — Karpathy's pattern is vanilla MD).
 - Whether to ship a `dikw.yml` schema JSON for editor autocomplete — nice-to-have in Phase 4.
 - License choice (MIT vs Apache-2.0) — ask user before publishing.
+
+## Multimedia Assets — v1 (images only)
+
+dikw-core's v1 brings images into the retrieval surface. The design honours
+the four invariants from the rest of this doc — Obsidian-vault-native
+on-disk format, deterministic scoping, the Storage Protocol as the only
+seam, and reuse of named extension points.
+
+**On disk.** Image binaries referenced from a markdown source (either the
+standard `![alt](path)` form or Obsidian's `![[file|alias]]`) are copied
+into an engine-managed directory under the project root:
+
+```
+<project_root>/assets/<sha256[:2]>/<sha256[:8]>-<sanitized-name>.<ext>
+```
+
+The 2-char hash prefix shards the directory (256-way) so the asset
+folder stays Finder-, rsync-, and Dropbox-friendly even at six-figure
+asset counts. The 8-hex prefix in the filename guarantees uniqueness
+even when two different binaries share a sanitized stem; the trailing
+sanitized name preserves human-readable semantics (Obsidian shows
+`ab3f12ef-architecture-diagram.png`, not an opaque hash). Sanitization
+NFC-normalizes Unicode and whitelists letters/numbers (any script,
+including CJK / JP / KR / Cyrillic / Greek) plus `-` and `_`; everything
+else collapses to `-`. Length is capped at 150 UTF-8 bytes on a
+character boundary.
+
+**Reference preservation across path rewrite.** The user's source
+markdown is never modified — `![alt](./diagrams/foo.png)` survives
+verbatim in `chunks.text` (Layer 1). Structural mapping lives in the
+new `chunk_asset_refs` bridge table (Layer 2) — `(chunk_id, asset_id,
+ord, alt, start_in_chunk, end_in_chunk)` — so the relationship
+between chunk text positions and the materialized asset is recoverable
+regardless of file moves. A pure `info/render.py::render_chunk` helper
+produces a self-contained Markdown rendering with `stored_path`
+substituted into the original positions on demand (Layer 3).
+
+**Span-aware chunking.** The paragraph-aligned chunker takes an
+`atomic_spans` parameter and hard-fails (rather than silently splitting)
+if any image reference would cross a chunk boundary. For valid
+single-line markdown image syntax this is a no-op; the explicit
+post-condition catches pathological inputs and future chunker variants.
+
+**Native multimodal embedding.** v1 introduces a
+`MultimodalEmbeddingProvider` Protocol (text + image inputs → shared
+vector space). The first concrete impl wraps Gitee AI's hosted
+multimodal embedding endpoint over httpx; other providers (Voyage,
+Cohere v4, native Jina) drop in as siblings with no engine changes.
+Chunk text and asset binaries both flow through the same provider so
+their vectors share one space — a text query naturally matches
+against image semantics, no caption-to-text intermediary required.
+
+**Embedding versioning.** Every embedding generation is identified by
+a composite tuple `(provider, model, revision, dim, normalize, distance)`
+in the new `embed_versions` table. The `revision` field is the
+user-facing escape hatch when a vendor silently refreshes weights
+behind a stable model name. Each version gets its own per-version
+sqlite-vec virtual table (`vec_assets_v<id>`) so dim changes are
+naturally isolated and prior data survives a model swap.
+
+**Three-leg retrieval.** `info/search.HybridSearcher` now fuses three
+ranked lists via RRF: BM25 over chunk text, vector search over chunk
+vectors, and vector search over asset vectors with reverse-lookup
+into parent chunks. Asset-vector hits promote chunks that *reference*
+a matching image even when the chunk text contains no matching tokens.
+The asset channel is opt-in — installations without multimodal config
+get the original 2-leg behavior unchanged.
+
+**Scope (v1) vs. roadmap.** v1 ships images only. Caption regeneration
+via a `VisionProvider` (currently `assets.caption` stays NULL), audio /
+video transcription with timestamp anchors, true mixed text+image
+chunk encoding, and image-bytes-in-prompt LLM synthesis are all
+designed to slot into the existing schema (`AssetKind` is an enum
+with reserved values, `chunk_asset_refs` PK is `(chunk_id, ord)` not
+tied to text-only assumptions, `LLMProvider` can grow an `images`
+parameter behind a capability flag) but are deferred to v1.5/v2.
+

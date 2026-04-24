@@ -135,12 +135,39 @@ class SourceConfig(BaseModel):
     ignore: list[str] = Field(default_factory=list)
 
 
+class MultimodalEmbedConfig(BaseModel):
+    """Native multimodal embedding configuration.
+
+    When this section is present in ``dikw.yml`` the engine routes both
+    chunk text and image bytes through the same multimodal model so they
+    share one vector space. When absent, the engine stays in legacy
+    text-only mode (text-embed for chunks, no asset retrieval).
+    """
+
+    provider: Literal["gitee_multimodal"] = "gitee_multimodal"
+    model: str
+    revision: str = ""  # bump to force a new version when weights change
+    dim: int  # must match the model's actual output dim; vec table dim-locks on it
+    normalize: bool = True
+    distance: Literal["cosine", "l2", "dot"] = "cosine"
+    batch: int = 16
+    base_url: str | None = None  # override the provider's default endpoint
+
+
+class AssetsConfig(BaseModel):
+    """Multimedia asset materialization config."""
+
+    dir: str = "assets"  # relative to project root
+    multimodal: MultimodalEmbedConfig | None = None
+
+
 class DikwConfig(BaseModel):
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     storage: StorageConfig = Field(default_factory=SQLiteStorageConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     schema_: SchemaConfig = Field(default_factory=SchemaConfig, alias="schema")
     sources: list[SourceConfig] = Field(default_factory=list)
+    assets: AssetsConfig = Field(default_factory=AssetsConfig)
 
     model_config = {"populate_by_name": True}
 

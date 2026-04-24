@@ -23,6 +23,7 @@ Phase 0 surface (``init_wiki``, ``status``) stays unchanged.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,23 +39,39 @@ from .config import (
     find_config,
     load_config,
 )
+from .data.assets import materialize_asset
 from .data.backends import UnsupportedFormat, parse_any
 from .data.backends.base import ParsedDocument
 from .data.backends.markdown import content_hash
 from .data.sources import iter_source_files
 from .info.chunk import chunk_markdown
-from .info.embed import ChunkToEmbed, embed_chunks
-from .info.search import Hit, HybridSearcher
+from .info.embed import (
+    ChunkToEmbed,
+    embed_assets,
+    embed_chunks,
+    embed_chunks_multimodal,
+)
+from .info.search import Hit, HybridSearcher, MultimodalSearch
 from .knowledge.indexgen import regenerate_index
 from .knowledge.links import parse_links, resolve_links
 from .knowledge.lint import LintReport, run_lint
 from .knowledge.log import render_log
 from .knowledge.synthesize import SynthesisError, parse_synthesis_response
 from .knowledge.wiki import WikiPage, now_iso, write_page
-from .providers import EmbeddingProvider, LLMProvider, build_embedder, build_llm
+from .providers import (
+    EmbeddingProvider,
+    LLMProvider,
+    MultimodalEmbeddingProvider,
+    build_embedder,
+    build_llm,
+    build_multimodal_embedder,
+)
 from .schemas import (
+    AssetRecord,
+    ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
+    EmbeddingVersion,
     Layer,
     StorageCounts,
     WikiLogEntry,
@@ -63,6 +80,7 @@ from .schemas import (
     WisdomStatus,
 )
 from .storage import Storage, build_storage
+from .storage.base import NotSupported, StorageError
 from .wisdom.apply import ApplicableWisdom, pick_applicable
 from .wisdom.distill import WisdomCandidate, parse_distill_response
 from .wisdom.io import write_candidate_file
@@ -72,6 +90,8 @@ from .wisdom.review import (
 )
 from .wisdom.review import approve as _approve_item
 from .wisdom.review import reject as _reject_item
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AppliedWisdomRef",
@@ -157,6 +177,8 @@ class IngestReport:
     unchanged: int = 0
     chunks: int = 0
     embedded: int = 0
+    assets: int = 0  # NEW assets materialized this run
+    asset_embedded: int = 0  # asset-level vectors written this run
 
 
 @dataclass(frozen=True)
@@ -390,17 +412,73 @@ async def ingest(
     path: str | Path | None = None,
     *,
     embedder: EmbeddingProvider | None = None,
+    multimodal_embedder: MultimodalEmbeddingProvider | None = None,
 ) -> IngestReport:
     """Ingest every markdown file listed in ``sources:`` into the D and I layers.
 
-    ``embedder`` is injectable so tests can pass a deterministic fake;
-    production callers leave it ``None`` and the factory builds one from
-    ``provider:`` in ``dikw.yml``.
+    Two provider knobs:
+
+    * ``embedder`` — text-only ``EmbeddingProvider``; populates the legacy
+      ``chunks_vec`` table for the BM25-vec hybrid path. Injectable so
+      tests can pass a deterministic fake.
+    * ``multimodal_embedder`` — ``MultimodalEmbeddingProvider``; when
+      ``cfg.assets.multimodal`` is configured this routes both chunk-text
+      and image-asset bytes through one shared vector space. Asset
+      binaries referenced from markdown are materialized into
+      ``<root>/<assets.dir>/`` regardless of which embedder is set —
+      ``chunk_asset_refs`` always reflect the on-disk structure so
+      query-time consumers can render them.
     """
     cfg, root, storage = await _with_storage(path)
+    owned_mm: MultimodalEmbeddingProvider | None = None
     try:
         report = IngestReport()
         to_embed: list[ChunkToEmbed] = []
+        # Newly-materialized assets (deduped by asset_id) collected across
+        # the run for batch image embedding at the end.
+        new_assets_by_id: dict[str, AssetRecord] = {}
+
+        # Resolve the active multimodal version once per run so chunks and
+        # assets land under the same version_id. Storage backends that
+        # don't yet implement the asset / versioning APIs (filesystem,
+        # postgres) raise NotSupported here — we degrade to the legacy
+        # text path with a warning rather than failing the run.
+        mm_version_id: int | None = None
+        mm_cfg = cfg.assets.multimodal
+        if mm_cfg is not None:
+            try:
+                mm_version_id = await storage.upsert_embed_version(
+                    EmbeddingVersion(
+                        provider=mm_cfg.provider,
+                        model=mm_cfg.model,
+                        revision=mm_cfg.revision,
+                        dim=mm_cfg.dim,
+                        normalize=mm_cfg.normalize,
+                        distance=mm_cfg.distance,
+                        modality="multimodal",
+                    )
+                )
+            except NotSupported as e:
+                logger.warning(
+                    "storage backend doesn't support multimodal versioning "
+                    "(%s); falling back to text-only ingest",
+                    e,
+                )
+                mm_cfg = None  # disable mm pathway for the rest of this run
+
+        # Auto-build the multimodal embedder from config when one wasn't
+        # injected — symmetric with query()'s behavior, so the typical
+        # CLI / MCP / eval call site (which only passes `embedder`) still
+        # produces chunk + asset vectors in the configured mm space
+        # rather than indexing chunks in legacy text space and querying
+        # in mm space.
+        if mm_cfg is not None and multimodal_embedder is None:
+            multimodal_embedder = build_multimodal_embedder(
+                mm_cfg.provider,
+                base_url=mm_cfg.base_url,
+                batch=mm_cfg.batch,
+            )
+            owned_mm = multimodal_embedder
 
         for abs_path, logical_path in iter_source_files(cfg.sources, root=root):
             try:
@@ -413,8 +491,15 @@ async def ingest(
             existing = await storage.get_document(doc_id)
 
             scanned = report.scanned + 1
-            if existing is not None and existing.hash == parsed.hash:
-                # Source unchanged since last ingest — skip chunk/embed work.
+            # Skip the chunk/embed pipeline only when the doc body is
+            # unchanged AND the doc has no asset references — the latter
+            # would otherwise leave assets stale when the binary was
+            # replaced on disk or the multimodal version bumped.
+            if (
+                existing is not None
+                and existing.hash == parsed.hash
+                and not parsed.asset_refs
+            ):
                 report = _replace(
                     report,
                     scanned=scanned,
@@ -425,7 +510,46 @@ async def ingest(
             await storage.put_content(parsed.hash, parsed.body)
             await storage.upsert_document(_to_document(parsed, doc_id=doc_id))
 
-            chunks = chunk_markdown(parsed.body)
+            # Materialize image references first so asset_ids are known
+            # when we wire up chunk_asset_refs after chunking. Dedupe by
+            # original_path so a doc that references the same image N
+            # times only reads + hashes the file once.
+            #
+            # Asset materialization requires a storage backend that
+            # implements the asset APIs. mm_cfg above is set to None
+            # when the backend raised NotSupported on upsert_embed_version,
+            # so this gate also degrades gracefully on filesystem /
+            # postgres until those adapters land their asset impls.
+            ref_assets: dict[int, AssetRecord] = {}
+            if mm_cfg is not None:
+                by_original_path: dict[str, AssetRecord] = {}
+                for ref_idx, ref in enumerate(parsed.asset_refs):
+                    cached = by_original_path.get(ref.original_path)
+                    if cached is not None:
+                        ref_assets[ref_idx] = cached
+                        continue
+                    result = await materialize_asset(
+                        ref,
+                        source_md_path=abs_path,
+                        project_root=root,
+                        get_asset=storage.get_asset,
+                        upsert_asset=storage.upsert_asset,
+                        dir_=cfg.assets.dir,
+                    )
+                    if result is not None:
+                        rec, was_new = result
+                        ref_assets[ref_idx] = rec
+                        by_original_path[ref.original_path] = rec
+                        # Only newly-materialized binaries need an
+                        # embedding pass — assets already in storage
+                        # from a prior run keep their existing vector,
+                        # so re-ingesting an unchanged image-heavy
+                        # corpus doesn't re-bill the multimodal API.
+                        if was_new:
+                            new_assets_by_id.setdefault(rec.asset_id, rec)
+
+            atomic_spans = [(r.start, r.end) for r in parsed.asset_refs]
+            chunks = chunk_markdown(parsed.body, atomic_spans=atomic_spans)
             chunk_records = [
                 ChunkRecord(
                     doc_id=doc_id, seq=c.seq, start=c.start, end=c.end, text=c.text
@@ -433,7 +557,39 @@ async def ingest(
                 for c in chunks
             ]
             chunk_ids = await storage.replace_chunks(doc_id, chunk_records)
-            if embedder is not None and chunk_records:
+
+            # Project body-relative ref offsets into chunk-relative offsets
+            # and persist the chunk ↔ asset bridge rows.
+            for chunk_record, chunk_id in zip(chunk_records, chunk_ids, strict=True):
+                chunk_refs: list[ChunkAssetRef] = []
+                ord_counter = 0
+                for ref_idx, ref in enumerate(parsed.asset_refs):
+                    if not (
+                        chunk_record.start <= ref.start
+                        and ref.end <= chunk_record.end
+                    ):
+                        continue
+                    asset = ref_assets.get(ref_idx)
+                    if asset is None:
+                        continue  # unresolved (remote URL, missing file) — already logged
+                    chunk_refs.append(
+                        ChunkAssetRef(
+                            chunk_id=chunk_id,
+                            asset_id=asset.asset_id,
+                            ord=ord_counter,
+                            alt=ref.alt,
+                            start_in_chunk=ref.start - chunk_record.start,
+                            end_in_chunk=ref.end - chunk_record.start,
+                        )
+                    )
+                    ord_counter += 1
+                if chunk_refs:
+                    await storage.replace_chunk_asset_refs(chunk_id, chunk_refs)
+
+            # Queue chunks for embedding when ANY embedder is wired up —
+            # the multimodal path also needs them, even when no legacy
+            # text embedder is provided.
+            if (embedder is not None or multimodal_embedder is not None) and chunk_records:
                 to_embed.extend(
                     ChunkToEmbed(chunk_id=cid, text=r.text)
                     for cid, r in zip(chunk_ids, chunk_records, strict=True)
@@ -450,18 +606,81 @@ async def ingest(
                 chunks=report.chunks + len(chunk_records),
             )
 
-        if embedder is not None and to_embed:
-            rows = await embed_chunks(
-                embedder,
-                to_embed,
-                model=cfg.provider.embedding_model,
-                batch_size=cfg.provider.embedding_batch_size,
+        # Chunk-text embeddings: prefer the multimodal pathway when both an
+        # mm provider and a configured multimodal version are available.
+        if to_embed:
+            if multimodal_embedder is not None and mm_cfg is not None:
+                rows = await embed_chunks_multimodal(
+                    multimodal_embedder,
+                    to_embed,
+                    model=mm_cfg.model,
+                    batch_size=mm_cfg.batch,
+                )
+                # The legacy chunks_vec table is dim-locked at first
+                # write; if the user previously indexed with a different
+                # text-embedding dim, writing mm vectors here would
+                # raise StorageError. Asset retrieval still works (it
+                # uses a per-version vec_assets_v<id> table); skip the
+                # chunk-vec write with a clear warning so ingest doesn't
+                # die. v1 limitation: per-version chunk vec tables land
+                # in v1.5.
+                try:
+                    await storage.upsert_embeddings(rows)
+                    report = _replace(report, embedded=len(rows))
+                except StorageError as e:
+                    if "dim mismatch" in str(e):
+                        logger.warning(
+                            "skipping chunk-vec write: %s. Asset-vec retrieval "
+                            "still active; chunk-text retrieval falls back to "
+                            "BM25 only. Run `rm .dikw/dikw.sqlite && dikw "
+                            "ingest` to reindex chunks under the new dim.",
+                            e,
+                        )
+                    else:
+                        raise
+            elif embedder is not None:
+                rows = await embed_chunks(
+                    embedder,
+                    to_embed,
+                    model=cfg.provider.embedding_model,
+                    batch_size=cfg.provider.embedding_batch_size,
+                )
+                await storage.upsert_embeddings(rows)
+                report = _replace(report, embedded=len(rows))
+
+        # Asset embeddings — only when multimodal is configured AND a real
+        # mm provider is available. New-this-run assets only; previously
+        # ingested asset binaries already have vectors from a prior run.
+        if (
+            multimodal_embedder is not None
+            and mm_cfg is not None
+            and mm_version_id is not None
+            and new_assets_by_id
+        ):
+            asset_rows = await embed_assets(
+                multimodal_embedder,
+                list(new_assets_by_id.values()),
+                project_root=root,
+                model=mm_cfg.model,
+                version_id=mm_version_id,
+                batch_size=mm_cfg.batch,
             )
-            await storage.upsert_embeddings(rows)
-            report = _replace(report, embedded=len(rows))
+            if asset_rows:
+                await storage.upsert_asset_embeddings(asset_rows)
+            report = _replace(
+                report,
+                assets=len(new_assets_by_id),
+                asset_embedded=len(asset_rows),
+            )
+        elif new_assets_by_id:
+            # Materialized assets even without an mm embedder so the chunk
+            # references resolve at query/render time.
+            report = _replace(report, assets=len(new_assets_by_id))
 
         return report
     finally:
+        if owned_mm is not None and hasattr(owned_mm, "aclose"):
+            await owned_mm.aclose()
         await storage.close()
 
 
@@ -485,6 +704,8 @@ def _replace(r: IngestReport, **kwargs: int) -> IngestReport:
         unchanged=kwargs.get("unchanged", r.unchanged),
         chunks=kwargs.get("chunks", r.chunks),
         embedded=kwargs.get("embedded", r.embedded),
+        assets=kwargs.get("assets", r.assets),
+        asset_embedded=kwargs.get("asset_embedded", r.asset_embedded),
     )
 
 
@@ -498,9 +719,17 @@ async def query(
     limit: int = 5,
     llm: LLMProvider | None = None,
     embedder: EmbeddingProvider | None = None,
+    multimodal_embedder: MultimodalEmbeddingProvider | None = None,
 ) -> QueryResult:
-    """Hybrid-search the wiki, feed the top hits to an LLM, and return cited answer."""
+    """Hybrid-search the wiki, feed the top hits to an LLM, and return cited answer.
+
+    When ``cfg.assets.multimodal`` is configured *and* a
+    ``multimodal_embedder`` is supplied (or buildable from the same
+    config), the searcher activates the asset-vector channel so visual
+    references contribute to retrieval.
+    """
     cfg, _root, storage = await _with_storage(path)
+    owned_mm: MultimodalEmbeddingProvider | None = None
     try:
         _embedder = embedder
         _llm = llm
@@ -509,10 +738,46 @@ async def query(
         if _llm is None:
             _llm = build_llm(cfg.provider)
 
+        mm_search: MultimodalSearch | None = None
+        mm_cfg = cfg.assets.multimodal
+        if mm_cfg is not None:
+            try:
+                active = await storage.get_active_embed_version(
+                    modality="multimodal"
+                )
+            except NotSupported as e:
+                logger.warning(
+                    "storage backend doesn't support multimodal versioning "
+                    "(%s); querying with text-only retrieval",
+                    e,
+                )
+                active = None
+            if active is not None and active.version_id is not None:
+                mm_embedder = multimodal_embedder
+                if mm_embedder is None:
+                    mm_embedder = build_multimodal_embedder(
+                        mm_cfg.provider,
+                        base_url=mm_cfg.base_url,
+                        batch=mm_cfg.batch,
+                    )
+                    owned_mm = mm_embedder  # close it ourselves below
+                # Use the model recorded on the active version, not the
+                # current cfg model — if the user just edited dikw.yml to
+                # point at a new model but hasn't re-ingested yet, the
+                # asset vectors in vec_assets_v<active> were produced by
+                # the OLD model; querying with the new model would either
+                # mismatch dim or rank against an incompatible space.
+                mm_search = MultimodalSearch(
+                    embedder=mm_embedder,
+                    model=active.model,
+                    asset_version_id=active.version_id,
+                )
+
         searcher = HybridSearcher(
             storage,
             _embedder,
             embedding_model=cfg.provider.embedding_model,
+            multimodal=mm_search,
             rrf_k=cfg.retrieval.rrf_k,
             bm25_weight=cfg.retrieval.bm25_weight,
             vector_weight=cfg.retrieval.vector_weight,
@@ -547,6 +812,8 @@ async def query(
             applied_wisdom=applied_refs,
         )
     finally:
+        if owned_mm is not None and hasattr(owned_mm, "aclose"):
+            await owned_mm.aclose()
         await storage.close()
 
 

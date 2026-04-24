@@ -14,12 +14,17 @@ Design invariants:
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from ..schemas import (
+    AssetEmbeddingRow,
+    AssetRecord,
+    AssetVecHit,
+    ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
     EmbeddingRow,
+    EmbeddingVersion,
     FTSHit,
     Layer,
     LinkRecord,
@@ -135,6 +140,84 @@ class Storage(Protocol):
         ...
 
     async def get_wisdom(self, item_id: str) -> WisdomItem | None: ...
+
+    # ---- D layer: multimedia assets --------------------------------------
+
+    async def upsert_asset(self, asset: AssetRecord) -> None:
+        """Insert or replace an ``AssetRecord``.
+
+        Idempotent by ``asset_id`` (= sha256). Adapters that already have
+        a row at this id should preserve ``original_paths`` semantics
+        themselves only if explicitly told to merge — the materialize
+        layer in ``data/assets.py`` is what dedup-merges entries; this
+        method is a plain replace.
+        """
+        ...
+
+    async def get_asset(self, asset_id: str) -> AssetRecord | None: ...
+
+    # ---- I layer: chunk ↔ asset bridge -----------------------------------
+
+    async def replace_chunk_asset_refs(
+        self, chunk_id: int, refs: Sequence[ChunkAssetRef]
+    ) -> None:
+        """Replace all ``chunk_asset_refs`` rows for ``chunk_id`` in one shot."""
+        ...
+
+    async def chunk_asset_refs_for_chunks(
+        self, chunk_ids: Sequence[int]
+    ) -> dict[int, list[ChunkAssetRef]]:
+        """Return refs grouped by chunk_id, each list sorted by ``ord``.
+        Missing chunk_ids map to empty lists."""
+        ...
+
+    async def chunks_referencing_assets(
+        self, asset_ids: Sequence[str]
+    ) -> dict[str, list[int]]:
+        """Reverse-lookup: for each asset_id, the chunk_ids that reference it.
+        Used by hybrid search to promote asset-vec hits to their parent
+        chunks via the ``chunk_asset_refs`` bridge."""
+        ...
+
+    # ---- I layer: asset embeddings (multimodal) --------------------------
+
+    async def upsert_asset_embeddings(
+        self, rows: Sequence[AssetEmbeddingRow]
+    ) -> None:
+        """Persist asset-level embedding vectors. The vector dimension
+        must match the dim of the row's ``version_id`` in
+        ``embed_versions``; otherwise raise ``StorageError``."""
+        ...
+
+    async def vec_search_assets(
+        self,
+        embedding: list[float],
+        *,
+        version_id: int,
+        limit: int = 20,
+        layer: Layer | None = None,
+    ) -> list[AssetVecHit]:
+        """ANN search against the asset vector table for ``version_id``."""
+        ...
+
+    # ---- Embedding versioning --------------------------------------------
+
+    async def upsert_embed_version(self, v: EmbeddingVersion) -> int:
+        """Idempotent upsert of an embedding version identity.
+
+        Match key is ``(provider, model, revision, dim, normalize, distance)``.
+        On a hit, returns the existing ``version_id`` and leaves
+        ``is_active`` untouched. On a miss, inserts a fresh row and
+        marks every other version of the same ``modality`` as
+        ``is_active = 0`` so the new one becomes the sole active version.
+        """
+        ...
+
+    async def get_active_embed_version(
+        self, *, modality: Literal["text", "multimodal"]
+    ) -> EmbeddingVersion | None: ...
+
+    async def list_embed_versions(self) -> list[EmbeddingVersion]: ...
 
     # ---- diagnostics -----------------------------------------------------
 

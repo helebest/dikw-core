@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from ..config import ProviderConfig
 from .anthropic import AnthropicLLM
-from .base import EmbeddingProvider, LLMProvider, LLMResponse, ProviderError, ToolSpec
+from .base import (
+    EmbeddingProvider,
+    LLMProvider,
+    LLMResponse,
+    MultimodalEmbeddingProvider,
+    ProviderError,
+    ToolSpec,
+)
+from .gitee_multimodal import GiteeMultimodalEmbedding
 from .openai_compat import OpenAICompatEmbeddings, OpenAICompatLLM
 
 
@@ -34,12 +42,28 @@ def build_embedder(config: ProviderConfig) -> EmbeddingProvider:
     raise ProviderError(f"unknown embedding provider: {config.embedding!r}")
 
 
+def build_multimodal_embedder(
+    provider: str, *, base_url: str | None = None, batch: int = 16
+) -> MultimodalEmbeddingProvider:
+    """Build a multimodal embedder by name.
+
+    The factory currently knows only ``gitee_multimodal`` (the v1 default);
+    additional providers (Voyage, Cohere, Jina-direct) are easy follow-ons
+    — drop a new file under ``providers/`` and add a branch here.
+    """
+    if provider == "gitee_multimodal":
+        return GiteeMultimodalEmbedding(base_url=base_url, batch=batch)
+    raise ProviderError(f"unknown multimodal embedding provider: {provider!r}")
+
+
 __all__ = [
     "EmbeddingProvider",
     "LLMProvider",
     "LLMResponse",
+    "MultimodalEmbeddingProvider",
     "ProviderError",
     "ToolSpec",
     "build_embedder",
     "build_llm",
+    "build_multimodal_embedder",
 ]

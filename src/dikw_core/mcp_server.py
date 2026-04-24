@@ -259,7 +259,12 @@ async def build_server() -> Any:
             try:
                 embedder = build_embedder(cfg.provider)
                 searcher = HybridSearcher(
-                    storage, embedder, embedding_model=cfg.provider.embedding_model
+                    storage,
+                    embedder,
+                    embedding_model=cfg.provider.embedding_model,
+                    rrf_k=cfg.retrieval.rrf_k,
+                    bm25_weight=cfg.retrieval.bm25_weight,
+                    vector_weight=cfg.retrieval.vector_weight,
                 )
                 layer_arg = arguments.get("layer")
                 layer = Layer(layer_arg) if layer_arg else None

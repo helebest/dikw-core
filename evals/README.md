@@ -154,14 +154,32 @@ See [`docs/providers.md`](../docs/providers.md#public-benchmark-calibration-with
 for the donor-wiki setup against Gitee AI (the cheapest currently-tested
 embedder for benchmark-scale work).
 
+### Tuning RRF for your corpus
+
+`dikw eval --retrieval all --dump-raw path.jsonl` + `evals/tools/sweep_rrf.py`
+re-fuses the same ranked lists at arbitrary `(rrf_k, bm25_weight,
+vector_weight)` combinations offline — no re-embedding, milliseconds
+per sweep. Pin the winning row into your wiki's `dikw.yml`:
+
+```yaml
+retrieval:
+  rrf_k: 60
+  bm25_weight: 0.5    # raise for keyword-heavy corpora
+  vector_weight: 1.0
+```
+
+See [`docs/providers.md`](../docs/providers.md#tuning-rrf-weights-for-your-corpus)
+for the step-by-step and [`BASELINES.md`](./BASELINES.md) for the
+SciFact sweep that picked the shipped defaults.
+
 ### Comparability caveats
 
 These numbers are **calibration**, not exact reproduction. See
 [`docs/eval-plan.md`](../docs/eval-plan.md#公开-benchmark-校准) for
 the full list (chunking at 900 tokens, FTS5 vs Anserini BM25, RRF
-k=60 untuned, embedding dimension choice). The useful signal is the
-*trend* — does dikw's bm25 land near published BM25, does hybrid
-actually win — not the third decimal place.
+weights tuned per-corpus, embedding dimension choice). The useful
+signal is the *trend* — does dikw's bm25 land near published BM25,
+does hybrid actually win — not the third decimal place.
 
 ## See also
 

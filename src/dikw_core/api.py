@@ -778,6 +778,9 @@ async def query(
             _embedder,
             embedding_model=cfg.provider.embedding_model,
             multimodal=mm_search,
+            rrf_k=cfg.retrieval.rrf_k,
+            bm25_weight=cfg.retrieval.bm25_weight,
+            vector_weight=cfg.retrieval.vector_weight,
         )
         hits = await searcher.search(q, limit=limit)
 

@@ -38,7 +38,7 @@ from ..schemas import (
     MultimodalInput,
     VecHit,
 )
-from ..storage.base import NotSupported, Storage
+from ..storage.base import NotSupported, Storage, StorageError
 
 
 @dataclass(frozen=True)
@@ -171,6 +171,14 @@ class HybridSearcher:
             try:
                 vec_hits = await vec_task
             except NotSupported:
+                vec_hits = []
+            except StorageError as e:
+                # Mid-migration scenario: a multimodal-mode query against
+                # a legacy chunks_vec built with a different text-embed
+                # dim. Degrade to BM25 + asset-vec leg rather than
+                # killing the whole query.
+                if "dim" not in str(e):
+                    raise
                 vec_hits = []
         asset_hits: list[AssetVecHit] = []
         if asset_task is not None:

@@ -267,17 +267,22 @@ async def materialize_asset(
     get_asset: Callable[[str], Awaitable[AssetRecord | None]],
     upsert_asset: Callable[[AssetRecord], Awaitable[None]],
     dir_: str = "assets",
-) -> AssetRecord | None:
+) -> tuple[AssetRecord, bool] | None:
     """Resolve a single ``AssetRef`` to an on-disk binary, copy it into the
-    engine vault under ``project_root/assets/…`` (deduped by sha256), probe
+    engine vault under ``project_root/<dir_>/…`` (deduped by sha256), probe
     its MIME + dimensions, and persist the metadata.
 
+    Returns ``(record, was_newly_created)`` so the caller can avoid
+    re-embedding assets that already lived in storage from a prior run.
+
     The function is idempotent by content hash:
-      * Same hash already in storage → returns the existing record after
-        appending the current ``original_path`` to ``original_paths``
-        (deduplicating identical entries). The binary is *not* re-written.
-      * New hash → writes ``assets/<h2>/<h8>-<sanitized>.<ext>`` atomically
-        (``.tmp.<rand>`` → rename) and inserts a fresh ``AssetRecord``.
+      * Same hash already in storage → returns ``(existing_or_updated,
+        False)`` after appending the current ``original_path`` to
+        ``original_paths`` (deduplicating identical entries). The binary
+        is *not* re-written.
+      * New hash → writes ``<dir_>/<h2>/<h8>-<sanitized>.<ext>``
+        atomically (``.tmp.<rand>`` → rename) and inserts a fresh
+        ``AssetRecord``; returns ``(record, True)``.
 
     Returns ``None`` (and logs at WARNING) for remote URLs, missing files,
     or unrecognizable formats — the caller decides how to surface skips
@@ -326,8 +331,8 @@ async def materialize_asset(
                 }
             )
             await upsert_asset(updated)
-            return updated
-        return existing
+            return updated, False
+        return existing, False
 
     _, ext_hint = _split_basename_and_ext(ref.original_path)
     mime = _detect_image_mime(data, ext_hint=ext_hint)
@@ -367,4 +372,4 @@ async def materialize_asset(
         created_ts=time.time(),
     )
     await upsert_asset(record)
-    return record
+    return record, True

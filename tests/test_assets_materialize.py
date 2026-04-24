@@ -105,6 +105,7 @@ async def test_materialize_local_png_copies_and_records(tmp_path: Path) -> None:
         get_asset=get,
         upsert_asset=upsert,
     )
+    rec = None if rec is None else rec[0]
     assert rec is not None
     assert rec.kind == AssetKind.IMAGE
     assert rec.mime == "image/png"
@@ -200,10 +201,11 @@ async def test_materialize_dedup_by_hash_appends_original_paths(
         get_asset=get,
         upsert_asset=upsert,
     )
+    rec1 = None if rec1 is None else rec1[0]
     assert rec1 is not None
     assert rec1.original_paths == ["a.png"]
 
-    rec2 = await materialize_asset(
+    result2 = await materialize_asset(
         AssetRef(
             original_path="b.png", alt="", start=0, end=10, syntax="markdown"
         ),
@@ -212,7 +214,11 @@ async def test_materialize_dedup_by_hash_appends_original_paths(
         get_asset=get,
         upsert_asset=upsert,
     )
-    assert rec2 is not None
+    assert result2 is not None
+    rec2, was_new_2 = result2
+    # Second materialize hit the existing row — was_new flag tells the
+    # caller (api.ingest) it doesn't need to re-embed this asset.
+    assert was_new_2 is False
     assert rec2.asset_id == rec1.asset_id  # same content → same id
     assert rec2.original_paths == ["a.png", "b.png"]
     # Only one row.
@@ -251,7 +257,11 @@ async def test_materialize_dedup_idempotent_on_same_path(
         upsert_asset=upsert,
     )
     assert r1 is not None and r2 is not None
-    assert r2.original_paths == ["img.png"]
+    _rec1, was_new_1 = r1
+    rec2, was_new_2 = r2
+    assert was_new_1 is True
+    assert was_new_2 is False
+    assert rec2.original_paths == ["img.png"]
 
 
 async def test_materialize_jpeg_dimensions(tmp_path: Path) -> None:
@@ -273,6 +283,7 @@ async def test_materialize_jpeg_dimensions(tmp_path: Path) -> None:
         get_asset=get,
         upsert_asset=upsert,
     )
+    rec = None if rec is None else rec[0]
     assert rec is not None
     assert rec.mime == "image/jpeg"
     assert rec.width == 800
@@ -298,6 +309,7 @@ async def test_materialize_gif_dimensions(tmp_path: Path) -> None:
         get_asset=get,
         upsert_asset=upsert,
     )
+    rec = None if rec is None else rec[0]
     assert rec is not None
     assert rec.mime == "image/gif"
     assert rec.width == 50
@@ -324,6 +336,7 @@ async def test_materialize_svg_records_no_dims(tmp_path: Path) -> None:
         get_asset=get,
         upsert_asset=upsert,
     )
+    rec = None if rec is None else rec[0]
     assert rec is not None
     assert rec.mime == "image/svg+xml"
     assert rec.width is None
@@ -377,6 +390,7 @@ async def test_materialize_uses_engine_vault_path_layout(tmp_path: Path) -> None
         get_asset=get,
         upsert_asset=upsert,
     )
+    rec = None if rec is None else rec[0]
     assert rec is not None
     parts = rec.stored_path.split("/")
     assert parts[0] == "assets"

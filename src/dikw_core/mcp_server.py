@@ -253,7 +253,9 @@ async def build_server() -> Any:
         if name == "doc.search":
             wiki_path = arguments.get("path", ".")
             cfg, root = api.load_wiki(wiki_path)
-            storage = build_storage(cfg.storage, root=root)
+            storage = build_storage(
+                cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+            )
             await storage.connect()
             await storage.migrate()
             try:
@@ -308,7 +310,9 @@ async def build_server() -> Any:
         if name == "wiki.list":
             wiki_path = arguments.get("path", ".")
             cfg, root = api.load_wiki(wiki_path)
-            storage = build_storage(cfg.storage, root=root)
+            storage = build_storage(
+                cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+            )
             await storage.connect()
             await storage.migrate()
             try:
@@ -368,7 +372,9 @@ async def build_server() -> Any:
         if name == "wisdom.list":
             wiki_path = arguments.get("path", ".")
             cfg, root = api.load_wiki(wiki_path)
-            storage = build_storage(cfg.storage, root=root)
+            storage = build_storage(
+                cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+            )
             await storage.connect()
             await storage.migrate()
             try:

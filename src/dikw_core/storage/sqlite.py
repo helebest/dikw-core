@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 import sqlite_vec
 
+from ..info.tokenize import CjkTokenizer, preprocess_for_fts
 from ..schemas import (
     AssetEmbeddingRow,
     AssetKind,
@@ -61,10 +62,21 @@ class SQLiteStorage:
     variable embedding sizes across providers.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        cjk_tokenizer: CjkTokenizer = "none",
+    ) -> None:
         self._path = Path(path)
         self._conn: sqlite3.Connection | None = None
         self._embedding_dim: int | None = None
+        # Applied to title + chunk.text before INSERT into documents_fts.
+        # Must match what `_sanitize_fts` does on query text at read time
+        # — flipping this post-ingest mismatches index vs query and
+        # silently drops hits. `RetrievalConfig.cjk_tokenizer` is marked
+        # "locked at first ingest" for exactly this reason.
+        self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -236,15 +248,27 @@ class SQLiteStorage:
                     # return chunk_id and the hybrid searcher attach
                     # chunk_asset_refs to the right Hit even when only
                     # the FTS leg fired.
+                    #
+                    # Title/body also get preprocessed (via jieba when
+                    # cjk_tokenizer="jieba") so BM25's title and body
+                    # columns tokenize consistently with the query-side
+                    # _sanitize_fts path. Both columns feed the BM25
+                    # score FTS5 returns.
+                    title = preprocess_for_fts(
+                        doc_row["title"] or "", tokenizer=self._cjk_tokenizer
+                    )
                     for cid, c in zip(ids, chunks, strict=True):
+                        body = preprocess_for_fts(
+                            c.text, tokenizer=self._cjk_tokenizer
+                        )
                         conn.execute(
                             "INSERT INTO documents_fts(rowid, path, title, body, layer) "
                             "VALUES (?, ?, ?, ?, ?)",
                             (
                                 cid,
                                 doc_row["path"],
-                                doc_row["title"],
-                                c.text,
+                                title,
+                                body,
                                 doc_row["layer"],
                             ),
                         )

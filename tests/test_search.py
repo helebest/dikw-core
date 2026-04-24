@@ -322,3 +322,106 @@ async def test_mode_vector_requires_embedder(tmp_path) -> None:
         await searcher.search("anything", limit=3, mode="vector")
 
     await storage.close()
+
+
+# ---- cjk tokenizer integration ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cjk_tokenizer_jieba_ingest_stores_segmented_body(tmp_path) -> None:
+    """End-to-end: ingest CJK text with cjk_tokenizer='jieba' → the
+    documents_fts.body column holds whitespace-separated Chinese words.
+
+    Without the preprocessor, body would contain ``机器学习入门`` as one
+    run and FTS5's unicode61 would split per-character. With the
+    preprocessor, body contains ``机器 学习 机器学习 入门`` (or similar,
+    depending on jieba's dictionary) and unicode61 respects the
+    whitespace boundaries.
+    """
+    import time
+
+    from dikw_core.schemas import ChunkRecord, DocumentRecord, Layer
+
+    storage = SQLiteStorage(tmp_path / "idx.sqlite", cjk_tokenizer="jieba")
+    await storage.connect()
+    await storage.migrate()
+
+    doc_id = "source:zh.md"
+    await storage.put_content("h1", "机器学习入门")
+    await storage.upsert_document(
+        DocumentRecord(
+            doc_id=doc_id,
+            path="sources/zh.md",
+            title="机器学习",
+            hash="h1",
+            mtime=time.time(),
+            layer=Layer.SOURCE,
+            active=True,
+        )
+    )
+    await storage.replace_chunks(
+        doc_id,
+        [ChunkRecord(doc_id=doc_id, seq=0, start=0, end=6, text="机器学习入门")],
+    )
+
+    # Inspect what was actually written — sqlite3 is synchronous but the
+    # async wrapper is happy to return a value here.
+    def _read_body() -> tuple[str, str]:
+        conn = storage._require_conn()  # type: ignore[attr-defined]
+        row = conn.execute(
+            "SELECT title, body FROM documents_fts WHERE path = ?",
+            ("sources/zh.md",),
+        ).fetchone()
+        return row["title"], row["body"]
+
+    title, body = _read_body()
+    # At minimum jieba has surfaced at least one 2+ char Chinese word
+    # as a whitespace-bounded token. The pre-feature path would store
+    # the raw string "机器学习入门" with no whitespace.
+    assert " " in body, f"body not segmented: {body!r}"
+    assert " " in title, f"title not segmented: {title!r}"
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_cjk_tokenizer_none_leaves_body_verbatim(tmp_path) -> None:
+    """Default 'none' mode must not touch body — regression guard for
+    every existing ASCII-only wiki.
+    """
+    import time
+
+    from dikw_core.schemas import ChunkRecord, DocumentRecord, Layer
+
+    storage = SQLiteStorage(tmp_path / "idx.sqlite")  # default cjk_tokenizer="none"
+    await storage.connect()
+    await storage.migrate()
+
+    doc_id = "source:en.md"
+    body_text = "reciprocal rank fusion survives preprocessing"
+    await storage.put_content("h2", body_text)
+    await storage.upsert_document(
+        DocumentRecord(
+            doc_id=doc_id,
+            path="sources/en.md",
+            title="fusion",
+            hash="h2",
+            mtime=time.time(),
+            layer=Layer.SOURCE,
+            active=True,
+        )
+    )
+    await storage.replace_chunks(
+        doc_id,
+        [ChunkRecord(doc_id=doc_id, seq=0, start=0, end=len(body_text), text=body_text)],
+    )
+
+    def _read_body() -> str:
+        conn = storage._require_conn()  # type: ignore[attr-defined]
+        row = conn.execute(
+            "SELECT body FROM documents_fts WHERE path = ?",
+            ("sources/en.md",),
+        ).fetchone()
+        return str(row["body"])
+
+    assert _read_body() == body_text
+    await storage.close()

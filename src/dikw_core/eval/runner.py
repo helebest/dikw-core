@@ -372,7 +372,9 @@ async def _run_queries(
     connection. Returns a dict keyed by mode.
     """
     cfg, _root = api.load_wiki(wiki)
-    storage = build_storage(cfg.storage, root=wiki)
+    storage = build_storage(
+        cfg.storage, root=wiki, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+    )
     await storage.connect()
     await storage.migrate()
     try:

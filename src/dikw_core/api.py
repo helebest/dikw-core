@@ -283,7 +283,9 @@ def load_wiki(path: str | Path | None = None) -> tuple[DikwConfig, Path]:
 
 async def _with_storage(path: str | Path | None) -> tuple[DikwConfig, Path, Storage]:
     cfg, root = load_wiki(path)
-    storage = build_storage(cfg.storage, root=root)
+    storage = build_storage(
+        cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+    )
     await storage.connect()
     await storage.migrate()
     return cfg, root, storage

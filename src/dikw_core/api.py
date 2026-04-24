@@ -23,6 +23,7 @@ Phase 0 surface (``init_wiki``, ``status``) stays unchanged.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,7 @@ from .schemas import (
     WisdomStatus,
 )
 from .storage import Storage, build_storage
+from .storage.base import NotSupported
 from .wisdom.apply import ApplicableWisdom, pick_applicable
 from .wisdom.distill import WisdomCandidate, parse_distill_response
 from .wisdom.io import write_candidate_file
@@ -88,6 +90,8 @@ from .wisdom.review import (
 )
 from .wisdom.review import approve as _approve_item
 from .wisdom.review import reject as _reject_item
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AppliedWisdomRef",
@@ -426,6 +430,7 @@ async def ingest(
       query-time consumers can render them.
     """
     cfg, root, storage = await _with_storage(path)
+    owned_mm: MultimodalEmbeddingProvider | None = None
     try:
         report = IngestReport()
         to_embed: list[ChunkToEmbed] = []
@@ -434,21 +439,46 @@ async def ingest(
         new_assets_by_id: dict[str, AssetRecord] = {}
 
         # Resolve the active multimodal version once per run so chunks and
-        # assets land under the same version_id.
+        # assets land under the same version_id. Storage backends that
+        # don't yet implement the asset / versioning APIs (filesystem,
+        # postgres) raise NotSupported here — we degrade to the legacy
+        # text path with a warning rather than failing the run.
         mm_version_id: int | None = None
         mm_cfg = cfg.assets.multimodal
         if mm_cfg is not None:
-            mm_version_id = await storage.upsert_embed_version(
-                EmbeddingVersion(
-                    provider=mm_cfg.provider,
-                    model=mm_cfg.model,
-                    revision=mm_cfg.revision,
-                    dim=mm_cfg.dim,
-                    normalize=mm_cfg.normalize,
-                    distance=mm_cfg.distance,
-                    modality="multimodal",
+            try:
+                mm_version_id = await storage.upsert_embed_version(
+                    EmbeddingVersion(
+                        provider=mm_cfg.provider,
+                        model=mm_cfg.model,
+                        revision=mm_cfg.revision,
+                        dim=mm_cfg.dim,
+                        normalize=mm_cfg.normalize,
+                        distance=mm_cfg.distance,
+                        modality="multimodal",
+                    )
                 )
+            except NotSupported as e:
+                logger.warning(
+                    "storage backend doesn't support multimodal versioning "
+                    "(%s); falling back to text-only ingest",
+                    e,
+                )
+                mm_cfg = None  # disable mm pathway for the rest of this run
+
+        # Auto-build the multimodal embedder from config when one wasn't
+        # injected — symmetric with query()'s behavior, so the typical
+        # CLI / MCP / eval call site (which only passes `embedder`) still
+        # produces chunk + asset vectors in the configured mm space
+        # rather than indexing chunks in legacy text space and querying
+        # in mm space.
+        if mm_cfg is not None and multimodal_embedder is None:
+            multimodal_embedder = build_multimodal_embedder(
+                mm_cfg.provider,
+                base_url=mm_cfg.base_url,
+                batch=mm_cfg.batch,
             )
+            owned_mm = multimodal_embedder
 
         for abs_path, logical_path in iter_source_files(cfg.sources, root=root):
             try:
@@ -461,8 +491,15 @@ async def ingest(
             existing = await storage.get_document(doc_id)
 
             scanned = report.scanned + 1
-            if existing is not None and existing.hash == parsed.hash:
-                # Source unchanged since last ingest — skip chunk/embed work.
+            # Skip the chunk/embed pipeline only when the doc body is
+            # unchanged AND the doc has no asset references — the latter
+            # would otherwise leave assets stale when the binary was
+            # replaced on disk or the multimodal version bumped.
+            if (
+                existing is not None
+                and existing.hash == parsed.hash
+                and not parsed.asset_refs
+            ):
                 report = _replace(
                     report,
                     scanned=scanned,
@@ -607,6 +644,8 @@ async def ingest(
 
         return report
     finally:
+        if owned_mm is not None and hasattr(owned_mm, "aclose"):
+            await owned_mm.aclose()
         await storage.close()
 
 

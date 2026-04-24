@@ -195,8 +195,6 @@ def test_cli_eval_provider_mode_threads_retrieval_config(
     producing identical numbers to v1.
     """
     # Scratch wiki with a non-default retrieval block.
-    import os
-
     from dikw_core import api
 
     wiki = tmp_path / "scratch-wiki"
@@ -248,7 +246,7 @@ sources: []
     monkeypatch.setattr("dikw_core.eval.runner.run_eval", spy)
 
     ds = _write_toy_dataset(tmp_path)
-    os.chdir(tmp_path)  # so --path scratch-wiki resolves relative
+    monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     result = runner.invoke(
         app,

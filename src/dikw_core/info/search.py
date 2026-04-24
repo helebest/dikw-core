@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -39,7 +39,16 @@ from ..schemas import (
     VecHit,
 )
 from ..storage.base import NotSupported, Storage, StorageError
-from .tokenize import CjkTokenizer, preprocess_for_fts
+from .tokenize import CJK_CHAR_CLASS, CjkTokenizer, preprocess_for_fts
+
+
+class RetrievalConfigLike(Protocol):
+    """Structural shape of ``config.RetrievalConfig`` for ``from_config``."""
+
+    rrf_k: int
+    bm25_weight: float
+    vector_weight: float
+    cjk_tokenizer: CjkTokenizer
 
 
 @dataclass(frozen=True)
@@ -142,12 +151,36 @@ class HybridSearcher:
         self._rrf_k = rrf_k
         self._bm25_weight = bm25_weight
         self._vector_weight = vector_weight
-        # Must match what the storage adapter applied at ingest — see
-        # `storage.sqlite.SQLiteStorage.__init__`. A mismatched pair
-        # silently drops CJK hits (index uses segmented tokens, query
-        # uses per-char tokens) so `RetrievalConfig.cjk_tokenizer` is
-        # the single wiki-level knob that feeds both sites.
+        # Must match the storage adapter's ingest-time tokenizer; a
+        # mismatch silently drops CJK hits.
         self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
+
+    @classmethod
+    def from_config(
+        cls,
+        storage: Storage,
+        embedder: EmbeddingProvider | None,
+        cfg: RetrievalConfigLike,
+        *,
+        embedding_model: str | None = None,
+        multimodal: MultimodalSearch | None = None,
+    ) -> HybridSearcher:
+        """Unpack a ``RetrievalConfig`` into the keyword kwargs.
+
+        Centralises the 4-knob mapping so adding a 5th knob is a
+        one-file change. ``RetrievalConfigLike`` is any object with
+        the four attributes — pydantic ``RetrievalConfig`` qualifies.
+        """
+        return cls(
+            storage,
+            embedder,
+            embedding_model=embedding_model,
+            multimodal=multimodal,
+            rrf_k=cfg.rrf_k,
+            bm25_weight=cfg.bm25_weight,
+            vector_weight=cfg.vector_weight,
+            cjk_tokenizer=cfg.cjk_tokenizer,
+        )
 
     async def search(
         self,
@@ -403,7 +436,7 @@ def _sanitize_fts(q: str, *, cjk_tokenizer: CjkTokenizer = "none") -> str:
     """
     if cjk_tokenizer != "none":
         q = preprocess_for_fts(q, tokenizer=cjk_tokenizer)
-    cleaned = re.sub(r"[^\w\s一-鿿]", " ", q)
+    cleaned = re.sub(rf"[^\w\s{CJK_CHAR_CLASS}]", " ", q)
     tokens = [
         t for t in cleaned.split() if t and t.upper() not in _FTS_RESERVED
     ]

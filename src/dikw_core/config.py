@@ -13,6 +13,8 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from .info.tokenize import CjkTokenizer
+
 
 class ProviderConfig(BaseModel):
     llm: Literal["anthropic", "openai_compat"] = "anthropic"
@@ -91,19 +93,13 @@ class RetrievalConfig(BaseModel):
     # scales how much that leg's rank order influences the top-k.
     bm25_weight: float = 0.3
     vector_weight: float = 1.5
-    # CJK preprocessor for the BM25 leg. SQLite FTS5's default
-    # ``unicode61`` tokenizer segments Chinese one character at a time,
-    # which produces single-char BM25 (observed on CMTEB T2Retrieval:
-    # nDCG@10 = 0.03, 91.7 % zero-recall). Setting ``jieba`` runs
-    # ``jieba.cut_for_search`` over the body before writing it to
-    # ``documents_fts`` and over the query before building the MATCH
-    # expression, producing word-level Chinese tokens under the same
-    # ``unicode61`` tokenizer. Install the optional ``cjk`` extra first
-    # (``uv sync --extra cjk``). Pure-ASCII corpora see no benefit.
-    # **Locked at first ingest**: changing this value requires wiping
-    # ``.dikw/index.sqlite`` and re-ingesting, same shape as
-    # ``embedding_dimensions``.
-    cjk_tokenizer: Literal["none", "jieba"] = "none"
+    # Preprocesses CJK text with ``jieba`` before FTS5 indexing/querying.
+    # Required for Chinese corpora; ``unicode61`` otherwise splits per-
+    # character and collapses BM25 to single-char IDF. Install with
+    # ``uv sync --extra cjk``. **Locked at first ingest** — same shape
+    # as ``embedding_dimensions``; flip requires wiping the index.
+    # See ``docs/providers.md`` gotcha #7 and ``evals/BASELINES.md``.
+    cjk_tokenizer: CjkTokenizer = "none"
 
 
 class SQLiteStorageConfig(BaseModel):

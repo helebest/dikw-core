@@ -775,15 +775,12 @@ async def query(
                     asset_version_id=active.version_id,
                 )
 
-        searcher = HybridSearcher(
+        searcher = HybridSearcher.from_config(
             storage,
             _embedder,
+            cfg.retrieval,
             embedding_model=cfg.provider.embedding_model,
             multimodal=mm_search,
-            rrf_k=cfg.retrieval.rrf_k,
-            bm25_weight=cfg.retrieval.bm25_weight,
-            vector_weight=cfg.retrieval.vector_weight,
-            cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
         )
         hits = await searcher.search(q, limit=limit)
 

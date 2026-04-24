@@ -510,15 +510,10 @@ def eval_cmd(
             console.print(f"[red]error:[/red] {e}")
             raise typer.Exit(code=2) from e
         embedder = build_embedder(cfg.provider)
-        # Pass the whole provider block — batch_size/dimensions/base_url/
-        # provider_label all matter at ingest time.
+        # Forward both config blocks — runner otherwise picks up
+        # RetrievalConfig() defaults and silently ignores per-wiki
+        # cjk_tokenizer / weight overrides.
         provider_cfg = cfg.provider
-        # And the whole retrieval block — rrf_k / weights / cjk_tokenizer
-        # all matter at ingest+query time. Omitting this makes the runner
-        # silently fall through to RetrievalConfig() defaults, which
-        # silently ignores per-wiki overrides (the CMTEB v2 rerun on
-        # 2026-04-24 hit exactly this: cjk_tokenizer=jieba set in the
-        # scratch wiki, never threaded, BM25 leg stayed at 0.031).
         retrieval_cfg = cfg.retrieval
     elif embedder_mode != "fake":
         console.print(

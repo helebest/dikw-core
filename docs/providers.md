@@ -140,6 +140,37 @@ value. This looks redundant but prevents cross-wiring when the two
 legs diverge (the common case — MiniMax LLM + Gitee embeddings, or
 Anthropic LLM + OpenAI embeddings).
 
+### 7. CJK corpora need `cjk_tokenizer: jieba`
+
+SQLite FTS5's default `unicode61` tokenizer splits CJK one character
+at a time, which collapses BM25 on Chinese / Japanese into single-char
+IDF. Measured on CMTEB T2Retrieval: **nDCG@10 = 0.031**, 91.7% of
+queries zero-recall — vs ≈ 0.5–0.65 on the published Anserini+jieba
+baselines. If your corpus contains Chinese (or Japanese Han text), set:
+
+```yaml
+retrieval:
+  cjk_tokenizer: jieba       # default is "none"
+```
+
+…and install the optional extra:
+
+```bash
+uv sync --extra cjk          # pulls in jieba ≥ 0.42
+```
+
+The preprocessor runs `jieba.cut_for_search` over **CJK runs only** —
+ASCII identifiers (``retrieval.rrf_k``, code snippets, …) are passed
+verbatim, so mixed English/Chinese dev docs don't get their English
+halves shredded.
+
+**Locked at first ingest** — same shape as `embedding_dimensions`
+(gotcha #1). The `documents_fts` rows store whatever segmentation was
+in effect when they were written; flipping the config afterwards
+produces a mismatch between indexed and queried tokens, silently
+dropping CJK hits. To change: wipe `.dikw/index.sqlite` and `dikw
+ingest` fresh.
+
 ## Public-benchmark calibration with Gitee AI
 
 Reproducible workflow for running BEIR / CMTEB benchmarks against
@@ -221,7 +252,11 @@ up the block on next call.
 For a Chinese benchmark, repeat with `convert_cmteb.py` against a
 HuggingFace download — same workflow, see
 [`evals/README.md`](../evals/README.md#public-benchmarks) for the
-full command.
+full command. **Before running any CJK eval**, flip
+`retrieval.cjk_tokenizer: jieba` in the scratch wiki's `dikw.yml`
+(gotcha #7) — otherwise the BM25 row in the ablation table will
+report 0.03 nDCG@10 regardless of fusion tuning, because FTS5's
+default tokenizer doesn't segment Chinese.
 
 ## Pre-flight checklist for a new vendor
 

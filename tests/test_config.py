@@ -211,3 +211,45 @@ sources: []
     assert cfg2.retrieval.rrf_k == 40
     assert cfg2.retrieval.bm25_weight == 0.5
     assert cfg2.retrieval.vector_weight == 1.5
+
+
+def test_retrieval_config_cjk_tokenizer_defaults_to_none() -> None:
+    """Defaulting to ``none`` keeps the pre-feature FTS behaviour for
+    every existing wiki. ASCII-only users pay no cost and see no diff.
+    """
+    cfg = RetrievalConfig()
+    assert cfg.cjk_tokenizer == "none"
+
+
+def test_retrieval_config_cjk_tokenizer_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+retrieval:
+  cjk_tokenizer: jieba
+sources: []
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.retrieval.cjk_tokenizer == "jieba"
+
+    yaml_text = dump_config_yaml(cfg)
+    path.write_text(yaml_text, encoding="utf-8")
+    cfg2 = load_config(path)
+    assert cfg2.retrieval.cjk_tokenizer == "jieba"
+
+
+def test_retrieval_config_rejects_unknown_cjk_tokenizer(tmp_path: Path) -> None:
+    """Guard against typos — ``trigram`` is tempting but not shipped."""
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+retrieval:
+  cjk_tokenizer: trigram
+sources: []
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="cjk_tokenizer"):
+        load_config(path)

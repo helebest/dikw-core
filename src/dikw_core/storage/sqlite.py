@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 import sqlite_vec
 
+from ..info.tokenize import CjkTokenizer, initialize_jieba, preprocess_for_fts
 from ..schemas import (
     AssetEmbeddingRow,
     AssetKind,
@@ -61,10 +62,18 @@ class SQLiteStorage:
     variable embedding sizes across providers.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        cjk_tokenizer: CjkTokenizer = "none",
+    ) -> None:
         self._path = Path(path)
         self._conn: sqlite3.Connection | None = None
         self._embedding_dim: int | None = None
+        # Must match `_sanitize_fts` on the query side — locked at first
+        # ingest via `RetrievalConfig.cjk_tokenizer`.
+        self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -81,6 +90,10 @@ class SQLiteStorage:
             return conn
 
         self._conn = await asyncio.to_thread(_open)
+        # Warm up jieba's dictionary now so the ~0.3 s load lands in
+        # `connect()` instead of the first `replace_chunks` call.
+        if self._cjk_tokenizer == "jieba":
+            await asyncio.to_thread(initialize_jieba)
 
     async def close(self) -> None:
         conn = self._conn
@@ -231,20 +244,25 @@ class SQLiteStorage:
                     (doc_id,),
                 ).fetchone()
                 if doc_row is not None:
-                    # Use explicit rowid = chunk_id so FTS rowids stay
-                    # aligned with chunks.chunk_id — that lets fts_search
-                    # return chunk_id and the hybrid searcher attach
-                    # chunk_asset_refs to the right Hit even when only
-                    # the FTS leg fired.
+                    # rowid = chunk_id lets `fts_search` return chunk_id
+                    # so `chunk_asset_refs` can attach to FTS-only hits.
+                    # Title + body go through the same preprocessor the
+                    # query side uses in `_sanitize_fts`.
+                    title = preprocess_for_fts(
+                        doc_row["title"] or "", tokenizer=self._cjk_tokenizer
+                    )
                     for cid, c in zip(ids, chunks, strict=True):
+                        body = preprocess_for_fts(
+                            c.text, tokenizer=self._cjk_tokenizer
+                        )
                         conn.execute(
                             "INSERT INTO documents_fts(rowid, path, title, body, layer) "
                             "VALUES (?, ?, ?, ?, ?)",
                             (
                                 cid,
                                 doc_row["path"],
-                                doc_row["title"],
-                                c.text,
+                                title,
+                                body,
                                 doc_row["layer"],
                             ),
                         )

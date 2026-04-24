@@ -164,13 +164,16 @@ per sweep. Pin the winning row into your wiki's `dikw.yml`:
 ```yaml
 retrieval:
   rrf_k: 60
-  bm25_weight: 0.5    # raise for keyword-heavy corpora
+  bm25_weight: 0.5          # raise for keyword-heavy corpora
   vector_weight: 1.0
+  cjk_tokenizer: jieba      # required for CJK — see providers.md gotcha #7
 ```
 
 See [`docs/providers.md`](../docs/providers.md#tuning-rrf-weights-for-your-corpus)
 for the step-by-step and [`BASELINES.md`](./BASELINES.md) for the
-SciFact sweep that picked the shipped defaults.
+SciFact sweep that picked the shipped defaults. The CMTEB v1 baseline
+lists the CJK tokenizer gap; re-runs under `cjk_tokenizer: jieba` are
+expected to lift BM25 from 0.03 toward the published 0.5 range.
 
 ### Comparability caveats
 

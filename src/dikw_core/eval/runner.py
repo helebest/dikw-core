@@ -372,17 +372,17 @@ async def _run_queries(
     connection. Returns a dict keyed by mode.
     """
     cfg, _root = api.load_wiki(wiki)
-    storage = build_storage(cfg.storage, root=wiki)
+    storage = build_storage(
+        cfg.storage, root=wiki, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+    )
     await storage.connect()
     await storage.migrate()
     try:
-        searcher = HybridSearcher(
+        searcher = HybridSearcher.from_config(
             storage,
             embedder,
+            cfg.retrieval,
             embedding_model=embedding_model,
-            rrf_k=cfg.retrieval.rrf_k,
-            bm25_weight=cfg.retrieval.bm25_weight,
-            vector_weight=cfg.retrieval.vector_weight,
         )
         results: dict[
             RetrievalMode, tuple[list[PerQueryRow], list[NegativeRow]]

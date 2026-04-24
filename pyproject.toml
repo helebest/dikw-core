@@ -36,6 +36,13 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary,pool]>=3.2", "pgvector>=0.3"]
+# CJK segmentation for the BM25 leg. Without it, SQLite FTS5's default
+# unicode61 tokenizer treats every Chinese character as a separate
+# token, which collapses BM25 to single-char IDF (observed on CMTEB
+# T2Retrieval: nDCG@10 = 0.03). Install with `uv sync --extra cjk`
+# or `uv pip install 'dikw-core[cjk]'` before flipping
+# `retrieval.cjk_tokenizer: jieba` in dikw.yml.
+cjk = ["jieba>=0.42"]
 
 [dependency-groups]
 dev = [
@@ -45,6 +52,9 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "types-PyYAML",
+    # jieba is required to run tokenize.py's tests regardless of the
+    # project extras the user picked, so it lives in dev-deps as well.
+    "jieba>=0.42",
 ]
 
 [project.scripts]
@@ -85,7 +95,7 @@ mypy_path = "src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec.*", "frontmatter.*", "markdown_it.*", "pgvector.*"]
+module = ["sqlite_vec.*", "frontmatter.*", "markdown_it.*", "pgvector.*", "jieba.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

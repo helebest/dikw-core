@@ -13,6 +13,8 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from .info.tokenize import CjkTokenizer
+
 
 class ProviderConfig(BaseModel):
     llm: Literal["anthropic", "openai_compat"] = "anthropic"
@@ -91,6 +93,13 @@ class RetrievalConfig(BaseModel):
     # scales how much that leg's rank order influences the top-k.
     bm25_weight: float = 0.3
     vector_weight: float = 1.5
+    # Preprocesses CJK text with ``jieba`` before FTS5 indexing/querying.
+    # Required for Chinese corpora; ``unicode61`` otherwise splits per-
+    # character and collapses BM25 to single-char IDF. Install with
+    # ``uv sync --extra cjk``. **Locked at first ingest** — same shape
+    # as ``embedding_dimensions``; flip requires wiping the index.
+    # See ``docs/providers.md`` gotcha #7 and ``evals/BASELINES.md``.
+    cjk_tokenizer: CjkTokenizer = "none"
 
 
 class SQLiteStorageConfig(BaseModel):

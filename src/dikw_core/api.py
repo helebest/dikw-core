@@ -283,7 +283,9 @@ def load_wiki(path: str | Path | None = None) -> tuple[DikwConfig, Path]:
 
 async def _with_storage(path: str | Path | None) -> tuple[DikwConfig, Path, Storage]:
     cfg, root = load_wiki(path)
-    storage = build_storage(cfg.storage, root=root)
+    storage = build_storage(
+        cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+    )
     await storage.connect()
     await storage.migrate()
     return cfg, root, storage
@@ -773,14 +775,12 @@ async def query(
                     asset_version_id=active.version_id,
                 )
 
-        searcher = HybridSearcher(
+        searcher = HybridSearcher.from_config(
             storage,
             _embedder,
+            cfg.retrieval,
             embedding_model=cfg.provider.embedding_model,
             multimodal=mm_search,
-            rrf_k=cfg.retrieval.rrf_k,
-            bm25_weight=cfg.retrieval.bm25_weight,
-            vector_weight=cfg.retrieval.vector_weight,
         )
         hits = await searcher.search(q, limit=limit)
 

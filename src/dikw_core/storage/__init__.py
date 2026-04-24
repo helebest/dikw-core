@@ -10,18 +10,32 @@ from ..config import (
     SQLiteStorageConfig,
     StorageConfig,
 )
+from ..info.tokenize import CjkTokenizer
 from .base import NotSupported, Storage, StorageError
 from .filesystem import FilesystemStorage
 from .sqlite import SQLiteStorage
 
 
-def build_storage(config: StorageConfig, *, root: str | Path | None = None) -> Storage:
-    """Instantiate a Storage adapter. Paths are resolved relative to ``root`` if given."""
+def build_storage(
+    config: StorageConfig,
+    *,
+    root: str | Path | None = None,
+    cjk_tokenizer: CjkTokenizer = "none",
+) -> Storage:
+    """Instantiate a Storage adapter. Paths are resolved relative to ``root`` if given.
+
+    ``cjk_tokenizer`` controls how CJK text is segmented before being
+    written to the backend's full-text index. Only the SQLite backend
+    honours it today (FTS5 + ``unicode61``); Postgres and filesystem
+    backends ignore the knob — they either use a different FT engine
+    (Postgres ``ts_vector``) or no FT engine at all (filesystem). See
+    ``RetrievalConfig.cjk_tokenizer`` for the wiki-level surface.
+    """
     if isinstance(config, SQLiteStorageConfig):
         path = Path(config.path)
         if not path.is_absolute() and root is not None:
             path = Path(root) / path
-        return SQLiteStorage(path)
+        return SQLiteStorage(path, cjk_tokenizer=cjk_tokenizer)
     if isinstance(config, FilesystemStorageConfig):
         fs_root = Path(config.root)
         if not fs_root.is_absolute() and root is not None:

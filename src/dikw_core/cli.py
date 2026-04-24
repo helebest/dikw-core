@@ -500,6 +500,7 @@ def eval_cmd(
     # Build the embedder + provider config once if --embedder provider.
     embedder = None
     provider_cfg = None
+    retrieval_cfg = None
     if embedder_mode == "provider":
         from .providers import build_embedder
 
@@ -509,9 +510,11 @@ def eval_cmd(
             console.print(f"[red]error:[/red] {e}")
             raise typer.Exit(code=2) from e
         embedder = build_embedder(cfg.provider)
-        # Pass the whole provider block — batch_size/dimensions/base_url/
-        # provider_label all matter at ingest time.
+        # Forward both config blocks — runner otherwise picks up
+        # RetrievalConfig() defaults and silently ignores per-wiki
+        # cjk_tokenizer / weight overrides.
         provider_cfg = cfg.provider
+        retrieval_cfg = cfg.retrieval
     elif embedder_mode != "fake":
         console.print(
             f"[red]error:[/red] --embedder must be 'fake' or 'provider', got {embedder_mode!r}"
@@ -526,6 +529,7 @@ def eval_cmd(
                     spec,
                     embedder=embedder,
                     provider_config=provider_cfg,
+                    retrieval_config=retrieval_cfg,
                     mode=retrieval,  # type: ignore[arg-type]
                     raw_dump_path=dump_raw,
                 )

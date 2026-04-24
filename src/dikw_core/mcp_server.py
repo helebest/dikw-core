@@ -253,18 +253,18 @@ async def build_server() -> Any:
         if name == "doc.search":
             wiki_path = arguments.get("path", ".")
             cfg, root = api.load_wiki(wiki_path)
-            storage = build_storage(cfg.storage, root=root)
+            storage = build_storage(
+                cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+            )
             await storage.connect()
             await storage.migrate()
             try:
                 embedder = build_embedder(cfg.provider)
-                searcher = HybridSearcher(
+                searcher = HybridSearcher.from_config(
                     storage,
                     embedder,
+                    cfg.retrieval,
                     embedding_model=cfg.provider.embedding_model,
-                    rrf_k=cfg.retrieval.rrf_k,
-                    bm25_weight=cfg.retrieval.bm25_weight,
-                    vector_weight=cfg.retrieval.vector_weight,
                 )
                 layer_arg = arguments.get("layer")
                 layer = Layer(layer_arg) if layer_arg else None
@@ -308,7 +308,9 @@ async def build_server() -> Any:
         if name == "wiki.list":
             wiki_path = arguments.get("path", ".")
             cfg, root = api.load_wiki(wiki_path)
-            storage = build_storage(cfg.storage, root=root)
+            storage = build_storage(
+                cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+            )
             await storage.connect()
             await storage.migrate()
             try:
@@ -368,7 +370,9 @@ async def build_server() -> Any:
         if name == "wisdom.list":
             wiki_path = arguments.get("path", ".")
             cfg, root = api.load_wiki(wiki_path)
-            storage = build_storage(cfg.storage, root=root)
+            storage = build_storage(
+                cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
+            )
             await storage.connect()
             await storage.migrate()
             try:

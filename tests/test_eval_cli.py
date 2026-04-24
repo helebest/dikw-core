@@ -182,6 +182,92 @@ def test_cli_eval_dump_raw_writes_jsonl(tmp_path: Path) -> None:
     assert {r["mode"] for r in rows} == {"bm25", "vector", "hybrid"}
 
 
+def test_cli_eval_provider_mode_threads_retrieval_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--embedder provider`` must forward cfg.retrieval into run_eval.
+
+    Regression guard for the 2026-04-24 CMTEB v2 rerun bug: the CLI
+    read only cfg.provider from the scratch wiki's dikw.yml and
+    silently dropped cfg.retrieval, so wiki-level overrides like
+    ``cjk_tokenizer: jieba`` never reached the runner. Without the
+    fix, the first live run against CMTEB wasted ~4h + API cost
+    producing identical numbers to v1.
+    """
+    # Scratch wiki with a non-default retrieval block.
+    import os
+
+    from dikw_core import api
+
+    wiki = tmp_path / "scratch-wiki"
+    api.init_wiki(wiki, description="retrieval threading guard")
+    (wiki / "dikw.yml").write_text(
+        """provider:
+  llm: anthropic
+  embedding: openai_compat
+  embedding_model: fake-model
+  embedding_base_url: https://example.invalid
+storage:
+  backend: sqlite
+  path: .dikw/index.sqlite
+retrieval:
+  rrf_k: 40
+  bm25_weight: 0.7
+  vector_weight: 1.3
+  cjk_tokenizer: jieba
+schema:
+  description: regression guard
+sources: []
+""",
+        encoding="utf-8",
+    )
+    # Stub out the embedding key so build_embedder doesn't error.
+    monkeypatch.setenv("DIKW_EMBEDDING_API_KEY", "test-only")
+    # Stub build_embedder so we don't actually call the network.
+    # CLI imports it lazily inside eval_cmd, so patch at the module it
+    # resolves from at that moment (providers/__init__).
+    from tests.fakes import FakeEmbeddings
+
+    monkeypatch.setattr(
+        "dikw_core.providers.build_embedder", lambda _cfg: FakeEmbeddings()
+    )
+
+    # Capture the RetrievalConfig that the CLI passes to run_eval.
+    captured: dict[str, object] = {}
+    from dikw_core.eval import runner as runner_mod
+
+    real_run_eval = runner_mod.run_eval
+
+    async def spy(*args, **kwargs):
+        captured["retrieval_config"] = kwargs.get("retrieval_config")
+        captured["provider_config"] = kwargs.get("provider_config")
+        return await real_run_eval(*args, **kwargs)
+
+    # eval_cmd imports run_eval lazily from dikw_core.eval.runner;
+    # patch the source module, not the cli reference.
+    monkeypatch.setattr("dikw_core.eval.runner.run_eval", spy)
+
+    ds = _write_toy_dataset(tmp_path)
+    os.chdir(tmp_path)  # so --path scratch-wiki resolves relative
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--dataset", str(ds),
+            "--embedder", "provider",
+            "--path", str(wiki),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    rc = captured["retrieval_config"]
+    assert rc is not None, "cfg.retrieval not threaded into run_eval"
+    assert rc.rrf_k == 40  # type: ignore[attr-defined]
+    assert rc.bm25_weight == 0.7  # type: ignore[attr-defined]
+    assert rc.vector_weight == 1.3  # type: ignore[attr-defined]
+    assert rc.cjk_tokenizer == "jieba"  # type: ignore[attr-defined]
+
+
 def test_cli_eval_dump_raw_warns_and_skips_in_single_mode(tmp_path: Path) -> None:
     """Single-mode --dump-raw has no paired legs to sweep; warn + skip."""
     ds = _write_toy_dataset(tmp_path)

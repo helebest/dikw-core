@@ -112,7 +112,11 @@ parity impossible (and not actually useful):
    FTS5 `bm25()` — same family of formulas, different IDF / length-norm
    constants and tokenizer. Treat ±0.10 nDCG@10 vs the published
    number as in-band; larger gaps suggest a real bug, not algorithm
-   choice.
+   choice. **CJK corpora also need `retrieval.cjk_tokenizer: jieba`**
+   in `dikw.yml` — the default `unicode61` tokenizer splits Chinese
+   per-character, collapsing BM25 to single-char IDF (see CMTEB v1
+   baseline). Without it the `bm25` row lands near 0.03 nDCG@10 on
+   Chinese regardless of fusion choice.
 3. **RRF weighted on the SciFact 2026-04-23 sweep.** `k=60` from the
    original RRF paper, per-leg weights `(bm25=0.3, vector=1.5)` picked
    because equal-weight left hybrid 0.037 nDCG@10 behind vector-only

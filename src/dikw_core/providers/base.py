@@ -11,6 +11,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from ..schemas import MultimodalInput
+
 
 class ToolSpec(BaseModel):
     name: str
@@ -48,10 +50,34 @@ class EmbeddingProvider(Protocol):
     async def embed(self, texts: list[str], *, model: str) -> list[list[float]]: ...
 
 
+@runtime_checkable
+class MultimodalEmbeddingProvider(Protocol):
+    """Embedding provider that can encode text, images, or any combination
+    into a single shared vector space.
+
+    v1 callers use either text-only (chunks) or image-only (assets) inputs;
+    the schema's ``MultimodalInput`` permits combined inputs for v1.5
+    chunk-with-images joint encoding without breaking the wire contract.
+
+    Output ordering must match input ordering so callers can pair vectors
+    with their source rows. All vectors must have the same dimension —
+    ``EmbeddingVersion.dim`` records that dim and the storage layer
+    validates each row against it.
+    """
+
+    async def embed(
+        self,
+        inputs: list[MultimodalInput],
+        *,
+        model: str,
+    ) -> list[list[float]]: ...
+
+
 __all__ = [
     "EmbeddingProvider",
     "LLMProvider",
     "LLMResponse",
+    "MultimodalEmbeddingProvider",
     "ProviderError",
     "ToolSpec",
 ]

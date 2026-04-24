@@ -14,12 +14,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from importlib import resources
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..schemas import (
+    AssetEmbeddingRow,
+    AssetRecord,
+    AssetVecHit,
+    ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
     EmbeddingRow,
+    EmbeddingVersion,
     FTSHit,
     Layer,
     LinkRecord,
@@ -546,6 +551,59 @@ class PostgresStorage:
             wisdom_by_status=by_status,
             last_wiki_log_ts=float(last) if last is not None else None,
         )
+
+    # ---- multimedia assets (Phase 5: not yet implemented) ----------------
+    #
+    # Postgres adapter's asset / version-aware embedding support lands in a
+    # follow-up phase. Until then every new method raises NotSupported so
+    # callers (and contract tests) can detect and skip cleanly.
+
+    async def upsert_asset(self, asset: AssetRecord) -> None:
+        raise NotSupported("postgres adapter: assets not implemented yet")
+
+    async def get_asset(self, asset_id: str) -> AssetRecord | None:
+        raise NotSupported("postgres adapter: assets not implemented yet")
+
+    async def replace_chunk_asset_refs(
+        self, chunk_id: int, refs: Sequence[ChunkAssetRef]
+    ) -> None:
+        raise NotSupported("postgres adapter: chunk_asset_refs not implemented yet")
+
+    async def chunk_asset_refs_for_chunks(
+        self, chunk_ids: Sequence[int]
+    ) -> dict[int, list[ChunkAssetRef]]:
+        raise NotSupported("postgres adapter: chunk_asset_refs not implemented yet")
+
+    async def chunks_referencing_assets(
+        self, asset_ids: Sequence[str]
+    ) -> dict[str, list[int]]:
+        raise NotSupported("postgres adapter: chunk_asset_refs not implemented yet")
+
+    async def upsert_asset_embeddings(
+        self, rows: Sequence[AssetEmbeddingRow]
+    ) -> None:
+        raise NotSupported("postgres adapter: asset embeddings not implemented yet")
+
+    async def vec_search_assets(
+        self,
+        embedding: list[float],
+        *,
+        version_id: int,
+        limit: int = 20,
+        layer: Layer | None = None,
+    ) -> list[AssetVecHit]:
+        raise NotSupported("postgres adapter: asset embeddings not implemented yet")
+
+    async def upsert_embed_version(self, v: EmbeddingVersion) -> int:
+        raise NotSupported("postgres adapter: embed versioning not implemented yet")
+
+    async def get_active_embed_version(
+        self, *, modality: Literal["text", "multimodal"]
+    ) -> EmbeddingVersion | None:
+        raise NotSupported("postgres adapter: embed versioning not implemented yet")
+
+    async def list_embed_versions(self) -> list[EmbeddingVersion]:
+        raise NotSupported("postgres adapter: embed versioning not implemented yet")
 
     # ---- internals -------------------------------------------------------
 

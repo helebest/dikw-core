@@ -9,19 +9,26 @@ the rest of the engine stay ``async`` without pulling in aiosqlite.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import struct
 from collections.abc import Iterable, Sequence
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import sqlite_vec
 
 from ..schemas import (
+    AssetEmbeddingRow,
+    AssetKind,
+    AssetRecord,
+    AssetVecHit,
+    ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
     EmbeddingRow,
+    EmbeddingVersion,
     FTSHit,
     Layer,
     LinkRecord,
@@ -535,6 +542,353 @@ class SQLiteStorage:
 
         return await asyncio.to_thread(_run)
 
+    # ---- D layer: multimedia assets --------------------------------------
+
+    async def upsert_asset(self, asset: AssetRecord) -> None:
+        def _run() -> None:
+            conn = self._require_conn()
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO assets(
+                        asset_id, hash, kind, mime, stored_path, original_paths,
+                        bytes, width, height, caption, caption_model, created_ts
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(asset_id) DO UPDATE SET
+                        hash = excluded.hash,
+                        kind = excluded.kind,
+                        mime = excluded.mime,
+                        stored_path = excluded.stored_path,
+                        original_paths = excluded.original_paths,
+                        bytes = excluded.bytes,
+                        width = excluded.width,
+                        height = excluded.height,
+                        caption = excluded.caption,
+                        caption_model = excluded.caption_model
+                    """,
+                    (
+                        asset.asset_id,
+                        asset.hash,
+                        asset.kind.value,
+                        asset.mime,
+                        asset.stored_path,
+                        json.dumps(asset.original_paths),
+                        asset.bytes,
+                        asset.width,
+                        asset.height,
+                        asset.caption,
+                        asset.caption_model,
+                        asset.created_ts,
+                    ),
+                )
+
+        await asyncio.to_thread(_run)
+
+    async def get_asset(self, asset_id: str) -> AssetRecord | None:
+        def _run() -> AssetRecord | None:
+            conn = self._require_conn()
+            row = conn.execute(
+                "SELECT * FROM assets WHERE asset_id = ?", (asset_id,)
+            ).fetchone()
+            return _row_to_asset(row) if row is not None else None
+
+        return await asyncio.to_thread(_run)
+
+    # ---- I layer: chunk ↔ asset bridge -----------------------------------
+
+    async def replace_chunk_asset_refs(
+        self, chunk_id: int, refs: Sequence[ChunkAssetRef]
+    ) -> None:
+        def _run() -> None:
+            conn = self._require_conn()
+            with conn:
+                conn.execute(
+                    "DELETE FROM chunk_asset_refs WHERE chunk_id = ?", (chunk_id,)
+                )
+                for r in refs:
+                    if r.chunk_id != chunk_id:
+                        raise StorageError(
+                            f"ChunkAssetRef.chunk_id={r.chunk_id} doesn't match "
+                            f"target chunk_id={chunk_id}"
+                        )
+                    conn.execute(
+                        """
+                        INSERT INTO chunk_asset_refs(
+                            chunk_id, asset_id, ord, alt,
+                            start_in_chunk, end_in_chunk
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            r.chunk_id,
+                            r.asset_id,
+                            r.ord,
+                            r.alt,
+                            r.start_in_chunk,
+                            r.end_in_chunk,
+                        ),
+                    )
+
+        await asyncio.to_thread(_run)
+
+    async def chunk_asset_refs_for_chunks(
+        self, chunk_ids: Sequence[int]
+    ) -> dict[int, list[ChunkAssetRef]]:
+        def _run() -> dict[int, list[ChunkAssetRef]]:
+            conn = self._require_conn()
+            out: dict[int, list[ChunkAssetRef]] = {cid: [] for cid in chunk_ids}
+            if not chunk_ids:
+                return out
+            placeholders = ",".join("?" for _ in chunk_ids)
+            rows = conn.execute(
+                f"""
+                SELECT chunk_id, asset_id, ord, alt, start_in_chunk, end_in_chunk
+                FROM chunk_asset_refs
+                WHERE chunk_id IN ({placeholders})
+                ORDER BY chunk_id, ord
+                """,
+                tuple(chunk_ids),
+            ).fetchall()
+            for r in rows:
+                out[int(r["chunk_id"])].append(
+                    ChunkAssetRef(
+                        chunk_id=int(r["chunk_id"]),
+                        asset_id=r["asset_id"],
+                        ord=int(r["ord"]),
+                        alt=r["alt"],
+                        start_in_chunk=int(r["start_in_chunk"]),
+                        end_in_chunk=int(r["end_in_chunk"]),
+                    )
+                )
+            return out
+
+        return await asyncio.to_thread(_run)
+
+    async def chunks_referencing_assets(
+        self, asset_ids: Sequence[str]
+    ) -> dict[str, list[int]]:
+        def _run() -> dict[str, list[int]]:
+            conn = self._require_conn()
+            out: dict[str, list[int]] = {aid: [] for aid in asset_ids}
+            if not asset_ids:
+                return out
+            placeholders = ",".join("?" for _ in asset_ids)
+            rows = conn.execute(
+                f"""
+                SELECT asset_id, chunk_id
+                FROM chunk_asset_refs
+                WHERE asset_id IN ({placeholders})
+                ORDER BY asset_id, chunk_id
+                """,
+                tuple(asset_ids),
+            ).fetchall()
+            for r in rows:
+                out[r["asset_id"]].append(int(r["chunk_id"]))
+            return out
+
+        return await asyncio.to_thread(_run)
+
+    # ---- I layer: asset embeddings (multimodal) --------------------------
+
+    async def upsert_asset_embeddings(
+        self, rows: Sequence[AssetEmbeddingRow]
+    ) -> None:
+        if not rows:
+            return
+
+        def _run() -> None:
+            conn = self._require_conn()
+            # Group rows by version_id so each per-version vec table is
+            # ensured exactly once and dim mismatches inside a single call
+            # raise loudly.
+            by_version: dict[int, list[AssetEmbeddingRow]] = {}
+            for r in rows:
+                by_version.setdefault(r.version_id, []).append(r)
+            for version_id, batch in by_version.items():
+                version = _fetch_version(conn, version_id)
+                if version is None:
+                    raise StorageError(
+                        f"unknown embed version_id={version_id}; "
+                        "call upsert_embed_version first"
+                    )
+                for r in batch:
+                    if len(r.embedding) != version.dim:
+                        raise StorageError(
+                            f"asset embedding dim {len(r.embedding)} != "
+                            f"version {version_id} dim {version.dim}"
+                        )
+                self._ensure_asset_vec_table(conn, version_id, version.dim)
+                table = f"vec_assets_v{version_id}"
+                with conn:
+                    for r in batch:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO asset_embed_meta"
+                            "(asset_id, version_id) VALUES (?, ?)",
+                            (r.asset_id, r.version_id),
+                        )
+                        # sqlite-vec rowid must be a stable integer; use
+                        # the asset_id's int hash modded into INT64 space.
+                        # Same asset_id always maps to same rowid so REPLACE
+                        # works.
+                        rowid = _asset_id_to_rowid(r.asset_id)
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO {table}(rowid, embedding) "
+                            "VALUES (?, ?)",
+                            (rowid, _serialize_vec(r.embedding)),
+                        )
+                        # Stash the asset_id ↔ rowid mapping for vec_search
+                        # join-back. Tiny side table per version.
+                        conn.execute(
+                            "CREATE TABLE IF NOT EXISTS asset_vec_rowid_v"
+                            f"{version_id}(rowid INTEGER PRIMARY KEY, "
+                            "asset_id TEXT NOT NULL UNIQUE)"
+                        )
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO asset_vec_rowid_v{version_id}"
+                            "(rowid, asset_id) VALUES (?, ?)",
+                            (rowid, r.asset_id),
+                        )
+
+        await asyncio.to_thread(_run)
+
+    async def vec_search_assets(
+        self,
+        embedding: list[float],
+        *,
+        version_id: int,
+        limit: int = 20,
+        layer: Layer | None = None,
+    ) -> list[AssetVecHit]:
+        # `layer` is reserved for future use (e.g. when assets get layer
+        # attribution); v1 assets are always D-layer adjacent.
+        del layer
+
+        def _run() -> list[AssetVecHit]:
+            conn = self._require_conn()
+            version = _fetch_version(conn, version_id)
+            if version is None:
+                raise NotSupported(
+                    f"no embed version_id={version_id} registered"
+                )
+            if len(embedding) != version.dim:
+                raise StorageError(
+                    f"query embedding dim {len(embedding)} != "
+                    f"version {version_id} dim {version.dim}"
+                )
+            table = f"vec_assets_v{version_id}"
+            row_table = f"asset_vec_rowid_v{version_id}"
+            # Empty index → no hits. Skip the SQL to avoid sqlite-vec errors
+            # on a non-existent virtual table.
+            tbl_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if tbl_exists is None:
+                return []
+            rows = conn.execute(
+                f"""
+                SELECT m.asset_id AS asset_id,
+                       vec_distance_cosine(v.embedding, ?) AS dist
+                FROM {table} v
+                JOIN {row_table} m ON m.rowid = v.rowid
+                ORDER BY dist
+                LIMIT ?
+                """,
+                (_serialize_vec(embedding), limit),
+            ).fetchall()
+            return [
+                AssetVecHit(asset_id=r["asset_id"], distance=float(r["dist"]))
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_run)
+
+    # ---- Embedding version registry --------------------------------------
+
+    async def upsert_embed_version(self, v: EmbeddingVersion) -> int:
+        def _run() -> int:
+            conn = self._require_conn()
+            with conn:
+                # Match key: (provider, model, revision, dim, normalize, distance).
+                row = conn.execute(
+                    """
+                    SELECT version_id FROM embed_versions
+                    WHERE provider = ? AND model = ? AND revision = ?
+                      AND dim = ? AND normalize = ? AND distance = ?
+                    """,
+                    (
+                        v.provider,
+                        v.model,
+                        v.revision,
+                        v.dim,
+                        int(v.normalize),
+                        v.distance,
+                    ),
+                ).fetchone()
+                if row is not None:
+                    return int(row["version_id"])
+                # New version: insert and demote prior active versions of
+                # the same modality.
+                conn.execute(
+                    "UPDATE embed_versions SET is_active = 0 WHERE modality = ?",
+                    (v.modality,),
+                )
+                created_ts = (
+                    v.created_ts
+                    if v.created_ts is not None
+                    else _now_seconds()
+                )
+                cur = conn.execute(
+                    """
+                    INSERT INTO embed_versions(
+                        provider, model, revision, dim, normalize, distance,
+                        modality, created_ts, is_active
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        v.provider,
+                        v.model,
+                        v.revision,
+                        v.dim,
+                        int(v.normalize),
+                        v.distance,
+                        v.modality,
+                        created_ts,
+                    ),
+                )
+                return int(cur.lastrowid or 0)
+
+        return await asyncio.to_thread(_run)
+
+    async def get_active_embed_version(
+        self, *, modality: Literal["text", "multimodal"]
+    ) -> EmbeddingVersion | None:
+        def _run() -> EmbeddingVersion | None:
+            conn = self._require_conn()
+            row = conn.execute(
+                """
+                SELECT * FROM embed_versions
+                WHERE modality = ? AND is_active = 1
+                ORDER BY version_id DESC LIMIT 1
+                """,
+                (modality,),
+            ).fetchone()
+            return _row_to_embed_version(row) if row is not None else None
+
+        return await asyncio.to_thread(_run)
+
+    async def list_embed_versions(self) -> list[EmbeddingVersion]:
+        def _run() -> list[EmbeddingVersion]:
+            conn = self._require_conn()
+            rows = conn.execute(
+                "SELECT * FROM embed_versions ORDER BY version_id"
+            ).fetchall()
+            return [_row_to_embed_version(r) for r in rows]
+
+        return await asyncio.to_thread(_run)
+
     # ---- diagnostics -----------------------------------------------------
 
     async def counts(self) -> StorageCounts:
@@ -554,6 +908,10 @@ class SQLiteStorage:
             ).fetchall():
                 by_status[row["status"]] = int(row["n"])
             last_log = conn.execute("SELECT MAX(ts) AS ts FROM wiki_log").fetchone()
+            assets_count = int(conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0])
+            asset_emb_count = int(
+                conn.execute("SELECT COUNT(*) FROM asset_embed_meta").fetchone()[0]
+            )
             return StorageCounts(
                 documents_by_layer=by_layer,
                 chunks=chunks,
@@ -561,6 +919,8 @@ class SQLiteStorage:
                 links=links,
                 wisdom_by_status=by_status,
                 last_wiki_log_ts=float(last_log["ts"]) if last_log and last_log["ts"] else None,
+                assets=assets_count,
+                asset_embeddings=asset_emb_count,
             )
 
         return await asyncio.to_thread(_run)
@@ -589,6 +949,18 @@ class SQLiteStorage:
                 f"embedding dim mismatch: index uses {self._embedding_dim}, got {dim}; "
                 "rebuild the vector index to change dimensions"
             )
+
+    def _ensure_asset_vec_table(
+        self, conn: sqlite3.Connection, version_id: int, dim: int
+    ) -> None:
+        """Create ``vec_assets_v<version_id>`` lazily. sqlite-vec needs the
+        embedding dim baked into the table at CREATE time, so each version
+        gets its own dim-locked virtual table — switching multimodal model
+        creates a new version + new table, leaving prior data intact."""
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_assets_v{version_id} "
+            f"USING vec0(embedding float[{dim}])"
+        )
 
 
 # ---- row → DTO helpers ---------------------------------------------------
@@ -628,3 +1000,61 @@ def _row_to_wisdom(row: sqlite3.Row) -> WisdomItem:
         created_ts=float(row["created_ts"]),
         approved_ts=float(row["approved_ts"]) if row["approved_ts"] is not None else None,
     )
+
+
+def _row_to_asset(row: sqlite3.Row) -> AssetRecord:
+    return AssetRecord(
+        asset_id=row["asset_id"],
+        hash=row["hash"],
+        kind=AssetKind(row["kind"]),
+        mime=row["mime"],
+        stored_path=row["stored_path"],
+        original_paths=json.loads(row["original_paths"]),
+        bytes=int(row["bytes"]),
+        width=int(row["width"]) if row["width"] is not None else None,
+        height=int(row["height"]) if row["height"] is not None else None,
+        caption=row["caption"],
+        caption_model=row["caption_model"],
+        created_ts=float(row["created_ts"]),
+    )
+
+
+def _row_to_embed_version(row: sqlite3.Row) -> EmbeddingVersion:
+    return EmbeddingVersion(
+        version_id=int(row["version_id"]),
+        provider=row["provider"],
+        model=row["model"],
+        revision=row["revision"],
+        dim=int(row["dim"]),
+        normalize=bool(row["normalize"]),
+        distance=row["distance"],
+        modality=row["modality"],
+        created_ts=float(row["created_ts"]),
+        is_active=bool(row["is_active"]),
+    )
+
+
+def _fetch_version(
+    conn: sqlite3.Connection, version_id: int
+) -> EmbeddingVersion | None:
+    row = conn.execute(
+        "SELECT * FROM embed_versions WHERE version_id = ?", (version_id,)
+    ).fetchone()
+    return _row_to_embed_version(row) if row is not None else None
+
+
+def _asset_id_to_rowid(asset_id: str) -> int:
+    """Stable, signed-INT64-safe rowid derived from the sha256 asset_id.
+
+    sqlite-vec uses INTEGER rowids; we need a deterministic mapping from
+    the hex asset_id to a Python int that fits in sqlite3's signed 64-bit
+    rowid space. Take the first 15 hex chars (60 bits) so the result is
+    always non-negative and safely below 2**63.
+    """
+    return int(asset_id[:15], 16)
+
+
+def _now_seconds() -> float:
+    import time
+
+    return time.time()

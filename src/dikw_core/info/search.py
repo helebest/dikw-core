@@ -234,21 +234,31 @@ class HybridSearcher:
         top = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:limit]
 
         # Batch-fetch chunk → asset_refs for every retrieved chunk so the
-        # final Hit carries its referenced assets.
+        # final Hit carries its referenced assets. Backends that don't
+        # implement the asset bridge (filesystem / postgres) raise
+        # NotSupported here — degrade to empty refs so the legacy
+        # text-query path keeps working.
         retrieved_chunk_ids = [
             chunk_lookup[doc_id] for doc_id, _ in top if doc_id in chunk_lookup
         ]
-        refs_by_chunk = await self._storage.chunk_asset_refs_for_chunks(
-            retrieved_chunk_ids
-        )
+        try:
+            refs_by_chunk = await self._storage.chunk_asset_refs_for_chunks(
+                retrieved_chunk_ids
+            )
+        except NotSupported:
+            refs_by_chunk = {cid: [] for cid in retrieved_chunk_ids}
         # Materialize each unique asset_id once, in parallel — sequential
         # awaits would serialize one network/disk round-trip per asset.
         all_asset_ids = list(
             {r.asset_id for refs in refs_by_chunk.values() for r in refs}
         )
-        fetched = await asyncio.gather(
-            *(self._storage.get_asset(aid) for aid in all_asset_ids)
-        )
+        try:
+            fetched = await asyncio.gather(
+                *(self._storage.get_asset(aid) for aid in all_asset_ids)
+            )
+        except NotSupported:
+            fetched = []
+            all_asset_ids = []
         assets_by_id: dict[str, AssetRecord] = {
             aid: a
             for aid, a in zip(all_asset_ids, fetched, strict=True)

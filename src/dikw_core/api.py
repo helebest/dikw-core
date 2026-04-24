@@ -80,7 +80,7 @@ from .schemas import (
     WisdomStatus,
 )
 from .storage import Storage, build_storage
-from .storage.base import NotSupported
+from .storage.base import NotSupported, StorageError
 from .wisdom.apply import ApplicableWisdom, pick_applicable
 from .wisdom.distill import WisdomCandidate, parse_distill_response
 from .wisdom.io import write_candidate_file
@@ -609,8 +609,28 @@ async def ingest(
                     model=mm_cfg.model,
                     batch_size=mm_cfg.batch,
                 )
-                await storage.upsert_embeddings(rows)
-                report = _replace(report, embedded=len(rows))
+                # The legacy chunks_vec table is dim-locked at first
+                # write; if the user previously indexed with a different
+                # text-embedding dim, writing mm vectors here would
+                # raise StorageError. Asset retrieval still works (it
+                # uses a per-version vec_assets_v<id> table); skip the
+                # chunk-vec write with a clear warning so ingest doesn't
+                # die. v1 limitation: per-version chunk vec tables land
+                # in v1.5.
+                try:
+                    await storage.upsert_embeddings(rows)
+                    report = _replace(report, embedded=len(rows))
+                except StorageError as e:
+                    if "dim mismatch" in str(e):
+                        logger.warning(
+                            "skipping chunk-vec write: %s. Asset-vec retrieval "
+                            "still active; chunk-text retrieval falls back to "
+                            "BM25 only. Run `rm .dikw/dikw.sqlite && dikw "
+                            "ingest` to reindex chunks under the new dim.",
+                            e,
+                        )
+                    else:
+                        raise
             elif embedder is not None:
                 rows = await embed_chunks(
                     embedder,
@@ -734,9 +754,15 @@ async def query(
                         batch=mm_cfg.batch,
                     )
                     owned_mm = mm_embedder  # close it ourselves below
+                # Use the model recorded on the active version, not the
+                # current cfg model — if the user just edited dikw.yml to
+                # point at a new model but hasn't re-ingested yet, the
+                # asset vectors in vec_assets_v<active> were produced by
+                # the OLD model; querying with the new model would either
+                # mismatch dim or rank against an incompatible space.
                 mm_search = MultimodalSearch(
                     embedder=mm_embedder,
-                    model=mm_cfg.model,
+                    model=active.model,
                     asset_version_id=active.version_id,
                 )
 

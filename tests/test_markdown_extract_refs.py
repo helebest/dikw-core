@@ -97,6 +97,22 @@ def test_extract_remote_url_still_captured() -> None:
     assert refs[0].original_path == "https://example.com/img.png"
 
 
+def test_extract_path_with_spaces() -> None:
+    """Obsidian vaults commonly have filenames with spaces — the regex
+    must capture them as a single path."""
+    refs = extract_image_refs("![diagram](My Diagram.png)")
+    assert len(refs) == 1
+    assert refs[0].original_path == "My Diagram.png"
+
+
+def test_extract_path_with_spaces_and_title() -> None:
+    body = '![arch](My Big Diagram.png "Optional title")'
+    refs = extract_image_refs(body)
+    assert len(refs) == 1
+    assert refs[0].original_path == "My Big Diagram.png"
+    assert refs[0].alt == "arch"
+
+
 def test_extract_cjk_in_path_and_alt() -> None:
     body = "![架构图](./图表/系统架构.png)"
     refs = extract_image_refs(body)

@@ -27,10 +27,14 @@ ParsedMarkdown = ParsedDocument
 _ATX_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
 # Standard markdown image: ![alt](path) with optional "title" attribute.
-# Path is greedy-but-bounded by whitespace and `)` so it stops cleanly when
-# a title or closing paren follows.
+# Path may contain spaces (Obsidian-style ``![](My Diagram.png)``); the
+# lookahead pins the lazy match at the position where the title or the
+# closing paren begins, so the path captures everything in between
+# without swallowing the title or trailing whitespace.
 _IMG_MD = re.compile(
-    r"!\[([^\]]*)\]\(\s*([^)\s]+?)(?:\s+\"[^\"]*\")?\s*\)"
+    r"!\[([^\]]*)\]\(\s*([^)\n]+?)"
+    r"(?=\s+\"[^\"\n]*\"\s*\)|\s*\))"
+    r"(?:\s+\"[^\"\n]*\")?\s*\)"
 )
 
 # Obsidian image embed: ![[file]] with optional |alias (caption or display

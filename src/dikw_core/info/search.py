@@ -1,20 +1,22 @@
-"""Hybrid search: BM25 (FTS5) + vector (sqlite-vec / pgvector) fused via RRF.
+"""Hybrid search: BM25 (FTS5) + vector(s) fused via Reciprocal Rank Fusion.
 
-Phase 1 keeps this deliberately small:
+v1 has two operating modes:
 
-* Run ``storage.fts_search`` and ``storage.vec_search`` in parallel.
-* Fuse the two ranked lists with Reciprocal Rank Fusion (``k=60``), the
-  value used by both reference projects and the original RRF paper.
-* Return the top ``limit`` ``Hit``s, each with a representative snippet
-  sourced from the FTS side when present, or the chunk body otherwise.
+* **Legacy 2-leg** (text embedder, no asset index) — BM25 over chunk
+  text + vector search over chunk vectors, fused at chunk-level via RRF.
+  Behavior identical to the original implementation.
 
-RRF is appropriate here because it ignores raw scores — BM25 negative-log
-units and cosine distances don't normalize cleanly against each other, but
-rank orderings do.
+* **Multimodal 3-leg** (multimodal embedder + asset version) — adds a
+  third channel that runs ``vec_search_assets`` against the per-version
+  asset vector table; matched assets promote their parent chunks (via
+  the ``chunk_asset_refs`` reverse lookup) into the same RRF pool.
+  Each returned Hit carries the assets that the chunk references so
+  downstream consumers (CLI display, MCP schema, LLM synthesis) can
+  render or cite them.
 
-Query-expansion + the strong-signal short-circuit from ``qmd`` are named
-extension points for Phase 2 and beyond; starting with plain RRF lets us
-land a measurable baseline first.
+RRF is the right fusion choice — BM25 negative-log scores, cosine
+distances on text vectors, and cosine distances on image vectors don't
+normalize cleanly against each other, but their rank orderings do.
 """
 
 from __future__ import annotations
@@ -23,10 +25,18 @@ import asyncio
 import re
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ..providers import EmbeddingProvider
-from ..schemas import ChunkRecord, FTSHit, Layer, VecHit
+from ..providers import EmbeddingProvider, MultimodalEmbeddingProvider
+from ..schemas import (
+    AssetRecord,
+    AssetVecHit,
+    ChunkRecord,
+    FTSHit,
+    Layer,
+    MultimodalInput,
+    VecHit,
+)
 from ..storage.base import NotSupported, Storage
 
 RRF_K = 60
@@ -51,6 +61,7 @@ class Hit(BaseModel):
     snippet: str | None = None
     path: str | None = None
     title: str | None = None
+    asset_refs: list[AssetRecord] = Field(default_factory=list)
 
 
 def reciprocal_rank_fusion(
@@ -65,7 +76,15 @@ def reciprocal_rank_fusion(
 
 
 class HybridSearcher:
-    """Composes FTS + vector search on top of a ``Storage`` backend."""
+    """Composes FTS + vector search(es) on top of a ``Storage`` backend.
+
+    The ``multimodal_embedder`` / ``multimodal_model`` / ``asset_version_id``
+    triple is optional. When all three are supplied the searcher activates
+    a third RRF leg over the per-version asset vector table — text queries
+    can then promote chunks via the assets they reference. Omitting any
+    of them keeps the original 2-leg behavior; this lets installations on
+    the legacy text embedder upgrade to multimodal as a config-only change.
+    """
 
     def __init__(
         self,
@@ -73,10 +92,16 @@ class HybridSearcher:
         embedder: EmbeddingProvider | None,
         *,
         embedding_model: str | None = None,
+        multimodal_embedder: MultimodalEmbeddingProvider | None = None,
+        multimodal_model: str | None = None,
+        asset_version_id: int | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
         self._embedding_model = embedding_model
+        self._mm_embedder = multimodal_embedder
+        self._mm_model = multimodal_model
+        self._asset_version_id = asset_version_id
 
     async def search(
         self,
@@ -92,68 +117,164 @@ class HybridSearcher:
 
         run_fts = mode in ("bm25", "hybrid")
         run_vec = mode in ("vector", "hybrid")
-        if mode == "vector" and (
-            self._embedder is None or self._embedding_model is None
-        ):
+        mm_active = (
+            self._mm_embedder is not None
+            and self._mm_model is not None
+            and self._asset_version_id is not None
+        )
+        legacy_vec_active = (
+            self._embedder is not None and self._embedding_model is not None
+        )
+        if mode == "vector" and not (mm_active or legacy_vec_active):
             raise ValueError(
-                "mode='vector' requires both embedder and embedding_model"
+                "mode='vector' requires either a (multimodal_embedder, "
+                "multimodal_model, asset_version_id) triple or a "
+                "(embedder, embedding_model) pair"
             )
+
+        # Embed query via whichever pathway is configured. Multimodal
+        # takes precedence so installations with both configured drive
+        # all retrieval through the unified vector space.
+        q_vec: list[float] | None = None
+        if run_vec:
+            if mm_active:
+                q_vec = await self._embed_query_multimodal(q)
+            elif legacy_vec_active:
+                q_vec = await self._embed_query_legacy(q)
 
         fts_task: asyncio.Task[list[FTSHit]] | None = None
         vec_task: asyncio.Task[list[VecHit]] | None = None
+        asset_task: asyncio.Task[list[AssetVecHit]] | None = None
         if run_fts:
             fts_task = asyncio.create_task(
                 self._storage.fts_search(_sanitize_fts(q), limit=per_leg_limit, layer=layer)
             )
-        if run_vec and self._embedder is not None and self._embedding_model is not None:
-            vec_task = asyncio.create_task(self._embed_and_search(q, per_leg_limit, layer))
+        if q_vec is not None:
+            vec_task = asyncio.create_task(
+                self._storage.vec_search(q_vec, limit=per_leg_limit, layer=layer)
+            )
+            if mm_active and self._asset_version_id is not None:
+                asset_task = asyncio.create_task(
+                    self._storage.vec_search_assets(
+                        q_vec,
+                        version_id=self._asset_version_id,
+                        limit=per_leg_limit,
+                        layer=layer,
+                    )
+                )
 
-        fts_hits: list[FTSHit] = []
-        if fts_task is not None:
-            fts_hits = await fts_task
+        fts_hits: list[FTSHit] = await fts_task if fts_task is not None else []
         vec_hits: list[VecHit] = []
         if vec_task is not None:
             try:
                 vec_hits = await vec_task
             except NotSupported:
                 vec_hits = []
+        asset_hits: list[AssetVecHit] = []
+        if asset_task is not None:
+            try:
+                asset_hits = await asset_task
+            except NotSupported:
+                asset_hits = []
+
+        # Asset-channel reverse lookup: each asset hit promotes the
+        # chunks that reference it. We rank chunks by their asset's
+        # rank in the asset vec results.
+        asset_doc_ranked: list[str] = []
+        asset_chunk_lookup: dict[str, int] = {}  # doc_id → first promoted chunk_id
+        if asset_hits:
+            asset_ids_ordered = [h.asset_id for h in asset_hits]
+            chunks_by_asset = await self._storage.chunks_referencing_assets(
+                asset_ids_ordered
+            )
+            seen_docs: set[str] = set()
+            for asset_id in asset_ids_ordered:
+                for cid in chunks_by_asset.get(asset_id, []):
+                    chunk = await self._storage.get_chunk(cid)
+                    if chunk is None or chunk.doc_id in seen_docs:
+                        continue
+                    asset_doc_ranked.append(chunk.doc_id)
+                    asset_chunk_lookup[chunk.doc_id] = cid
+                    seen_docs.add(chunk.doc_id)
 
         fts_ranked = [h.doc_id for h in fts_hits]
         vec_ranked = [h.doc_id for h in vec_hits]
-        fused = reciprocal_rank_fusion([fts_ranked, vec_ranked])
+        fused = reciprocal_rank_fusion(
+            [fts_ranked, vec_ranked, asset_doc_ranked]
+        )
 
-        # index hits for fast snippet lookup
-        snippets: dict[str, str] = {h.doc_id: h.snippet or "" for h in fts_hits if h.snippet}
+        snippets: dict[str, str] = {
+            h.doc_id: h.snippet or "" for h in fts_hits if h.snippet
+        }
         chunk_lookup: dict[str, int] = {h.doc_id: h.chunk_id for h in vec_hits}
+        # FTS hits expose their chunk_id (since the SQLite adapter aligns
+        # documents_fts.rowid with chunks.chunk_id); use them as a fallback
+        # so asset_refs can still be attached to FTS-only retrieved docs.
+        for h in fts_hits:
+            if h.chunk_id is not None:
+                chunk_lookup.setdefault(h.doc_id, h.chunk_id)
+        # Asset-promoted chunks fill in chunk_ids for docs neither vec nor
+        # FTS surfaced.
+        for doc_id, cid in asset_chunk_lookup.items():
+            chunk_lookup.setdefault(doc_id, cid)
 
         top = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+        # Batch-fetch chunk → asset_refs for every retrieved chunk so the
+        # final Hit carries its referenced assets.
+        retrieved_chunk_ids = [
+            chunk_lookup[doc_id] for doc_id, _ in top if doc_id in chunk_lookup
+        ]
+        refs_by_chunk = await self._storage.chunk_asset_refs_for_chunks(
+            retrieved_chunk_ids
+        )
+        # Materialize each unique asset_id once.
+        all_asset_ids = {
+            r.asset_id for refs in refs_by_chunk.values() for r in refs
+        }
+        assets_by_id: dict[str, AssetRecord] = {}
+        for aid in all_asset_ids:
+            a = await self._storage.get_asset(aid)
+            if a is not None:
+                assets_by_id[aid] = a
+
         hits: list[Hit] = []
         for doc_id, score in top:
-            snippet = snippets.get(doc_id) or await self._chunk_snippet(
-                chunk_lookup.get(doc_id)
-            )
+            hit_chunk_id: int | None = chunk_lookup.get(doc_id)
+            snippet = snippets.get(doc_id) or await self._chunk_snippet(hit_chunk_id)
             doc = await self._storage.get_document(doc_id)
+            asset_records: list[AssetRecord] = []
+            if hit_chunk_id is not None:
+                for r in refs_by_chunk.get(hit_chunk_id, []):
+                    a = assets_by_id.get(r.asset_id)
+                    if a is not None:
+                        asset_records.append(a)
             hits.append(
                 Hit(
                     doc_id=doc_id,
-                    chunk_id=chunk_lookup.get(doc_id),
+                    chunk_id=hit_chunk_id,
                     score=score,
                     snippet=snippet,
                     path=doc.path if doc else None,
                     title=doc.title if doc else None,
+                    asset_refs=asset_records,
                 )
             )
         return hits
 
-    async def _embed_and_search(
-        self, q: str, limit: int, layer: Layer | None
-    ) -> list[VecHit]:
+    async def _embed_query_legacy(self, q: str) -> list[float] | None:
         assert self._embedder is not None
         assert self._embedding_model is not None
         vectors = await self._embedder.embed([q], model=self._embedding_model)
-        if not vectors:
-            return []
-        return await self._storage.vec_search(vectors[0], limit=limit, layer=layer)
+        return vectors[0] if vectors else None
+
+    async def _embed_query_multimodal(self, q: str) -> list[float] | None:
+        assert self._mm_embedder is not None
+        assert self._mm_model is not None
+        vectors = await self._mm_embedder.embed(
+            [MultimodalInput(text=q)], model=self._mm_model
+        )
+        return vectors[0] if vectors else None
 
     async def _chunk_snippet(self, chunk_id: int | None) -> str | None:
         if chunk_id is None:

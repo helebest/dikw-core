@@ -230,11 +230,22 @@ class SQLiteStorage:
                     (doc_id,),
                 ).fetchone()
                 if doc_row is not None:
-                    for c in chunks:
+                    # Use explicit rowid = chunk_id so FTS rowids stay
+                    # aligned with chunks.chunk_id — that lets fts_search
+                    # return chunk_id and the hybrid searcher attach
+                    # chunk_asset_refs to the right Hit even when only
+                    # the FTS leg fired.
+                    for cid, c in zip(ids, chunks, strict=True):
                         conn.execute(
-                            "INSERT INTO documents_fts(path, title, body, layer) "
-                            "VALUES (?, ?, ?, ?)",
-                            (doc_row["path"], doc_row["title"], c.text, doc_row["layer"]),
+                            "INSERT INTO documents_fts(rowid, path, title, body, layer) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (
+                                cid,
+                                doc_row["path"],
+                                doc_row["title"],
+                                c.text,
+                                doc_row["layer"],
+                            ),
                         )
             return ids
 
@@ -292,7 +303,8 @@ class SQLiteStorage:
         def _run() -> list[FTSHit]:
             conn = self._require_conn()
             sql = (
-                "SELECT path, snippet(documents_fts, 2, '<mark>', '</mark>', '…', 10) AS snip, "
+                "SELECT documents_fts.rowid AS chunk_id, path, "
+                "snippet(documents_fts, 2, '<mark>', '</mark>', '…', 10) AS snip, "
                 "bm25(documents_fts) AS score "
                 "FROM documents_fts WHERE documents_fts MATCH ?"
             )
@@ -311,7 +323,12 @@ class SQLiteStorage:
                     continue
                 # bm25 returns lower-is-better; invert so higher = better
                 hits.append(
-                    FTSHit(doc_id=doc_row["doc_id"], score=-float(row["score"]), snippet=row["snip"])
+                    FTSHit(
+                        doc_id=doc_row["doc_id"],
+                        chunk_id=int(row["chunk_id"]),
+                        score=-float(row["score"]),
+                        snippet=row["snip"],
+                    )
                 )
             return hits
 

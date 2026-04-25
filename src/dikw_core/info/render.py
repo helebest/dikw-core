@@ -46,6 +46,12 @@ def render_chunk(
     (``project_root / stored_path``) so the rendered Markdown is portable
     independent of the consumer's working directory; otherwise the
     relative ``stored_path`` (``assets/<h2>/<h8>-<name>.<ext>``) is used.
+    The absolute form emits a filesystem string (``C:/vault/...`` on
+    Windows, ``/vault/...`` on POSIX) intended for LLM-prompt contexts
+    where the consumer treats the path as a hint, not a URL. Browsers
+    and strict Markdown renderers treat ``C:`` as a URL scheme and UNC
+    forms (``//server/share``) as scheme-relative URLs; for those
+    consumers, prefer relative paths or wrap in ``file:///`` upstream.
 
     The output reference uses standard ``![alt](path)`` Markdown form
     even when the source was an Obsidian wikilink — the wikilink alias
@@ -64,7 +70,8 @@ def render_chunk(
         if asset is None:
             continue
         path = (
-            str(project_root / asset.stored_path)
+            # as_posix() so rendered markdown is identical on Windows and POSIX.
+            (project_root / asset.stored_path).as_posix()
             if project_root is not None
             else asset.stored_path
         )

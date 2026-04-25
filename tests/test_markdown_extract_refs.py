@@ -121,6 +121,20 @@ def test_extract_cjk_in_path_and_alt() -> None:
     assert refs[0].original_path == "./图表/系统架构.png"
 
 
+def test_extract_normalizes_windows_backslash() -> None:
+    refs = extract_image_refs(r"![](images\images\00001.jpeg)")
+    assert len(refs) == 1
+    assert refs[0].original_path == "images/images/00001.jpeg"
+    assert refs[0].syntax == "markdown"
+
+
+def test_extract_normalizes_backslash_in_wikilink() -> None:
+    refs = extract_image_refs(r"![[images\sub\arch.png]]")
+    assert len(refs) == 1
+    assert refs[0].original_path == "images/sub/arch.png"
+    assert refs[0].syntax == "wikilink"
+
+
 def test_parse_text_populates_asset_refs() -> None:
     body = "# Title\n\n![arch](arch.png)\n\nMore text with ![[diagram.svg|400]] inline."
     parsed = parse_text(path="x.md", text=body, mtime=1234.5)

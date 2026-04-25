@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Layer(StrEnum):
@@ -140,6 +140,9 @@ class AssetRef(BaseModel):
     body (the same coordinate space ``ChunkRecord`` uses), so the chunker
     can keep the reference intact and ``chunk_asset_refs`` can be populated
     after chunking with chunk-relative offsets.
+
+    ``original_path`` is canonicalised to forward slashes at construction
+    so Windows-pasted backslash paths resolve on POSIX CI.
     """
 
     original_path: str
@@ -147,6 +150,11 @@ class AssetRef(BaseModel):
     start: int
     end: int
     syntax: Literal["markdown", "wikilink"]
+
+    @field_validator("original_path")
+    @classmethod
+    def _forward_slashes(cls, v: str) -> str:
+        return v.replace("\\", "/")
 
 
 class ImageContent(BaseModel):

@@ -349,20 +349,91 @@ async def _probe_embed(
     return ProbeResult(ok=True, target=target, detail=detail)
 
 
+# 1x1 transparent PNG used by ``_probe_multimodal`` so the wire round-trip
+# exercises Gitee's image-decoding path with the smallest possible payload.
+_PROBE_PNG_1X1 = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+    b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+    b"\x00\x00\x00\rIDATx\x9cc\xfa\xcf\x00\x00\x00\x02\x00\x01\xe5'\xde\xfc"
+    b"\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+async def _probe_multimodal(
+    embedder: MultimodalEmbeddingProvider,
+    model: str,
+    target: str,
+    *,
+    provider_label: str | None = None,
+) -> ProbeResult:
+    """Probe a multimodal embedder with a single batched text+image request.
+
+    Sends two per-modality inputs (one text, one tiny PNG) in **one** HTTP
+    call so latency stays bounded by a single RTT — no sequential probes
+    that would double end-to-end time. Validation hinges on both vectors
+    coming back with a consistent dim; an empty or shape-mismatched
+    response surfaces as an error rather than a silent pass.
+    """
+    from .schemas import ImageContent, MultimodalInput
+
+    inputs = [
+        MultimodalInput(text="ping"),
+        MultimodalInput(images=[ImageContent(bytes=_PROBE_PNG_1X1, mime="image/png")]),
+    ]
+    started = time.perf_counter()
+    try:
+        vectors = await embedder.embed(inputs, model=model)
+    except Exception as e:
+        return ProbeResult(ok=False, target=target, detail=f"{type(e).__name__}: {e}")
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    if len(vectors) != 2:
+        return ProbeResult(
+            ok=False,
+            target=target,
+            detail=(
+                f"{elapsed_ms}ms, expected 2 vectors (text+image), got "
+                f"{len(vectors)} — provider returned a shape-mismatched batch"
+            ),
+        )
+    dim_text = len(vectors[0])
+    dim_image = len(vectors[1])
+    if dim_text != dim_image:
+        return ProbeResult(
+            ok=False,
+            target=target,
+            detail=(
+                f"{elapsed_ms}ms, dim mismatch text={dim_text} image={dim_image} — "
+                f"per-modality vectors must share one space"
+            ),
+        )
+    detail = f"{elapsed_ms}ms, dim={dim_text}, modalities=text+image"
+    if provider_label:
+        detail = f"{detail}, provider={provider_label}"
+    return ProbeResult(ok=True, target=target, detail=detail)
+
+
 async def check_providers(
     path: str | Path | None = None,
     *,
     llm: LLMProvider | None = None,
     embedder: EmbeddingProvider | None = None,
+    multimodal_embedder: MultimodalEmbeddingProvider | None = None,
     llm_only: bool = False,
     embed_only: bool = False,
 ) -> CheckReport:
     """Ping the configured LLM and embedding providers.
 
-    ``llm`` and ``embedder`` are injectable for tests; production callers
-    leave them ``None`` and the factory builds them from ``provider:`` in
-    ``dikw.yml``. Two legs run in parallel and each reports its own result
-    — an LLM failure does not short-circuit the embedding probe.
+    ``llm``, ``embedder``, and ``multimodal_embedder`` are injectable for
+    tests; production callers leave them ``None`` and the factory builds
+    them from ``provider:`` / ``assets.multimodal:`` in ``dikw.yml``. Two
+    legs run in parallel and each reports its own result — an LLM failure
+    does not short-circuit the embedding probe.
+
+    When ``cfg.assets.multimodal`` is configured, the embed leg routes
+    through ``_probe_multimodal`` (one batched text+image request) instead
+    of the text-only ``_probe_embed`` — the multimodal embedder is what
+    ingest actually uses for both chunks and assets, so the check must
+    follow that route to remain truthful.
 
     ``llm_only`` / ``embed_only`` (mutually exclusive) verify a single leg.
     The skipped leg is never built or called, so a misconfigured embedding
@@ -377,32 +448,45 @@ async def check_providers(
     embed_probe: ProbeResult | None = None
     llm_target = cfg.provider.llm_base_url or "(provider default)"
     embed_target = cfg.provider.embedding_base_url
+    embed_label = cfg.provider.embedding_provider_label
+    mm_cfg = cfg.assets.multimodal
 
     if not embed_only:
         llm_inst = llm if llm is not None else build_llm(cfg.provider)
     if not llm_only:
-        embed_inst = embedder if embedder is not None else build_embedder(cfg.provider)
+        if mm_cfg is not None:
+            mm_inst = (
+                multimodal_embedder
+                if multimodal_embedder is not None
+                else build_multimodal_embedder(
+                    mm_cfg.provider, base_url=mm_cfg.base_url, batch=mm_cfg.batch
+                )
+            )
+        else:
+            embed_inst = (
+                embedder if embedder is not None else build_embedder(cfg.provider)
+            )
 
-    embed_label = cfg.provider.embedding_provider_label
-
-    if llm_only:
-        llm_probe = await _probe_llm(llm_inst, cfg.provider.llm_model, llm_target)
-    elif embed_only:
-        embed_probe = await _probe_embed(
+    async def _embed_leg() -> ProbeResult:
+        if mm_cfg is not None:
+            return await _probe_multimodal(
+                mm_inst, mm_cfg.model, embed_target, provider_label=embed_label
+            )
+        return await _probe_embed(
             embed_inst,
             cfg.provider.embedding_model,
             embed_target,
             provider_label=embed_label,
         )
+
+    if llm_only:
+        llm_probe = await _probe_llm(llm_inst, cfg.provider.llm_model, llm_target)
+    elif embed_only:
+        embed_probe = await _embed_leg()
     else:
         llm_probe, embed_probe = await asyncio.gather(
             _probe_llm(llm_inst, cfg.provider.llm_model, llm_target),
-            _probe_embed(
-                embed_inst,
-                cfg.provider.embedding_model,
-                embed_target,
-                provider_label=embed_label,
-            ),
+            _embed_leg(),
         )
     return CheckReport(llm=llm_probe, embed=embed_probe)
 

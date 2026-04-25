@@ -281,7 +281,7 @@ config:
   seam sits in the module map.
 
 
-## Multimodal embedding (v1: Gitee AI default)
+## Multimodal embedding (v1: Gitee)
 
 When `dikw.yml` declares an `assets.multimodal` block, the engine
 routes both chunk text and image bytes through one
@@ -289,24 +289,88 @@ routes both chunk text and image bytes through one
 Without the block, the legacy 2-leg text-embedding path is used
 exactly as before — multimodal is opt-in.
 
-```yaml
-assets:
-  dir: assets                 # relative to project root
-  multimodal:
-    provider: gitee_multimodal
-    model: jina-clip-v2       # or whatever multimodal model your endpoint serves
-    revision: ""              # bump (e.g., "2026-04") if the vendor silently
-                              # refreshes weights behind a stable model name
-    dim: 1024                 # MUST match the model's actual output dim
-    normalize: true           # whether the model returns L2-normalized vectors
-    distance: cosine          # cosine | l2 | dot
-    batch: 16                 # per-request input cap; tighten for stricter vendors
-    base_url: null            # override the provider default if needed
+### Wire format
+
+Gitee's multimodal embeddings endpoint accepts **one shape across every
+multimodal model it serves** (Qwen3-VL-Embedding-8B, jina-clip-v2, …):
+a list of per-modality input dicts. The model name in
+`assets.multimodal.model` discriminates which model runs server-side;
+the wire payload does not change.
+
+```http
+POST /v1/embeddings
+{
+  "model": "Qwen3-VL-Embedding-8B",
+  "input": [
+    {"text": "a blue cat"},
+    {"image": "data:image/png;base64,..."}
+  ]
+}
 ```
 
-The provider reads `DIKW_EMBEDDING_API_KEY` (the same env var the legacy
-text embedder uses) — never `OPENAI_API_KEY`. If the LLM and embedding
-legs target different vendors, set them as two distinct keys.
+This is **distinct** from Gitee's text-only embeddings shape
+(`input: "..."` or `input: ["...", "..."]`), which the legacy text
+embedder uses on the `embedding_*` keys at the top of `dikw.yml`.
+
+Each `MultimodalInput` becomes one wire input. Combined text+image on a
+single `MultimodalInput` is rejected loudly (Gitee embeds per-modality,
+no joint-encode mode), as is multiple images per input. The pipeline
+never produces those shapes today (chunks are text-only, assets are
+image-only), so the rejection just keeps a future config mistake from
+silently dropping a modality.
+
+### Cookbook: Qwen homogeneous pair (recommended)
+
+Both legs on Gitee, same vendor and key:
+
+```yaml
+provider:
+  llm: anthropic                       # or whichever LLM you've configured
+  embedding: openai_compat             # text leg — single-string input shape
+  embedding_base_url: https://ai.gitee.com/v1
+  embedding_model: Qwen3-Embedding-8B
+  embedding_dimensions: 4096           # native; Qwen3-Embedding-8B supports
+                                       # matryoshka truncation to 1024/512/256
+                                       # — but dim locks at first ingest
+                                       # (gotcha #1), don't change later
+  embedding_batch_size: 16             # Gitee caps at 25 (gotcha #2)
+  embedding_provider_label: gitee-ai
+
+assets:
+  dir: assets                          # relative to project root
+  multimodal:
+    provider: gitee_multimodal         # the only literal that ships today
+    model: Qwen3-VL-Embedding-8B       # multimodal leg — per-modality dicts
+    dim: 4096                          # native output dim
+    revision: ""                       # bump (e.g., "2026-04") if Gitee
+                                       # silently refreshes the weights
+    normalize: true
+    distance: cosine
+    batch: 16                          # per-request input cap
+    base_url: null                     # null = use the gitee_multimodal default
+```
+
+The text leg and the multimodal leg write **separate** vec tables
+(`vec_chunks_v<n>` / `vec_assets_v<n>`); their dims do not have to match
+each other, only their respective models. Both legs read
+`DIKW_EMBEDDING_API_KEY` — never `OPENAI_API_KEY`. If LLM and embedding
+target different vendors, set them as distinct env vars.
+
+### Verifying the config end-to-end
+
+`dikw check --embed-only` automatically routes through the multimodal
+embedder when `assets.multimodal` is present, sending one text + one
+image input in **a single batched request** (no RTT stacking). Both
+modalities probe the same endpoint Gitee will see at ingest time, so a
+green check means real ingest will work:
+
+```bash
+$ uv run --env-file .env dikw check --path . --embed-only
+Embedding | https://ai.gitee.com/v1 | OK | 480ms, dim=4096, modalities=text+image, provider=gitee-ai
+```
+
+If `assets.multimodal` is absent, the check falls back to the text-only
+probe (one `"ping"` string) — same as before.
 
 ### What the multimodal pipeline buys you
 
@@ -339,4 +403,6 @@ add a branch to `build_multimodal_embedder` in
 `providers/__init__.py`. The Protocol signature accepts arbitrary
 combinations of text and image inputs already — Voyage v3, Cohere v4,
 Jina-direct, and self-hosted Nomic Embed Vision all slot in without
-engine changes.
+engine changes. (Their wire shapes diverge from Gitee's per-modality
+dicts, which is why each vendor gets its own provider rather than
+sharing one serializer.)

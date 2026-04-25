@@ -224,3 +224,81 @@ def test_cli_check_embed_only_shows_provider_label_when_yaml_set(
     result = runner.invoke(app, ["check", "--path", str(wiki), "--embed-only"])
     assert result.exit_code == 0, result.stdout
     assert "gitee-ai" in result.stdout
+
+
+# ---- Multimodal probe ----------------------------------------------------
+#
+# When ``assets.multimodal`` is configured, the engine ingests chunks AND
+# assets through the multimodal embedder, never the text-only one. The
+# check must follow that route, otherwise it greenlights a wiki whose
+# real ingest path will fail. The probe sends one text + one image input
+# in a single batched request — exactly the shape the production pipeline
+# uses, no RTT stacking.
+
+
+@pytest.fixture()
+def multimodal_wiki(tmp_path: Path) -> Path:
+    """A wiki whose dikw.yml carries an ``assets.multimodal`` block."""
+    import yaml
+
+    w = tmp_path / "wiki-mm"
+    api.init_wiki(w, description="multimodal probe test wiki")
+    cfg_path = w / "dikw.yml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw.setdefault("assets", {})["multimodal"] = {
+        "provider": "gitee_multimodal",
+        "model": "Qwen3-VL-Embedding-8B",
+        "dim": 4096,
+        "batch": 16,
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return w
+
+
+@pytest.mark.asyncio
+async def test_check_embed_probe_routes_through_multimodal_when_configured(
+    multimodal_wiki: Path,
+) -> None:
+    """When ``assets.multimodal`` is configured, --embed-only must probe the
+    multimodal embedder, not the text-only one. The probe sends one text +
+    one image input in a single batched request (no RTT stacking)."""
+    from tests.fakes import FakeMultimodalEmbedding
+
+    fake_mm = FakeMultimodalEmbedding(dim=4096)
+    report = await api.check_providers(
+        multimodal_wiki,
+        llm=FakeLLM(),
+        multimodal_embedder=fake_mm,
+        embed_only=True,
+    )
+    assert report.ok
+    assert report.embed is not None and report.embed.ok
+    # Detail must surface the dim probed AND that both modalities were sent.
+    assert "dim=4096" in report.embed.detail
+    assert "text+image" in report.embed.detail
+    # Single batch call: 2 inputs (1 text + 1 image), not 2 separate calls.
+    assert len(fake_mm.last_inputs) == 2
+    text_inputs = [i for i in fake_mm.last_inputs if i.text]
+    image_inputs = [i for i in fake_mm.last_inputs if i.images]
+    assert len(text_inputs) == 1
+    assert len(image_inputs) == 1
+    # Probe targets the multimodal model name, not provider.embedding_model.
+    assert fake_mm.last_model == "Qwen3-VL-Embedding-8B"
+
+
+@pytest.mark.asyncio
+async def test_check_embed_probe_uses_text_path_when_no_multimodal(
+    wiki: Path,
+) -> None:
+    """The legacy text-embed probe must keep working when ``assets.multimodal``
+    is absent — regression guard against routing every wiki through the
+    multimodal path."""
+    fake_text = FakeEmbeddings()
+    report = await api.check_providers(
+        wiki, llm=FakeLLM(), embedder=fake_text, embed_only=True
+    )
+    assert report.ok
+    assert report.embed is not None and report.embed.ok
+    # The text-only path doesn't probe images, so its detail line must
+    # not advertise a "modalities=" tag.
+    assert "modalities" not in report.embed.detail

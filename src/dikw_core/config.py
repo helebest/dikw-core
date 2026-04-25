@@ -169,7 +169,7 @@ class MultimodalEmbedConfig(BaseModel):
     text-only mode (text-embed for chunks, no asset retrieval).
     """
 
-    provider: Literal["gitee_multimodal", "gitee_qwen_vl"] = "gitee_multimodal"
+    provider: Literal["gitee_multimodal"] = "gitee_multimodal"
     model: str
     revision: str = ""  # bump to force a new version when weights change
     dim: int  # must match the model's actual output dim; vec table dim-locks on it

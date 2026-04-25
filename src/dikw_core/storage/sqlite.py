@@ -181,6 +181,24 @@ class SQLiteStorage:
 
         return await asyncio.to_thread(_run)
 
+    async def get_documents(
+        self, doc_ids: Iterable[str]
+    ) -> list[DocumentRecord]:
+        ids = list(doc_ids)
+        if not ids:
+            return []
+
+        def _run() -> list[DocumentRecord]:
+            conn = self._require_conn()
+            placeholders = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT * FROM documents WHERE doc_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            return [_row_to_document(r) for r in rows]
+
+        return await asyncio.to_thread(_run)
+
     async def list_documents(
         self,
         *,
@@ -313,6 +331,33 @@ class SQLiteStorage:
                 end=row["end"],
                 text=row["text"],
             )
+
+        return await asyncio.to_thread(_run)
+
+    async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
+        ids = list(chunk_ids)
+        if not ids:
+            return []
+
+        def _run() -> list[ChunkRecord]:
+            conn = self._require_conn()
+            placeholders = ",".join("?" * len(ids))
+            rows = conn.execute(
+                'SELECT chunk_id, doc_id, seq, start, "end", text '
+                f"FROM chunks WHERE chunk_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            return [
+                ChunkRecord(
+                    chunk_id=row["chunk_id"],
+                    doc_id=row["doc_id"],
+                    seq=row["seq"],
+                    start=row["start"],
+                    end=row["end"],
+                    text=row["text"],
+                )
+                for row in rows
+            ]
 
         return await asyncio.to_thread(_run)
 

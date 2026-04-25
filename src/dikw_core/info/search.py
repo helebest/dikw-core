@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -49,6 +50,7 @@ class RetrievalConfigLike(Protocol):
     bm25_weight: float
     vector_weight: float
     cjk_tokenizer: CjkTokenizer
+    same_doc_penalty_alpha: float
 
 
 @dataclass(frozen=True)
@@ -80,10 +82,17 @@ RetrievalMode = Literal["bm25", "vector", "hybrid"]
 
 
 class Hit(BaseModel):
-    """One fused search result."""
+    """One fused search result.
+
+    ``chunk_id`` is non-optional: chunk-level fusion produces one hit per
+    chunk, so every result is anchored to a concrete chunk. ``seq`` is
+    the chunk's ordinal within its document — useful for disambiguating
+    multiple hits from the same document in CLI / MCP output.
+    """
 
     doc_id: str
-    chunk_id: int | None = None
+    chunk_id: int
+    seq: int | None = None
     score: float
     snippet: str | None = None
     path: str | None = None
@@ -91,13 +100,48 @@ class Hit(BaseModel):
     asset_refs: list[AssetRecord] = Field(default_factory=list)
 
 
-def reciprocal_rank_fusion(
-    rank_lists: list[list[str]],
+def apply_source_diversity_penalty(
+    fused: dict[int, float],
+    doc_id_by_chunk: dict[int, str],
+    *,
+    alpha: float,
+) -> dict[int, float]:
+    """Diminishing-returns demotion of repeat same-doc chunks.
+
+    Walks ``fused`` in score-desc order. The 1st chunk seen from each
+    ``doc_id`` is unpenalized (factor ``1.0``); the N-th chunk (N ≥ 2)
+    from the same doc is scaled by ``1 / (1 + alpha * (N - 1))``.
+    With ``alpha=0.3``: 1st = 1.0, 2nd ≈ 0.77, 3rd = 0.625, 4th ≈ 0.526.
+    With ``alpha=0`` the function is the identity (no-op).
+
+    Returns a new dict with the same key set; the caller re-sorts and
+    slices top-K. Pure: no I/O, no side effects, no globals.
+    """
+    if alpha == 0.0:
+        return dict(fused)
+    per_doc_seen: dict[str, int] = {}
+    out: dict[int, float] = {}
+    for chunk_id, score in sorted(fused.items(), key=lambda kv: kv[1], reverse=True):
+        doc_id = doc_id_by_chunk.get(chunk_id)
+        if doc_id is None:
+            out[chunk_id] = score
+            continue
+        n_seen = per_doc_seen.get(doc_id, 0)
+        out[chunk_id] = score / (1.0 + alpha * n_seen)
+        per_doc_seen[doc_id] = n_seen + 1
+    return out
+
+
+def reciprocal_rank_fusion[K: Hashable](
+    rank_lists: list[list[K]],
     *,
     k: int = RRF_K,
     weights: list[float] | None = None,
-) -> dict[str, float]:
-    """Reciprocal Rank Fusion. Returns doc_id → fused score (higher = better).
+) -> dict[K, float]:
+    """Reciprocal Rank Fusion. Returns key → fused score (higher = better).
+
+    ``K`` is generic over any hashable identity — historically ``doc_id:
+    str``, now also ``chunk_id: int`` once chunk-level fusion lands.
 
     ``weights`` lets the caller bias fusion toward a stronger leg — e.g.,
     when BM25 is measurably behind the dense leg on a given corpus,
@@ -117,7 +161,7 @@ def reciprocal_rank_fusion(
             f"weights length {len(weights)} must match rank_lists length "
             f"{len(rank_lists)}"
         )
-    scores: dict[str, float] = {}
+    scores: dict[K, float] = {}
     for lst, w in zip(rank_lists, weights, strict=True):
         for rank, key in enumerate(lst):
             scores[key] = scores.get(key, 0.0) + w / (k + rank + 1)
@@ -143,6 +187,7 @@ class HybridSearcher:
         bm25_weight: float = 1.0,
         vector_weight: float = 1.0,
         cjk_tokenizer: CjkTokenizer = "none",
+        same_doc_penalty_alpha: float = 0.3,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
@@ -154,6 +199,7 @@ class HybridSearcher:
         # Must match the storage adapter's ingest-time tokenizer; a
         # mismatch silently drops CJK hits.
         self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
+        self._same_doc_penalty_alpha = same_doc_penalty_alpha
 
     @classmethod
     def from_config(
@@ -167,9 +213,9 @@ class HybridSearcher:
     ) -> HybridSearcher:
         """Unpack a ``RetrievalConfig`` into the keyword kwargs.
 
-        Centralises the 4-knob mapping so adding a 5th knob is a
+        Centralises the knob mapping so adding a new knob is a
         one-file change. ``RetrievalConfigLike`` is any object with
-        the four attributes — pydantic ``RetrievalConfig`` qualifies.
+        the listed attributes — pydantic ``RetrievalConfig`` qualifies.
         """
         return cls(
             storage,
@@ -180,6 +226,7 @@ class HybridSearcher:
             bm25_weight=cfg.bm25_weight,
             vector_weight=cfg.vector_weight,
             cjk_tokenizer=cfg.cjk_tokenizer,
+            same_doc_penalty_alpha=cfg.same_doc_penalty_alpha,
         )
 
     async def search(
@@ -261,45 +308,45 @@ class HybridSearcher:
             except NotSupported:
                 asset_hits = []
 
-        # Asset hits promote the chunks that reference them. Rank a chunk
-        # by its asset's rank in the asset-vec results.
-        asset_doc_ranked: list[str] = []
-        asset_chunk_lookup: dict[str, int] = {}  # doc_id → first promoted chunk_id
+        # Asset hits promote the chunks that reference them. Each promoted
+        # chunk enters the fusion pool directly — chunk-level fusion means
+        # multiple chunks from the same asset's parent doc all compete on
+        # their own merit.
+        asset_chunk_ranked: list[int] = []
+        asset_chunk_doc_ids: dict[int, str] = {}
         if asset_hits:
             asset_ids_ordered = [h.asset_id for h in asset_hits]
             chunks_by_asset = await self._storage.chunks_referencing_assets(
                 asset_ids_ordered
             )
-            # Pre-fetch all promoted chunks in parallel — each asset hit
-            # would otherwise trigger a serial get_chunk on the query path.
             promoted_chunk_ids = list(
                 {cid for cids in chunks_by_asset.values() for cid in cids}
             )
-            chunks = await asyncio.gather(
-                *(self._storage.get_chunk(cid) for cid in promoted_chunk_ids)
-            )
             chunk_by_id = {
-                cid: c for cid, c in zip(promoted_chunk_ids, chunks, strict=True)
-                if c is not None
+                c.chunk_id: c
+                for c in await self._storage.get_chunks(promoted_chunk_ids)
+                if c.chunk_id is not None
             }
-            seen_docs: set[str] = set()
+            seen_chunks: set[int] = set()
             for asset_id in asset_ids_ordered:
                 for cid in chunks_by_asset.get(asset_id, []):
                     chunk = chunk_by_id.get(cid)
-                    if chunk is None or chunk.doc_id in seen_docs:
+                    if chunk is None or cid in seen_chunks:
                         continue
-                    asset_doc_ranked.append(chunk.doc_id)
-                    asset_chunk_lookup[chunk.doc_id] = cid
-                    seen_docs.add(chunk.doc_id)
+                    asset_chunk_ranked.append(cid)
+                    asset_chunk_doc_ids[cid] = chunk.doc_id
+                    seen_chunks.add(cid)
 
-        fts_ranked = [h.doc_id for h in fts_hits]
-        vec_ranked = [h.doc_id for h in vec_hits]
+        # Build chunk-level rank lists. FTSHit.chunk_id is `int | None` in
+        # the schema (legacy compat); every shipped adapter populates it,
+        # but defensively skip any None to keep RRF keys homogeneous.
+        fts_ranked = [h.chunk_id for h in fts_hits if h.chunk_id is not None]
+        vec_ranked = [h.chunk_id for h in vec_hits]
         # Asset channel rides the vector weight — same family of signal
         # (semantic similarity in the multimodal space), distinct only in
-        # what's embedded (chunk text vs asset bytes). Per-channel asset
-        # weight is a v1.5 knob.
+        # what's embedded (chunk text vs asset bytes).
         fused = reciprocal_rank_fusion(
-            [fts_ranked, vec_ranked, asset_doc_ranked],
+            [fts_ranked, vec_ranked, asset_chunk_ranked],
             k=self._rrf_k,
             weights=[
                 self._bm25_weight,
@@ -308,39 +355,42 @@ class HybridSearcher:
             ],
         )
 
-        snippets: dict[str, str] = {
-            h.doc_id: h.snippet or "" for h in fts_hits if h.snippet
+        # Per-chunk doc_id lookup, sourced from every leg that knows it.
+        # Vec/asset legs always carry doc_id; FTS hits do too. The first
+        # writer wins because every leg agrees on chunk_id -> doc_id.
+        doc_id_by_chunk: dict[int, str] = {}
+        for vh in vec_hits:
+            doc_id_by_chunk.setdefault(vh.chunk_id, vh.doc_id)
+        for fh in fts_hits:
+            if fh.chunk_id is not None:
+                doc_id_by_chunk.setdefault(fh.chunk_id, fh.doc_id)
+        for cid, did in asset_chunk_doc_ids.items():
+            doc_id_by_chunk.setdefault(cid, did)
+
+        # Stage 3 source-diversity demotion. alpha=0 is a no-op; alpha>0
+        # demotes later same-doc chunks via diminishing returns.
+        adjusted = apply_source_diversity_penalty(
+            fused, doc_id_by_chunk, alpha=self._same_doc_penalty_alpha
+        )
+        top = sorted(adjusted.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+        # Per-chunk snippet lookup from FTS hits (BM25's snippet() preview).
+        snippets_by_chunk: dict[int, str] = {
+            h.chunk_id: h.snippet or ""
+            for h in fts_hits
+            if h.chunk_id is not None and h.snippet
         }
-        chunk_lookup: dict[str, int] = {h.doc_id: h.chunk_id for h in vec_hits}
-        # FTS hits expose their chunk_id (since the SQLite adapter aligns
-        # documents_fts.rowid with chunks.chunk_id); use them as a fallback
-        # so asset_refs can still be attached to FTS-only retrieved docs.
-        for h in fts_hits:
-            if h.chunk_id is not None:
-                chunk_lookup.setdefault(h.doc_id, h.chunk_id)
-        # Asset-promoted chunks fill in chunk_ids for docs neither vec nor
-        # FTS surfaced.
-        for doc_id, cid in asset_chunk_lookup.items():
-            chunk_lookup.setdefault(doc_id, cid)
 
-        top = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+        retrieved_chunk_ids = [cid for cid, _ in top]
 
-        # Batch-fetch chunk → asset_refs for every retrieved chunk so the
-        # final Hit carries its referenced assets. Backends that don't
-        # implement the asset bridge (filesystem / postgres) raise
-        # NotSupported here — degrade to empty refs so the legacy
-        # text-query path keeps working.
-        retrieved_chunk_ids = [
-            chunk_lookup[doc_id] for doc_id, _ in top if doc_id in chunk_lookup
-        ]
+        # Backends that don't implement the asset bridge raise NotSupported —
+        # degrade to empty refs so the legacy text-query path keeps working.
         try:
             refs_by_chunk = await self._storage.chunk_asset_refs_for_chunks(
                 retrieved_chunk_ids
             )
         except NotSupported:
             refs_by_chunk = {cid: [] for cid in retrieved_chunk_ids}
-        # Materialize each unique asset_id once, in parallel — sequential
-        # awaits would serialize one network/disk round-trip per asset.
         all_asset_ids = list(
             {r.asset_id for refs in refs_by_chunk.values() for r in refs}
         )
@@ -357,21 +407,46 @@ class HybridSearcher:
             if a is not None
         }
 
+        # Batch-fetch the chunks (for snippet fallback + seq) and unique
+        # parent docs (for path/title) — chunk-level fusion repeats
+        # doc_ids across hits, so per-hit fetches would N+1 the storage.
+        chunk_by_id_all: dict[int, ChunkRecord] = {
+            c.chunk_id: c
+            for c in await self._storage.get_chunks(retrieved_chunk_ids)
+            if c.chunk_id is not None
+        }
+        unique_doc_ids = list({
+            chunk_by_id_all[cid].doc_id
+            for cid in retrieved_chunk_ids
+            if cid in chunk_by_id_all
+        })
+        doc_by_id = {
+            d.doc_id: d
+            for d in await self._storage.get_documents(unique_doc_ids)
+        }
+
         hits: list[Hit] = []
-        for doc_id, score in top:
-            hit_chunk_id: int | None = chunk_lookup.get(doc_id)
-            snippet = snippets.get(doc_id) or await self._chunk_snippet(hit_chunk_id)
-            doc = await self._storage.get_document(doc_id)
+        for chunk_id, score in top:
+            chunk = chunk_by_id_all.get(chunk_id)
+            if chunk is None:
+                # Race: chunk dropped between fusion and materialization.
+                # Skip rather than emit a half-formed Hit (TODOS T4 covers
+                # the principled "loud failure" path).
+                continue
+            doc = doc_by_id.get(chunk.doc_id)
+            snippet = snippets_by_chunk.get(chunk_id)
+            if not snippet:
+                snippet = self._render_chunk_snippet(chunk)
             asset_records: list[AssetRecord] = []
-            if hit_chunk_id is not None:
-                for r in refs_by_chunk.get(hit_chunk_id, []):
-                    a = assets_by_id.get(r.asset_id)
-                    if a is not None:
-                        asset_records.append(a)
+            for r in refs_by_chunk.get(chunk_id, []):
+                a = assets_by_id.get(r.asset_id)
+                if a is not None:
+                    asset_records.append(a)
             hits.append(
                 Hit(
-                    doc_id=doc_id,
-                    chunk_id=hit_chunk_id,
+                    doc_id=chunk.doc_id,
+                    chunk_id=chunk_id,
+                    seq=chunk.seq,
                     score=score,
                     snippet=snippet,
                     path=doc.path if doc else None,
@@ -394,13 +469,9 @@ class HybridSearcher:
         )
         return vectors[0] if vectors else None
 
-    async def _chunk_snippet(self, chunk_id: int | None) -> str | None:
-        if chunk_id is None:
-            return None
-        chunk: ChunkRecord | None = await self._storage.get_chunk(chunk_id)
-        if chunk is None:
-            return None
-        # Return a compact preview rather than the whole chunk body.
+    @staticmethod
+    def _render_chunk_snippet(chunk: ChunkRecord) -> str:
+        """Compact one-line preview of a chunk's body for Hit.snippet."""
         snippet = chunk.text.strip().replace("\n", " ")
         return snippet[:240] + ("…" if len(snippet) > 240 else "")
 

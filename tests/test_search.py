@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from dikw_core.info.search import HybridSearcher, _sanitize_fts, reciprocal_rank_fusion
+from dikw_core.info.search import (
+    HybridSearcher,
+    _sanitize_fts,
+    apply_source_diversity_penalty,
+    reciprocal_rank_fusion,
+)
 from dikw_core.storage.sqlite import SQLiteStorage
 
 from .fakes import FakeEmbeddings
@@ -65,6 +70,76 @@ def test_rrf_k_controls_rank_decay() -> None:
     loose = reciprocal_rank_fusion(lists, k=100)
     # first/second ratio grows as k shrinks
     assert tight["first"] / tight["second"] > loose["first"] / loose["second"]
+
+
+def test_rrf_accepts_int_keys() -> None:
+    """Generic key type — chunk_id (int) flows through fusion the same as
+    doc_id (str). Required for chunk-level fusion (Phase 1 plan).
+    """
+    fused = reciprocal_rank_fusion([[1, 2, 3], [2, 3, 4]])
+    assert max(fused, key=lambda k: fused[k]) == 2
+    assert isinstance(next(iter(fused.keys())), int)
+    # Same numeric semantics as the str-keyed path.
+    str_fused = reciprocal_rank_fusion([["1", "2", "3"], ["2", "3", "4"]])
+    assert {str(k): v for k, v in fused.items()} == str_fused
+
+
+# ---- apply_source_diversity_penalty (1.3.1) --------------------------------
+
+
+def test_diversity_penalty_alpha_zero_is_identity() -> None:
+    """alpha=0 returns the input dict unchanged — no-op opt-out."""
+    fused = {1: 1.0, 2: 0.9, 3: 0.8}
+    doc_by_chunk = {1: "A", 2: "A", 3: "B"}
+    out = apply_source_diversity_penalty(fused, doc_by_chunk, alpha=0.0)
+    assert out == fused
+
+
+def test_diversity_penalty_factor_semantics() -> None:
+    """1st chunk per doc unpenalized; N-th chunk scaled by 1/(1+alpha*(N-1)).
+
+    Pinning numerics so future contributors can't silently retune the
+    factor. Inputs sorted by score desc; c1/c2 share doc A, c3 is doc B.
+    """
+    fused = {1: 1.0, 2: 0.9, 3: 0.8}
+    doc_by_chunk = {1: "A", 2: "A", 3: "B"}
+    out = apply_source_diversity_penalty(fused, doc_by_chunk, alpha=0.3)
+    assert out[1] == pytest.approx(1.0)            # 1st in doc A
+    assert out[2] == pytest.approx(0.9 / 1.3)      # 2nd in doc A
+    assert out[3] == pytest.approx(0.8)            # 1st in doc B
+
+
+def test_diversity_penalty_demotes_third_same_doc_chunk() -> None:
+    """3rd chunk from one doc gets factor 1/(1+0.3*2) = 1/1.6 = 0.625."""
+    fused = {1: 1.0, 2: 0.9, 3: 0.8, 4: 0.5}
+    doc_by_chunk = {1: "A", 2: "A", 3: "A", 4: "B"}
+    out = apply_source_diversity_penalty(fused, doc_by_chunk, alpha=0.3)
+    assert out[3] == pytest.approx(0.8 / 1.6)
+    # And the 4th chunk (1st in doc B) remains unpenalized.
+    assert out[4] == pytest.approx(0.5)
+
+
+def test_diversity_penalty_reorders_when_demotion_overtakes_neighbor() -> None:
+    """Penalty pushes 2nd same-doc chunk below a fresh-doc chunk that was
+    behind it pre-penalty. Cross-doc chunk floats up — exactly the source
+    diversification the knob exists to deliver.
+    """
+    fused = {1: 1.0, 2: 0.9, 3: 0.85}
+    doc_by_chunk = {1: "A", 2: "A", 3: "B"}
+    out = apply_source_diversity_penalty(fused, doc_by_chunk, alpha=0.3)
+    after = sorted(out.items(), key=lambda kv: kv[1], reverse=True)
+    assert [k for k, _ in after] == [1, 3, 2]
+    assert out[2] == pytest.approx(0.9 / 1.3)
+
+
+def test_diversity_penalty_unmapped_chunk_unpenalized() -> None:
+    """Defensive: chunks missing from doc_by_chunk are passed through
+    unmodified — never raise, never penalize what we can't identify.
+    """
+    fused = {1: 1.0, 2: 0.5}
+    doc_by_chunk = {1: "A"}  # 2 is missing
+    out = apply_source_diversity_penalty(fused, doc_by_chunk, alpha=0.3)
+    assert out[2] == 0.5
 
 
 # ---- _sanitize_fts ----------------------------------------------------------
@@ -348,6 +423,187 @@ async def test_mode_vector_requires_embedder(tmp_path) -> None:
         await searcher.search("anything", limit=3, mode="vector")
 
     await storage.close()
+
+
+# ---- chunk-level fusion (Phase 1) ------------------------------------------
+
+
+async def _populate_multi_chunk_corpus(storage: SQLiteStorage) -> FakeEmbeddings:
+    """Build a 2-doc corpus with multiple distinct chunks per doc.
+
+    Doc A has 3 chunks, all matching the test query "alpha foo".
+    Doc B has 2 chunks, only one matching "alpha foo".
+
+    Designed so chunk-level fusion can demonstrate "multiple chunks from
+    same doc" while staying small enough for FakeEmbeddings to rank
+    deterministically by bag-of-words.
+    """
+    import time
+
+    from dikw_core.info.embed import ChunkToEmbed, embed_chunks
+    from dikw_core.schemas import ChunkRecord, DocumentRecord, Layer
+
+    doc_specs: list[tuple[str, list[str]]] = [
+        (
+            "alpha",
+            [
+                "alpha foo bar topic one. alpha foo bar.",
+                "alpha foo bar topic two with details.",
+                "alpha foo bar topic three closing.",
+            ],
+        ),
+        (
+            "beta",
+            [
+                "alpha foo unrelated baseline content.",
+                "completely separate beta material with no overlap.",
+            ],
+        ),
+    ]
+
+    to_embed: list[ChunkToEmbed] = []
+    for stem, chunk_texts in doc_specs:
+        doc_id = f"source:sources/{stem}.md"
+        body = "\n\n".join(chunk_texts)
+        await storage.put_content(f"h-{stem}", body)
+        await storage.upsert_document(
+            DocumentRecord(
+                doc_id=doc_id,
+                path=f"sources/{stem}.md",
+                title=stem,
+                hash=f"h-{stem}",
+                mtime=time.time(),
+                layer=Layer.SOURCE,
+                active=True,
+            )
+        )
+        records: list[ChunkRecord] = []
+        offset = 0
+        for i, text in enumerate(chunk_texts):
+            records.append(
+                ChunkRecord(
+                    doc_id=doc_id, seq=i, start=offset, end=offset + len(text), text=text
+                )
+            )
+            offset += len(text) + 2  # account for separator
+        ids = await storage.replace_chunks(doc_id, records)
+        to_embed.extend(
+            ChunkToEmbed(chunk_id=cid, text=r.text)
+            for cid, r in zip(ids, records, strict=True)
+        )
+
+    embedder = FakeEmbeddings()
+    rows = await embed_chunks(embedder, to_embed, model="fake")
+    await storage.upsert_embeddings(rows)
+    return embedder
+
+
+@pytest.mark.asyncio
+async def test_chunk_level_fusion_returns_multiple_chunks_per_doc(tmp_path) -> None:
+    """alpha=0 (no diversity penalty) → top-K contains multiple chunks
+    from the same doc when every leg ranks them highly.
+    """
+    storage = SQLiteStorage(tmp_path / "idx.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    embedder = await _populate_multi_chunk_corpus(storage)
+
+    searcher = HybridSearcher(
+        storage,
+        embedder,
+        embedding_model="fake",
+        same_doc_penalty_alpha=0.0,
+    )
+    hits = await searcher.search("alpha foo bar", limit=5)
+    await storage.close()
+
+    paths = [h.path for h in hits]
+    alpha_count = sum(1 for p in paths if p == "sources/alpha.md")
+    # All three alpha chunks match strongly; with no penalty they should
+    # all surface.
+    assert alpha_count >= 2, f"expected >=2 alpha chunks, got paths={paths}"
+    # Each Hit must carry a chunk_id (non-optional after Phase 1).
+    assert all(h.chunk_id is not None for h in hits)
+    # And a seq populated from the chunk record.
+    assert all(h.seq is not None for h in hits)
+
+
+@pytest.mark.asyncio
+async def test_chunk_level_fusion_distinct_chunks_have_distinct_ids(tmp_path) -> None:
+    """No two hits share a chunk_id — chunk-level fusion deduplicates
+    keys across the legs by construction.
+    """
+    storage = SQLiteStorage(tmp_path / "idx.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    embedder = await _populate_multi_chunk_corpus(storage)
+
+    searcher = HybridSearcher(
+        storage, embedder, embedding_model="fake", same_doc_penalty_alpha=0.0
+    )
+    hits = await searcher.search("alpha foo bar", limit=5)
+    await storage.close()
+
+    chunk_ids = [h.chunk_id for h in hits]
+    assert len(chunk_ids) == len(set(chunk_ids))
+
+
+@pytest.mark.asyncio
+async def test_same_doc_penalty_zero_vs_default_changes_ranking(tmp_path) -> None:
+    """alpha=0 yields more same-doc concentration than alpha=0.3 on a
+    corpus with one obviously-dominant doc.
+    """
+    storage = SQLiteStorage(tmp_path / "idx.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    embedder = await _populate_multi_chunk_corpus(storage)
+
+    pure = HybridSearcher(
+        storage, embedder, embedding_model="fake", same_doc_penalty_alpha=0.0
+    )
+    diversified = HybridSearcher(
+        storage, embedder, embedding_model="fake", same_doc_penalty_alpha=0.3
+    )
+
+    pure_hits = await pure.search("alpha foo bar", limit=5)
+    div_hits = await diversified.search("alpha foo bar", limit=5)
+    await storage.close()
+
+    pure_alpha = sum(1 for h in pure_hits if h.path == "sources/alpha.md")
+    div_alpha = sum(1 for h in div_hits if h.path == "sources/alpha.md")
+    # Diversification should not increase same-doc concentration; a
+    # measurable demotion lands at <= pure on a corpus this small.
+    assert div_alpha <= pure_alpha, (
+        f"diversified alpha-count {div_alpha} should be <= pure {pure_alpha}; "
+        f"pure_paths={[h.path for h in pure_hits]}, "
+        f"div_paths={[h.path for h in div_hits]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_searcher_from_config_threads_alpha(tmp_path) -> None:
+    """RetrievalConfig.same_doc_penalty_alpha → HybridSearcher.from_config
+    → search() — the Protocol triad wiring (Phase 1.3.0).
+    """
+    from dikw_core.config import RetrievalConfig
+
+    storage = SQLiteStorage(tmp_path / "idx.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    embedder = await _populate_multi_chunk_corpus(storage)
+
+    cfg = RetrievalConfig(same_doc_penalty_alpha=0.0)
+    searcher = HybridSearcher.from_config(
+        storage, embedder, cfg, embedding_model="fake"
+    )
+    assert searcher._same_doc_penalty_alpha == 0.0
+    hits = await searcher.search("alpha foo bar", limit=5)
+    await storage.close()
+
+    # Sanity: with alpha=0 we get >=2 same-doc chunks (matches the pure
+    # path of the parametric test above).
+    alpha_paths = [h.path for h in hits if h.path == "sources/alpha.md"]
+    assert len(alpha_paths) >= 2
 
 
 # ---- cjk tokenizer integration ----------------------------------------------

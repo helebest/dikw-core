@@ -209,9 +209,16 @@ def query_cmd(
     table.add_column("#", justify="right")
     table.add_column("layer")
     table.add_column("path")
+    table.add_column("seq", justify="right")
     table.add_column("excerpt")
     for c in result.citations:
-        table.add_row(str(c.n), c.layer, c.path, c.excerpt[:120] + ("…" if len(c.excerpt) > 120 else ""))
+        table.add_row(
+            str(c.n),
+            c.layer,
+            c.path,
+            "" if c.seq is None else str(c.seq),
+            c.excerpt[:120] + ("…" if len(c.excerpt) > 120 else ""),
+        )
     console.print(table)
 
 

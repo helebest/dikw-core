@@ -206,6 +206,11 @@ class FilesystemStorage:
     async def get_document(self, doc_id: str) -> DocumentRecord | None:
         return self._docs.get(doc_id)
 
+    async def get_documents(
+        self, doc_ids: Iterable[str]
+    ) -> list[DocumentRecord]:
+        return [self._docs[did] for did in doc_ids if did in self._docs]
+
     async def list_documents(
         self,
         *,
@@ -297,6 +302,9 @@ class FilesystemStorage:
 
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         return self._chunks.get(chunk_id)
+
+    async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
+        return [self._chunks[cid] for cid in chunk_ids if cid in self._chunks]
 
     async def fts_search(
         self, q: str, *, limit: int = 20, layer: Layer | None = None

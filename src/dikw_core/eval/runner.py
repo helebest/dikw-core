@@ -392,9 +392,18 @@ async def _run_queries(
             negatives: list[NegativeRow] = []
             for q in spec.queries:
                 hits = await searcher.search(q.q, limit=SEARCH_LIMIT, mode=m)
-                ranked_stems = [
-                    Path(h.path).stem if h.path else h.doc_id for h in hits
-                ]
+                # Chunk-level fusion can repeat the same doc across
+                # consecutive hits; doc-level metrics (hit@k, MRR, nDCG@k,
+                # recall@k) want unique doc identities in rank order, so
+                # dedupe by stem while preserving first-occurrence order.
+                ranked_stems: list[str] = []
+                seen_stems: set[str] = set()
+                for h in hits:
+                    stem = Path(h.path).stem if h.path else h.doc_id
+                    if stem in seen_stems:
+                        continue
+                    seen_stems.add(stem)
+                    ranked_stems.append(stem)
                 if q.expect_none:
                     negatives.append(NegativeRow(q=q.q, ranked=ranked_stems))
                 else:

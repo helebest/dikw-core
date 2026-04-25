@@ -126,6 +126,50 @@ async def test_document_roundtrip(storage: Storage) -> None:
     assert active_docs == []
 
 
+async def test_get_documents_batch(storage: Storage) -> None:
+    """Batch fetch is the N+1 fix used by chunk-level retrieval — every
+    adapter must satisfy it (missing ids are dropped silently, not raised).
+    """
+    a = _make_doc("sources/batch_a.md")
+    b = _make_doc("sources/batch_b.md")
+    await storage.put_content(a.hash, "a body")
+    await storage.put_content(b.hash, "b body")
+    await storage.upsert_document(a)
+    await storage.upsert_document(b)
+
+    fetched = await storage.get_documents([a.doc_id, b.doc_id, "missing:nope"])
+    by_id = {d.doc_id: d for d in fetched}
+    assert set(by_id.keys()) == {a.doc_id, b.doc_id}
+    assert by_id[a.doc_id].path == "sources/batch_a.md"
+    assert by_id[b.doc_id].path == "sources/batch_b.md"
+
+    # Empty input → empty output, no DB hit needed.
+    assert await storage.get_documents([]) == []
+
+
+async def test_get_chunks_batch(storage: Storage) -> None:
+    """Batch chunk fetch — same contract as ``get_documents`` for the
+    chunk side. Used by the search path to avoid N+1 over retrieved
+    chunk_ids."""
+    doc = _make_doc("sources/chunks_batch.md")
+    await storage.put_content(doc.hash, "x" * 16)
+    await storage.upsert_document(doc)
+    ids = await storage.replace_chunks(
+        doc.doc_id,
+        [
+            ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=4, text="aaaa"),
+            ChunkRecord(doc_id=doc.doc_id, seq=1, start=4, end=8, text="bbbb"),
+            ChunkRecord(doc_id=doc.doc_id, seq=2, start=8, end=12, text="cccc"),
+        ],
+    )
+    fetched = await storage.get_chunks([ids[0], ids[2], 999_999])
+    by_id = {c.chunk_id: c for c in fetched}
+    assert set(by_id.keys()) == {ids[0], ids[2]}
+    assert by_id[ids[0]].text == "aaaa"
+    assert by_id[ids[2]].text == "cccc"
+    assert await storage.get_chunks([]) == []
+
+
 async def test_chunks_and_fts_search(storage: Storage) -> None:
     doc = _make_doc("sources/chunked.md")
     await storage.put_content(doc.hash, "x" * 10)

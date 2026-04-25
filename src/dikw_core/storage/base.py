@@ -67,6 +67,17 @@ class Storage(Protocol):
     async def put_content(self, hash_: str, body: str) -> None: ...
     async def upsert_document(self, doc: DocumentRecord) -> None: ...
     async def get_document(self, doc_id: str) -> DocumentRecord | None: ...
+    async def get_documents(
+        self, doc_ids: Iterable[str]
+    ) -> list[DocumentRecord]:
+        """Batch-fetch documents by id. Missing ids are dropped silently —
+        the caller key-by-id when they need a hit/miss distinction.
+
+        Single-query equivalent of looping ``get_document``; chunk-level
+        retrieval calls this on every search to avoid N+1 over repeating
+        ``doc_id``s in the hit list.
+        """
+        ...
     async def list_documents(
         self,
         *,
@@ -87,6 +98,14 @@ class Storage(Protocol):
         ...
     async def upsert_embeddings(self, rows: Sequence[EmbeddingRow]) -> None: ...
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None: ...
+    async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
+        """Batch-fetch chunks by id. Missing ids are dropped silently.
+
+        Single-query equivalent of looping ``get_chunk``; chunk-level
+        retrieval needs every retrieved chunk's body + seq, and going
+        through ``get_chunk`` per hit would N+1 the connection.
+        """
+        ...
     async def fts_search(
         self,
         q: str,

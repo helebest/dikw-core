@@ -203,6 +203,10 @@ class Citation(BaseModel):
     path: str
     title: str | None = None
     layer: str
+    # Chunk sequence within ``path``; populated when chunk-level retrieval
+    # surfaced this citation. Disambiguates "doc X chunk 2 vs doc X chunk 5"
+    # when multiple chunks from the same document end up in the citation list.
+    seq: int | None = None
     excerpt: str
 
 
@@ -1213,14 +1217,22 @@ def _dr_replace(r: DistillReport, **kw: int) -> DistillReport:
 async def _build_excerpts(
     storage: Storage, hits: list[Hit]
 ) -> tuple[str, list[Citation]]:
+    # Chunk-level fusion repeats doc_ids across hits, so a per-hit
+    # ``get_document`` would issue O(hits) round trips for O(unique docs)
+    # of useful work. Batch once up front.
+    unique_doc_ids = list({h.doc_id for h in hits})
+    docs_by_id = {
+        d.doc_id: d for d in await storage.get_documents(unique_doc_ids)
+    }
+
     citations: list[Citation] = []
     lines: list[str] = []
     for i, hit in enumerate(hits, start=1):
-        doc = await storage.get_document(hit.doc_id)
+        doc = docs_by_id.get(hit.doc_id)
         if doc is None:
             continue
         excerpt = hit.snippet
-        if not excerpt and hit.chunk_id is not None:
+        if not excerpt:
             chunk = await storage.get_chunk(hit.chunk_id)
             if chunk is not None:
                 excerpt = chunk.text[:400]
@@ -1233,6 +1245,7 @@ async def _build_excerpts(
                 path=doc.path,
                 title=doc.title,
                 layer=doc.layer.value,
+                seq=hit.seq,
                 excerpt=excerpt,
             )
         )

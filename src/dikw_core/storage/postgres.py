@@ -165,6 +165,21 @@ class PostgresStorage:
             row = await cur.fetchone()
         return _row_to_document(row) if row else None
 
+    async def get_documents(
+        self, doc_ids: Iterable[str]
+    ) -> list[DocumentRecord]:
+        ids = list(doc_ids)
+        if not ids:
+            return []
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT doc_id, path, title, hash, mtime, layer, active "
+                "FROM documents WHERE doc_id = ANY(%s)",
+                (ids,),
+            )
+            rows = await cur.fetchall()
+        return [_row_to_document(r) for r in rows]
+
     async def list_documents(
         self,
         *,
@@ -265,6 +280,29 @@ class PostgresStorage:
             end=int(row[4]),
             text=row[5],
         )
+
+    async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
+        ids = list(chunk_ids)
+        if not ids:
+            return []
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
+                "FROM chunks WHERE chunk_id = ANY(%s)",
+                (ids,),
+            )
+            rows = await cur.fetchall()
+        return [
+            ChunkRecord(
+                chunk_id=int(r[0]),
+                doc_id=r[1],
+                seq=int(r[2]),
+                start=int(r[3]),
+                end=int(r[4]),
+                text=r[5],
+            )
+            for r in rows
+        ]
 
     async def fts_search(
         self, q: str, *, limit: int = 20, layer: Layer | None = None

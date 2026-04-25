@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sqlite3
 import time
 from collections.abc import Iterable, Sequence
@@ -482,31 +483,56 @@ class SQLiteStorage:
                 raise StorageError(
                     f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
                 )
-            # ``vec_distance_cosine`` returns NULL when either operand is the
-            # zero vector (cosine is undefined). NULLs sort first under SQLite
-            # ASC, so without a WHERE filter they would crowd out real hits at
-            # the top of the result set AND crash ``float(None)`` in the
-            # comprehension below. The function is pure, so calling it twice
-            # is fine; the WHERE prunes degenerate rows before ORDER BY.
+            # Two-step KNN: vec0's MATCH + k= path computes distance once
+            # per row inside the C heap-based KNN loop, instead of having
+            # SQLite expression-evaluate vec_distance_cosine twice per row
+            # and then full-sort. Over-fetch when a layer filter is set so
+            # post-filter doesn't underflow the requested limit.
             serialized = _serialize_vec(embedding)
-            sql = (
-                "SELECT cv.rowid AS chunk_id, c.doc_id AS doc_id, "
-                "vec_distance_cosine(cv.embedding, ?) AS dist "
-                "FROM chunks_vec cv JOIN chunks c ON c.chunk_id = cv.rowid "
-                "JOIN documents d ON d.doc_id = c.doc_id "
-                "WHERE vec_distance_cosine(cv.embedding, ?) IS NOT NULL"
+            fetch_k = limit * 3 if layer is not None else limit
+            knn_rows = conn.execute(
+                "SELECT rowid AS chunk_id, distance AS dist "
+                "FROM chunks_vec WHERE embedding MATCH ? AND k = ?",
+                (serialized, fetch_k),
+            ).fetchall()
+            # Drop zero-vector rows: sqlite-vec returns NULL for cosine on
+            # zero vectors today; isnan mirrors postgres' belt+suspenders
+            # guard (postgres.py after commit 6ecd539).
+            ranked: list[tuple[int, float]] = []
+            for r in knn_rows:
+                d = r["dist"]
+                if d is None:
+                    continue
+                df = float(d)
+                if math.isnan(df):
+                    continue
+                ranked.append((int(r["chunk_id"]), df))
+            if not ranked:
+                return []
+            chunk_ids = [cid for cid, _ in ranked]
+            placeholders = ",".join("?" * len(chunk_ids))
+            join_sql = (
+                f"SELECT c.chunk_id, c.doc_id FROM chunks c "
+                f"JOIN documents d ON d.doc_id = c.doc_id "
+                f"WHERE c.chunk_id IN ({placeholders})"
             )
-            params: list[Any] = [serialized, serialized]
+            join_params: list[Any] = list(chunk_ids)
             if layer is not None:
-                sql += " AND d.layer = ?"
-                params.append(layer.value)
-            sql += " ORDER BY dist LIMIT ?"
-            params.append(limit)
-            rows = conn.execute(sql, params).fetchall()
-            return [
-                VecHit(doc_id=r["doc_id"], chunk_id=int(r["chunk_id"]), distance=float(r["dist"]))
-                for r in rows
-            ]
+                join_sql += " AND d.layer = ?"
+                join_params.append(layer.value)
+            doc_id_by_chunk: dict[int, str] = {
+                int(r["chunk_id"]): r["doc_id"]
+                for r in conn.execute(join_sql, join_params).fetchall()
+            }
+            hits: list[VecHit] = []
+            for chunk_id, dist in ranked:
+                doc_id = doc_id_by_chunk.get(chunk_id)
+                if doc_id is None:
+                    continue  # filtered by layer or chunk row gone
+                hits.append(VecHit(doc_id=doc_id, chunk_id=chunk_id, distance=dist))
+                if len(hits) >= limit:
+                    break
+            return hits
 
         return await asyncio.to_thread(_run)
 
@@ -955,27 +981,47 @@ class SQLiteStorage:
             ).fetchone()
             if tbl_exists is None:
                 return []
-            # WHERE filter mirrors ``vec_search`` — see the comment there.
+            # Two-step KNN, same shape as ``vec_search`` — see comment there.
             # Zero-vector indexed assets (degenerate provider output, or a
             # pure-text input that the multimodal endpoint maps to all-zero)
-            # return NULL distance and would otherwise crash ``float()``.
+            # come back with NULL/NaN distance from MATCH and are dropped
+            # before the rowid → asset_id join.
             serialized = _serialize_vec(embedding)
-            rows = conn.execute(
-                f"""
-                SELECT m.asset_id AS asset_id,
-                       vec_distance_cosine(v.embedding, ?) AS dist
-                FROM {table} v
-                JOIN {row_table} m ON m.rowid = v.rowid
-                WHERE vec_distance_cosine(v.embedding, ?) IS NOT NULL
-                ORDER BY dist
-                LIMIT ?
-                """,
-                (serialized, serialized, limit),
+            knn_rows = conn.execute(
+                f"SELECT rowid, distance AS dist "
+                f"FROM {table} WHERE embedding MATCH ? AND k = ?",
+                (serialized, limit),
             ).fetchall()
-            return [
-                AssetVecHit(asset_id=r["asset_id"], distance=float(r["dist"]))
-                for r in rows
-            ]
+            ranked: list[tuple[int, float]] = []
+            for r in knn_rows:
+                d = r["dist"]
+                if d is None:
+                    continue
+                df = float(d)
+                if math.isnan(df):
+                    continue
+                ranked.append((int(r["rowid"]), df))
+            if not ranked:
+                return []
+            rowids = [rid for rid, _ in ranked]
+            placeholders = ",".join("?" * len(rowids))
+            asset_id_by_rowid: dict[int, str] = {
+                int(r["rowid"]): r["asset_id"]
+                for r in conn.execute(
+                    f"SELECT rowid, asset_id FROM {row_table} "
+                    f"WHERE rowid IN ({placeholders})",
+                    rowids,
+                ).fetchall()
+            }
+            hits: list[AssetVecHit] = []
+            for rowid, dist in ranked:
+                asset_id = asset_id_by_rowid.get(rowid)
+                if asset_id is None:
+                    continue
+                hits.append(AssetVecHit(asset_id=asset_id, distance=dist))
+                if len(hits) >= limit:
+                    break
+            return hits
 
         return await asyncio.to_thread(_run)
 
@@ -1108,8 +1154,12 @@ class SQLiteStorage:
     def _ensure_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         if self._embedding_dim is None:
             # Persist the dim so subsequent startups can restore it without an insert.
+            # ``distance_metric=cosine`` makes vec0's MATCH path use the same
+            # metric as the legacy ``vec_distance_cosine`` SQL — without it,
+            # vec0 defaults to L2 and silently changes ranking semantics.
             conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[{dim}])"
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec "
+                f"USING vec0(embedding float[{dim}] distance_metric=cosine)"
             )
             conn.execute(
                 "INSERT OR REPLACE INTO meta_kv(key, value) VALUES ('embedding_dim', ?)",
@@ -1129,10 +1179,14 @@ class SQLiteStorage:
         """Create ``vec_assets_v<version_id>`` lazily. sqlite-vec needs the
         embedding dim baked into the table at CREATE time, so each version
         gets its own dim-locked virtual table — switching multimodal model
-        creates a new version + new table, leaving prior data intact."""
+        creates a new version + new table, leaving prior data intact.
+
+        ``distance_metric=cosine`` mirrors ``_ensure_vec_table`` — see comment
+        there.
+        """
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_assets_v{version_id} "
-            f"USING vec0(embedding float[{dim}])"
+            f"USING vec0(embedding float[{dim}] distance_metric=cosine)"
         )
 
 

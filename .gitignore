@@ -23,3 +23,5 @@ venv/
 **/.dikw/
 # parallel-development worktrees
 .worktrees/
+# throwaway smoke / debug tools under evals/tools — names prefixed with _
+evals/tools/_*_smoke.py

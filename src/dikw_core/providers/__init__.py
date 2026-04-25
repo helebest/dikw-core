@@ -21,11 +21,13 @@ def build_llm(config: ProviderConfig) -> LLMProvider:
         return AnthropicLLM(
             base_url=config.llm_base_url,
             max_retries=config.llm_max_retries,
+            timeout_seconds=config.llm_timeout_seconds,
         )
     if config.llm == "openai_compat":
         return OpenAICompatLLM(
             base_url=config.llm_base_url,
             max_retries=config.llm_max_retries,
+            timeout_seconds=config.llm_timeout_seconds,
         )
     raise ProviderError(f"unknown LLM provider: {config.llm!r}")
 
@@ -38,6 +40,7 @@ def build_embedder(config: ProviderConfig) -> EmbeddingProvider:
             base_url=config.embedding_base_url,
             default_dimensions=config.embedding_dimensions,
             max_retries=config.embedding_max_retries,
+            timeout_seconds=config.embedding_timeout_seconds,
         )
     raise ProviderError(f"unknown embedding provider: {config.embedding!r}")
 

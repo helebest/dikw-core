@@ -55,9 +55,20 @@ async def embed_chunks(
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     rows: list[EmbeddingRow] = []
-    for start in range(0, len(chunks), batch_size):
+    total_batches = (len(chunks) + batch_size - 1) // batch_size
+    for batch_idx, start in enumerate(range(0, len(chunks), batch_size)):
         batch = chunks[start : start + batch_size]
         texts = [c.text for c in batch]
+        # INFO-level so a long-running ingest run shows progress without
+        # needing a debug flag — debugging "did the embedder hang?"
+        # without per-batch markers means restarting from scratch.
+        logger.info(
+            "embed batch %d/%d (chunks %d-%d)",
+            batch_idx + 1,
+            total_batches,
+            start,
+            start + len(batch) - 1,
+        )
         vectors = await provider.embed(texts, model=model)
         if len(vectors) != len(batch):
             raise RuntimeError(

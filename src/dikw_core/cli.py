@@ -418,6 +418,14 @@ def eval_cmd(
             ),
         ),
     ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            "-v",
+            help="Stream ingest progress (per-batch embed markers) to stderr.",
+        ),
+    ] = False,
     embedder_mode: Annotated[
         str,
         typer.Option(
@@ -459,8 +467,20 @@ def eval_cmd(
     """Run retrieval-quality evaluation against one or every packaged dataset."""
     # Lazy imports: keep top-of-module `from . import api` light for the
     # non-eval commands and avoid circular imports with dikw_core.eval.
+    import logging
+    import sys
+
     from .eval.dataset import DatasetError
     from .eval.runner import run_eval
+
+    if verbose:
+        # Per-batch embed markers + any other INFO-level progress logs go
+        # to stderr; the rich tables stay on stdout untouched.
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(name)s %(message)s",
+            stream=sys.stderr,
+        )
 
     valid_modes = {"bm25", "vector", "hybrid", "all"}
     if retrieval not in valid_modes:

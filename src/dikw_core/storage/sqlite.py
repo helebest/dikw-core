@@ -409,15 +409,23 @@ class SQLiteStorage:
                 raise StorageError(
                     f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
                 )
+            # ``vec_distance_cosine`` returns NULL when either operand is the
+            # zero vector (cosine is undefined). NULLs sort first under SQLite
+            # ASC, so without a WHERE filter they would crowd out real hits at
+            # the top of the result set AND crash ``float(None)`` in the
+            # comprehension below. The function is pure, so calling it twice
+            # is fine; the WHERE prunes degenerate rows before ORDER BY.
+            serialized = _serialize_vec(embedding)
             sql = (
                 "SELECT cv.rowid AS chunk_id, c.doc_id AS doc_id, "
                 "vec_distance_cosine(cv.embedding, ?) AS dist "
                 "FROM chunks_vec cv JOIN chunks c ON c.chunk_id = cv.rowid "
-                "JOIN documents d ON d.doc_id = c.doc_id"
+                "JOIN documents d ON d.doc_id = c.doc_id "
+                "WHERE vec_distance_cosine(cv.embedding, ?) IS NOT NULL"
             )
-            params: list[Any] = [_serialize_vec(embedding)]
+            params: list[Any] = [serialized, serialized]
             if layer is not None:
-                sql += " WHERE d.layer = ?"
+                sql += " AND d.layer = ?"
                 params.append(layer.value)
             sql += " ORDER BY dist LIMIT ?"
             params.append(limit)
@@ -874,16 +882,22 @@ class SQLiteStorage:
             ).fetchone()
             if tbl_exists is None:
                 return []
+            # WHERE filter mirrors ``vec_search`` — see the comment there.
+            # Zero-vector indexed assets (degenerate provider output, or a
+            # pure-text input that the multimodal endpoint maps to all-zero)
+            # return NULL distance and would otherwise crash ``float()``.
+            serialized = _serialize_vec(embedding)
             rows = conn.execute(
                 f"""
                 SELECT m.asset_id AS asset_id,
                        vec_distance_cosine(v.embedding, ?) AS dist
                 FROM {table} v
                 JOIN {row_table} m ON m.rowid = v.rowid
+                WHERE vec_distance_cosine(v.embedding, ?) IS NOT NULL
                 ORDER BY dist
                 LIMIT ?
                 """,
-                (_serialize_vec(embedding), limit),
+                (serialized, serialized, limit),
             ).fetchall()
             return [
                 AssetVecHit(asset_id=r["asset_id"], distance=float(r["dist"]))

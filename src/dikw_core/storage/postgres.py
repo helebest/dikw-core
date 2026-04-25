@@ -349,12 +349,18 @@ class PostgresStorage:
                 f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
             )
 
+        # pgvector's ``<=>`` cosine-distance operator returns NULL when
+        # either operand is the zero vector. Without the ``IS NOT NULL``
+        # filter, NULLs sort first under ``ORDER BY ASC`` and then crash
+        # ``float(None)`` below. Mirror SQLite's vec_search guard.
+        vec = list(embedding)
         sql = (
             "SELECT cv.chunk_id, c.doc_id, (cv.embedding <=> %s::vector) AS dist "
             "FROM chunks_vec cv JOIN chunks c ON c.chunk_id = cv.chunk_id "
-            "JOIN documents d ON d.doc_id = c.doc_id WHERE d.active = TRUE"
+            "JOIN documents d ON d.doc_id = c.doc_id "
+            "WHERE d.active = TRUE AND (cv.embedding <=> %s::vector) IS NOT NULL"
         )
-        params: list[Any] = [list(embedding)]
+        params: list[Any] = [vec, vec]
         if layer is not None:
             sql += " AND d.layer = %s"
             params.append(layer.value)

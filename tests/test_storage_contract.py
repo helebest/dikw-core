@@ -207,6 +207,47 @@ async def test_embeddings_and_vec_search(storage: Storage) -> None:
     assert hits[0].distance == pytest.approx(0.0, abs=1e-6)
 
 
+async def test_vec_search_skips_zero_vector_embeddings(storage: Storage) -> None:
+    """Zero-vector indexed embeddings have undefined cosine distance.
+
+    Surfaces in practice when a hashed bag-of-words embedder hits text
+    outside its alphabet (e.g., FakeEmbeddings on CJK), or when an
+    upstream provider returns degenerate output. Adapters must skip
+    such rows rather than crash on a NULL/NaN distance.
+    """
+    a = _make_doc("sources/normal.md")
+    b = _make_doc("sources/zero.md")
+    for d in (a, b):
+        await storage.put_content(d.hash, "x")
+        await storage.upsert_document(d)
+    a_ids = await storage.replace_chunks(
+        a.doc_id, [ChunkRecord(doc_id=a.doc_id, seq=0, start=0, end=5, text="alpha")]
+    )
+    b_ids = await storage.replace_chunks(
+        b.doc_id, [ChunkRecord(doc_id=b.doc_id, seq=0, start=0, end=5, text="zero")]
+    )
+    await storage.upsert_embeddings(
+        [
+            EmbeddingRow(
+                chunk_id=a_ids[0], model="test-embed", embedding=[1.0, 0.0, 0.0, 0.0]
+            ),
+            EmbeddingRow(
+                chunk_id=b_ids[0], model="test-embed", embedding=[0.0, 0.0, 0.0, 0.0]
+            ),
+        ]
+    )
+
+    hits = await storage.vec_search([1.0, 0.0, 0.0, 0.0], limit=10)
+    chunk_ids = {h.chunk_id for h in hits}
+    assert a_ids[0] in chunk_ids, "non-zero indexed embedding must surface"
+    assert b_ids[0] not in chunk_ids, (
+        "zero-vector indexed embedding must be skipped (cosine distance is undefined)"
+    )
+    # No hit should carry NaN/None — the float() coercion would crash.
+    for h in hits:
+        assert h.distance == h.distance, f"NaN distance: {h}"  # NaN != NaN
+
+
 async def test_link_graph(storage: Storage) -> None:
     src_doc = _make_doc("wiki/a.md", layer=Layer.WIKI)
     dst_doc = _make_doc("wiki/b.md", layer=Layer.WIKI)

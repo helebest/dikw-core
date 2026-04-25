@@ -21,3 +21,5 @@ venv/
 .vscode/
 # engine-managed state in example/test wikis
 **/.dikw/
+# parallel-development worktrees
+.worktrees/

@@ -72,7 +72,9 @@ from .schemas import (
     ChunkRecord,
     DocumentRecord,
     EmbeddingVersion,
+    ImageContent,
     Layer,
+    MultimodalInput,
     StorageCounts,
     WikiLogEntry,
     WisdomEvidence,
@@ -374,8 +376,6 @@ async def _probe_multimodal(
     coming back with a consistent dim; an empty or shape-mismatched
     response surfaces as an error rather than a silent pass.
     """
-    from .schemas import ImageContent, MultimodalInput
-
     inputs = [
         MultimodalInput(text="ping"),
         MultimodalInput(images=[ImageContent(bytes=_PROBE_PNG_1X1, mime="image/png")]),
@@ -450,18 +450,22 @@ async def check_providers(
     embed_target = cfg.provider.embedding_base_url
     embed_label = cfg.provider.embedding_provider_label
     mm_cfg = cfg.assets.multimodal
+    # Track an internally-built multimodal embedder so we close its httpx
+    # client in ``finally`` — mirrors the ``owned_mm`` pattern in ingest/
+    # query. An *injected* embedder is the caller's lifetime to manage.
+    owned_mm: MultimodalEmbeddingProvider | None = None
 
     if not embed_only:
         llm_inst = llm if llm is not None else build_llm(cfg.provider)
     if not llm_only:
         if mm_cfg is not None:
-            mm_inst = (
-                multimodal_embedder
-                if multimodal_embedder is not None
-                else build_multimodal_embedder(
+            if multimodal_embedder is not None:
+                mm_inst = multimodal_embedder
+            else:
+                mm_inst = build_multimodal_embedder(
                     mm_cfg.provider, base_url=mm_cfg.base_url, batch=mm_cfg.batch
                 )
-            )
+                owned_mm = mm_inst
         else:
             embed_inst = (
                 embedder if embedder is not None else build_embedder(cfg.provider)
@@ -479,15 +483,19 @@ async def check_providers(
             provider_label=embed_label,
         )
 
-    if llm_only:
-        llm_probe = await _probe_llm(llm_inst, cfg.provider.llm_model, llm_target)
-    elif embed_only:
-        embed_probe = await _embed_leg()
-    else:
-        llm_probe, embed_probe = await asyncio.gather(
-            _probe_llm(llm_inst, cfg.provider.llm_model, llm_target),
-            _embed_leg(),
-        )
+    try:
+        if llm_only:
+            llm_probe = await _probe_llm(llm_inst, cfg.provider.llm_model, llm_target)
+        elif embed_only:
+            embed_probe = await _embed_leg()
+        else:
+            llm_probe, embed_probe = await asyncio.gather(
+                _probe_llm(llm_inst, cfg.provider.llm_model, llm_target),
+                _embed_leg(),
+            )
+    finally:
+        if owned_mm is not None and hasattr(owned_mm, "aclose"):
+            await owned_mm.aclose()
     return CheckReport(llm=llm_probe, embed=embed_probe)
 
 

@@ -12,6 +12,7 @@ SQLite adapter.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Literal
@@ -349,10 +350,13 @@ class PostgresStorage:
                 f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
             )
 
-        # pgvector's ``<=>`` cosine-distance operator returns NULL when
-        # either operand is the zero vector. Without the ``IS NOT NULL``
-        # filter, NULLs sort first under ``ORDER BY ASC`` and then crash
-        # ``float(None)`` below. Mirror SQLite's vec_search guard.
+        # Cosine distance is undefined for the zero vector. pgvector's
+        # ``<=>`` operator does NOT return NULL on zero vectors — it
+        # returns NaN (sqlite-vec returns NULL, hence the original guard
+        # below). NaN slips past ``IS NOT NULL`` and ``ORDER BY ASC``
+        # places NaN somewhere implementation-defined. Drop both at the
+        # Python layer with ``math.isnan`` so degenerate rows never
+        # surface as hits regardless of which backend produced them.
         vec = list(embedding)
         sql = (
             "SELECT cv.chunk_id, c.doc_id, (cv.embedding <=> %s::vector) AS dist "
@@ -371,7 +375,9 @@ class PostgresStorage:
             await cur.execute(sql, params)
             rows = await cur.fetchall()
         return [
-            VecHit(chunk_id=int(r[0]), doc_id=r[1], distance=float(r[2])) for r in rows
+            VecHit(chunk_id=int(r[0]), doc_id=r[1], distance=float(r[2]))
+            for r in rows
+            if r[2] is not None and not math.isnan(r[2])
         ]
 
     # ---- K layer ---------------------------------------------------------

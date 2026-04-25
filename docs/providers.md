@@ -319,9 +319,15 @@ never produces those shapes today (chunks are text-only, assets are
 image-only), so the rejection just keeps a future config mistake from
 silently dropping a modality.
 
-### Cookbook: Qwen homogeneous pair (recommended)
+### Cookbook: Qwen pair on Gitee (recommended)
 
-Both legs on Gitee, same vendor and key:
+Both legs on Gitee, same vendor and key. Empirical dims (probed
+2026-04-25):
+
+| Model | Native dim | `dimensions` knob | Default if unset |
+|---|---|---|---|
+| `Qwen3-Embedding-8B` (text-only) | 4096 | matryoshka 4096 / 1024 / 512 / 256 | **1024** |
+| `Qwen3-VL-Embedding-8B` (multimodal) | **1024 fixed** | not accepted | 1024 |
 
 ```yaml
 provider:
@@ -329,10 +335,14 @@ provider:
   embedding: openai_compat             # text leg — single-string input shape
   embedding_base_url: https://ai.gitee.com/v1
   embedding_model: Qwen3-Embedding-8B
-  embedding_dimensions: 4096           # native; Qwen3-Embedding-8B supports
-                                       # matryoshka truncation to 1024/512/256
-                                       # — but dim locks at first ingest
-                                       # (gotcha #1), don't change later
+  embedding_dimensions: 1024           # match Qwen3-VL dim so both legs of
+                                       # hybrid retrieval live in equally-
+                                       # priced spaces. Set to 4096 if you
+                                       # want native quality on the text
+                                       # leg and don't mind the dim split
+                                       # (vec tables are independent).
+                                       # WARNING: dim locks at first ingest
+                                       # (gotcha #1), don't change later.
   embedding_batch_size: 16             # Gitee caps at 25 (gotcha #2)
   embedding_provider_label: gitee-ai
 
@@ -341,7 +351,11 @@ assets:
   multimodal:
     provider: gitee_multimodal         # the only literal that ships today
     model: Qwen3-VL-Embedding-8B       # multimodal leg — per-modality dicts
-    dim: 4096                          # native output dim
+    dim: 1024                          # fixed by the model; Gitee returns
+                                       # 4096-byte float32 blobs = 1024 dim.
+                                       # Setting any other value here makes
+                                       # vec_assets_v<n> dim-mismatch on
+                                       # first asset embed.
     revision: ""                       # bump (e.g., "2026-04") if Gitee
                                        # silently refreshes the weights
     normalize: true
@@ -351,10 +365,16 @@ assets:
 ```
 
 The text leg and the multimodal leg write **separate** vec tables
-(`vec_chunks_v<n>` / `vec_assets_v<n>`); their dims do not have to match
-each other, only their respective models. Both legs read
-`DIKW_EMBEDDING_API_KEY` — never `OPENAI_API_KEY`. If LLM and embedding
-target different vendors, set them as distinct env vars.
+(`chunks_vec` / `vec_assets_v<n>`); their dims do not have to match.
+Both legs read `DIKW_EMBEDDING_API_KEY` — never `OPENAI_API_KEY`. If LLM
+and embedding target different vendors, set them as distinct env vars.
+
+**Note on chunk routing**: when `assets.multimodal` is configured, the
+ingest pipeline routes both chunks AND assets through the multimodal
+embedder (so they share one vector space for cross-modal retrieval).
+The `embedding_model` / `embedding_dimensions` keys above only matter
+for legacy text-only mode (no `assets.multimodal` block) — they're
+inert when the multimodal block is present.
 
 ### Verifying the config end-to-end
 
@@ -366,8 +386,13 @@ green check means real ingest will work:
 
 ```bash
 $ uv run --env-file .env dikw check --path . --embed-only
-Embedding | https://ai.gitee.com/v1 | OK | 480ms, dim=4096, modalities=text+image, provider=gitee-ai
+Embedding | (provider default) | OK | 4234ms, dim=1024, modalities=text+image, provider=gitee-ai
 ```
+
+(Latency dominated by the ~50ms TLS handshake forced per request to
+work around Gitee's idle-keepalive drops — see fdd2cae for the
+rationale. Plus a few seconds of Gitee server time on the multimodal
+endpoint.)
 
 If `assets.multimodal` is absent, the check falls back to the text-only
 probe (one `"ping"` string) — same as before.

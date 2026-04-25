@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -351,14 +353,30 @@ async def _probe_embed(
     return ProbeResult(ok=True, target=target, detail=detail)
 
 
-# 1x1 transparent PNG used by ``_probe_multimodal`` so the wire round-trip
-# exercises Gitee's image-decoding path with the smallest possible payload.
-_PROBE_PNG_1X1 = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-    b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
-    b"\x00\x00\x00\rIDATx\x9cc\xfa\xcf\x00\x00\x00\x02\x00\x01\xe5'\xde\xfc"
-    b"\x00\x00\x00\x00IEND\xaeB`\x82"
-)
+def _build_probe_png_1x1() -> bytes:
+    """Smallest valid PNG (1x1 black RGB pixel, 69 bytes).
+
+    Built at module load via stdlib ``struct`` + ``zlib`` so the chunk
+    CRCs are guaranteed correct — a hand-written byte literal here was
+    truncated by one CRC byte once and Gitee's image decoder rejected
+    the whole multimodal probe with a misleading "Supported image
+    type:" error that hid the real cause.
+    """
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    # IHDR: width=1, height=1, bit_depth=8, color_type=2 (RGB), the rest 0.
+    ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+    # IDAT: one scanline of [filter=0, R=0, G=0, B=0], deflate-compressed.
+    idat = _chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00", 9))
+    iend = _chunk(b"IEND", b"")
+    return sig + ihdr + idat + iend
+
+
+_PROBE_PNG_1X1 = _build_probe_png_1x1()
 
 # Storage backends that support multimodal embed versioning today.
 # Mirrors ``upsert_embed_version`` support in

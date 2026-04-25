@@ -347,6 +347,42 @@ async def test_check_multimodal_probe_target_reflects_mm_base_url(
     assert "text-embed.example.com" not in report.embed.target
 
 
+def test_probe_png_chunk_crcs_validate() -> None:
+    """The 1x1 PNG used by ``_probe_multimodal`` must decode cleanly.
+
+    Gitee's image decoder rejects the whole multimodal probe when the
+    PNG bytes are even slightly malformed — the error message points at
+    "Supported image type:" rather than the real cause (CRC mismatch),
+    which makes the bug nearly impossible to diagnose from the wire.
+    Walk every chunk and verify its stored CRC matches what
+    ``zlib.crc32`` computes; a future hand-edit that drops a byte gets
+    caught here instead of leaking to a real probe."""
+    import zlib
+
+    from dikw_core.api import _PROBE_PNG_1X1
+
+    assert _PROBE_PNG_1X1[:8] == b"\x89PNG\r\n\x1a\n"
+    pos = 8
+    saw_iend = False
+    while pos < len(_PROBE_PNG_1X1):
+        length = int.from_bytes(_PROBE_PNG_1X1[pos : pos + 4], "big")
+        tag = _PROBE_PNG_1X1[pos + 4 : pos + 8]
+        data = _PROBE_PNG_1X1[pos + 8 : pos + 8 + length]
+        crc_stored = int.from_bytes(
+            _PROBE_PNG_1X1[pos + 8 + length : pos + 12 + length], "big"
+        )
+        crc_computed = zlib.crc32(tag + data) & 0xFFFFFFFF
+        assert crc_stored == crc_computed, (
+            f"chunk {tag!r} CRC mismatch: stored {crc_stored:08x}, "
+            f"computed {crc_computed:08x}"
+        )
+        if tag == b"IEND":
+            saw_iend = True
+        pos += 12 + length
+    assert saw_iend, "PNG missing IEND chunk"
+    assert pos == len(_PROBE_PNG_1X1), "trailing bytes after IEND"
+
+
 @pytest.mark.asyncio
 async def test_check_falls_back_to_text_on_storage_without_multimodal_support(
     tmp_path: Path,

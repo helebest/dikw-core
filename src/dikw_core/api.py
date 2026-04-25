@@ -360,6 +360,16 @@ _PROBE_PNG_1X1 = (
     b"\x00\x00\x00\x00IEND\xaeB`\x82"
 )
 
+# Storage backends that support multimodal embed versioning today.
+# Mirrors ``upsert_embed_version`` support in
+# ``storage/{sqlite,postgres,filesystem}.py``: postgres and filesystem
+# raise ``NotSupported`` from that method, so when the user has
+# ``assets.multimodal`` configured against one of them, ``ingest()``
+# silently degrades to text-only (api.py: ``except NotSupported``).
+# ``check_providers`` mirrors that fallback so the probe describes the
+# same behaviour operators will actually get.
+_MULTIMODAL_STORAGE_BACKENDS: frozenset[str] = frozenset({"sqlite"})
+
 
 async def _probe_multimodal(
     embedder: MultimodalEmbeddingProvider,
@@ -447,9 +457,27 @@ async def check_providers(
     llm_probe: ProbeResult | None = None
     embed_probe: ProbeResult | None = None
     llm_target = cfg.provider.llm_base_url or "(provider default)"
-    embed_target = cfg.provider.embedding_base_url
     embed_label = cfg.provider.embedding_provider_label
     mm_cfg = cfg.assets.multimodal
+    # If the storage backend can't hold multimodal version rows,
+    # ``ingest()`` silently degrades to text-only — describe that here
+    # too, otherwise check would fail on a multimodal endpoint that
+    # ingest never reaches.
+    if mm_cfg is not None and cfg.storage.backend not in _MULTIMODAL_STORAGE_BACKENDS:
+        logger.warning(
+            "storage backend %r doesn't support multimodal versioning; "
+            "real ingest would fall back to text-only — probing text leg instead",
+            cfg.storage.backend,
+        )
+        mm_cfg = None
+    # Per-leg target. Multimodal probe hits ``assets.multimodal.base_url``
+    # (or the provider's default), which is independent of the text leg's
+    # ``embedding_base_url``; reporting the wrong one makes a green check
+    # misleading in split-vendor setups.
+    if mm_cfg is not None:
+        embed_target = mm_cfg.base_url or "(provider default)"
+    else:
+        embed_target = cfg.provider.embedding_base_url
     # Track an internally-built multimodal embedder so we close its httpx
     # client in ``finally`` — mirrors the ``owned_mm`` pattern in ingest/
     # query. An *injected* embedder is the caller's lifetime to manage.

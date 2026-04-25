@@ -302,3 +302,84 @@ async def test_check_embed_probe_uses_text_path_when_no_multimodal(
     # The text-only path doesn't probe images, so its detail line must
     # not advertise a "modalities=" tag.
     assert "modalities" not in report.embed.detail
+
+
+@pytest.mark.asyncio
+async def test_check_multimodal_probe_target_reflects_mm_base_url(
+    tmp_path: Path,
+) -> None:
+    """The probe detail's target must point at the multimodal endpoint the
+    request is actually sent to — ``assets.multimodal.base_url`` — not at
+    ``provider.embedding_base_url`` (which is the text leg's URL).
+
+    In split-vendor setups (text leg one vendor, multimodal another) the
+    two URLs differ; reporting the wrong one makes a green check appear to
+    validate one endpoint while it actually exercised another."""
+    import yaml
+
+    from tests.fakes import FakeMultimodalEmbedding
+
+    w = tmp_path / "wiki-mm-split"
+    api.init_wiki(w, description="split-base-url test wiki")
+    cfg_path = w / "dikw.yml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw.setdefault("provider", {})["embedding_base_url"] = (
+        "https://text-embed.example.com/v1"
+    )
+    raw.setdefault("assets", {})["multimodal"] = {
+        "provider": "gitee_multimodal",
+        "model": "Qwen3-VL-Embedding-8B",
+        "dim": 4096,
+        "batch": 16,
+        "base_url": "https://multimodal.example.com/v1",
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    fake_mm = FakeMultimodalEmbedding(dim=4096)
+    report = await api.check_providers(
+        w, llm=FakeLLM(), multimodal_embedder=fake_mm, embed_only=True
+    )
+    assert report.ok
+    assert report.embed is not None
+    assert report.embed.target == "https://multimodal.example.com/v1"
+    # The text-leg URL must NOT appear on the multimodal probe row — that
+    # was the bug the codex review surfaced.
+    assert "text-embed.example.com" not in report.embed.target
+
+
+@pytest.mark.asyncio
+async def test_check_falls_back_to_text_on_storage_without_multimodal_support(
+    tmp_path: Path,
+) -> None:
+    """When the storage backend doesn't support multimodal versioning,
+    ``ingest()`` silently degrades to the text-only path (api.py: NotSupported
+    → ``mm_cfg = None``). The check must mirror that, otherwise it can fail
+    on a misconfigured multimodal endpoint that real ingest never reaches —
+    the check would no longer describe the behavior operators actually get.
+
+    Filesystem and postgres backends raise ``NotSupported`` from
+    ``upsert_embed_version`` today; sqlite is the only backend with
+    multimodal versioning."""
+    import yaml
+
+    w = tmp_path / "wiki-fs-mm"
+    api.init_wiki(w, description="filesystem + mm fallback test wiki")
+    cfg_path = w / "dikw.yml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw["storage"] = {"backend": "filesystem"}
+    raw.setdefault("assets", {})["multimodal"] = {
+        "provider": "gitee_multimodal",
+        "model": "Qwen3-VL-Embedding-8B",
+        "dim": 4096,
+        "batch": 16,
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    fake_text = FakeEmbeddings()
+    report = await api.check_providers(
+        w, llm=FakeLLM(), embedder=fake_text, embed_only=True
+    )
+    assert report.ok
+    assert report.embed is not None and report.embed.ok
+    # Fallback path is the text leg — no "modalities=" tag.
+    assert "modalities" not in report.embed.detail

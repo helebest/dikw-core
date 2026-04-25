@@ -12,7 +12,7 @@ from .base import (
     ProviderError,
     ToolSpec,
 )
-from .gitee_multimodal import GiteeMultimodalEmbedding
+from .gitee_multimodal import GiteeMultimodalEmbedding, QwenVLMultimodalEmbedding
 from .openai_compat import OpenAICompatEmbeddings, OpenAICompatLLM
 
 
@@ -50,12 +50,16 @@ def build_multimodal_embedder(
 ) -> MultimodalEmbeddingProvider:
     """Build a multimodal embedder by name.
 
-    The factory currently knows only ``gitee_multimodal`` (the v1 default);
-    additional providers (Voyage, Cohere, Jina-direct) are easy follow-ons
-    — drop a new file under ``providers/`` and add a branch here.
+    Two providers ship today: ``gitee_multimodal`` for the OpenAI-vision
+    content-block shape (jina-clip-v2 family on Gitee AI) and
+    ``gitee_qwen_vl`` for Qwen3-VL's per-modality input shape. Additional
+    providers (Voyage, Cohere, Jina-direct) are easy follow-ons — drop a
+    new file under ``providers/`` and add a branch here.
     """
     if provider == "gitee_multimodal":
         return GiteeMultimodalEmbedding(base_url=base_url, batch=batch)
+    if provider == "gitee_qwen_vl":
+        return QwenVLMultimodalEmbedding(base_url=base_url, batch=batch)
     raise ProviderError(f"unknown multimodal embedding provider: {provider!r}")
 
 

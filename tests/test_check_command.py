@@ -224,3 +224,198 @@ def test_cli_check_embed_only_shows_provider_label_when_yaml_set(
     result = runner.invoke(app, ["check", "--path", str(wiki), "--embed-only"])
     assert result.exit_code == 0, result.stdout
     assert "gitee-ai" in result.stdout
+
+
+# ---- Multimodal probe ----------------------------------------------------
+#
+# When ``assets.multimodal`` is configured, the engine ingests chunks AND
+# assets through the multimodal embedder, never the text-only one. The
+# check must follow that route, otherwise it greenlights a wiki whose
+# real ingest path will fail. The probe sends one text + one image input
+# in a single batched request — exactly the shape the production pipeline
+# uses, no RTT stacking.
+
+
+@pytest.fixture()
+def multimodal_wiki(tmp_path: Path) -> Path:
+    """A wiki whose dikw.yml carries an ``assets.multimodal`` block."""
+    import yaml
+
+    w = tmp_path / "wiki-mm"
+    api.init_wiki(w, description="multimodal probe test wiki")
+    cfg_path = w / "dikw.yml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw.setdefault("assets", {})["multimodal"] = {
+        "provider": "gitee_multimodal",
+        "model": "Qwen3-VL-Embedding-8B",
+        "dim": 4096,
+        "batch": 16,
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return w
+
+
+@pytest.mark.asyncio
+async def test_check_embed_probe_routes_through_multimodal_when_configured(
+    multimodal_wiki: Path,
+) -> None:
+    """When ``assets.multimodal`` is configured, --embed-only must probe the
+    multimodal embedder, not the text-only one. The probe sends one text +
+    one image input in a single batched request (no RTT stacking)."""
+    from tests.fakes import FakeMultimodalEmbedding
+
+    fake_mm = FakeMultimodalEmbedding(dim=4096)
+    report = await api.check_providers(
+        multimodal_wiki,
+        llm=FakeLLM(),
+        multimodal_embedder=fake_mm,
+        embed_only=True,
+    )
+    assert report.ok
+    assert report.embed is not None and report.embed.ok
+    # Detail must surface the dim probed AND that both modalities were sent.
+    assert "dim=4096" in report.embed.detail
+    assert "text+image" in report.embed.detail
+    # Single batch call: 2 inputs (1 text + 1 image), not 2 separate calls.
+    assert len(fake_mm.last_inputs) == 2
+    text_inputs = [i for i in fake_mm.last_inputs if i.text]
+    image_inputs = [i for i in fake_mm.last_inputs if i.images]
+    assert len(text_inputs) == 1
+    assert len(image_inputs) == 1
+    # Probe targets the multimodal model name, not provider.embedding_model.
+    assert fake_mm.last_model == "Qwen3-VL-Embedding-8B"
+
+
+@pytest.mark.asyncio
+async def test_check_embed_probe_uses_text_path_when_no_multimodal(
+    wiki: Path,
+) -> None:
+    """The legacy text-embed probe must keep working when ``assets.multimodal``
+    is absent — regression guard against routing every wiki through the
+    multimodal path."""
+    fake_text = FakeEmbeddings()
+    report = await api.check_providers(
+        wiki, llm=FakeLLM(), embedder=fake_text, embed_only=True
+    )
+    assert report.ok
+    assert report.embed is not None and report.embed.ok
+    # The text-only path doesn't probe images, so its detail line must
+    # not advertise a "modalities=" tag.
+    assert "modalities" not in report.embed.detail
+
+
+@pytest.mark.asyncio
+async def test_check_multimodal_probe_target_reflects_mm_base_url(
+    tmp_path: Path,
+) -> None:
+    """The probe detail's target must point at the multimodal endpoint the
+    request is actually sent to — ``assets.multimodal.base_url`` — not at
+    ``provider.embedding_base_url`` (which is the text leg's URL).
+
+    In split-vendor setups (text leg one vendor, multimodal another) the
+    two URLs differ; reporting the wrong one makes a green check appear to
+    validate one endpoint while it actually exercised another."""
+    import yaml
+
+    from tests.fakes import FakeMultimodalEmbedding
+
+    w = tmp_path / "wiki-mm-split"
+    api.init_wiki(w, description="split-base-url test wiki")
+    cfg_path = w / "dikw.yml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw.setdefault("provider", {})["embedding_base_url"] = (
+        "https://text-embed.example.com/v1"
+    )
+    raw.setdefault("assets", {})["multimodal"] = {
+        "provider": "gitee_multimodal",
+        "model": "Qwen3-VL-Embedding-8B",
+        "dim": 4096,
+        "batch": 16,
+        "base_url": "https://multimodal.example.com/v1",
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    fake_mm = FakeMultimodalEmbedding(dim=4096)
+    report = await api.check_providers(
+        w, llm=FakeLLM(), multimodal_embedder=fake_mm, embed_only=True
+    )
+    assert report.ok
+    assert report.embed is not None
+    assert report.embed.target == "https://multimodal.example.com/v1"
+    # The text-leg URL must NOT appear on the multimodal probe row — that
+    # was the bug the codex review surfaced.
+    assert "text-embed.example.com" not in report.embed.target
+
+
+def test_probe_png_chunk_crcs_validate() -> None:
+    """The 1x1 PNG used by ``_probe_multimodal`` must decode cleanly.
+
+    Gitee's image decoder rejects the whole multimodal probe when the
+    PNG bytes are even slightly malformed — the error message points at
+    "Supported image type:" rather than the real cause (CRC mismatch),
+    which makes the bug nearly impossible to diagnose from the wire.
+    Walk every chunk and verify its stored CRC matches what
+    ``zlib.crc32`` computes; a future hand-edit that drops a byte gets
+    caught here instead of leaking to a real probe."""
+    import zlib
+
+    from dikw_core.api import _PROBE_PNG_1X1
+
+    assert _PROBE_PNG_1X1[:8] == b"\x89PNG\r\n\x1a\n"
+    pos = 8
+    saw_iend = False
+    while pos < len(_PROBE_PNG_1X1):
+        length = int.from_bytes(_PROBE_PNG_1X1[pos : pos + 4], "big")
+        tag = _PROBE_PNG_1X1[pos + 4 : pos + 8]
+        data = _PROBE_PNG_1X1[pos + 8 : pos + 8 + length]
+        crc_stored = int.from_bytes(
+            _PROBE_PNG_1X1[pos + 8 + length : pos + 12 + length], "big"
+        )
+        crc_computed = zlib.crc32(tag + data) & 0xFFFFFFFF
+        assert crc_stored == crc_computed, (
+            f"chunk {tag!r} CRC mismatch: stored {crc_stored:08x}, "
+            f"computed {crc_computed:08x}"
+        )
+        if tag == b"IEND":
+            saw_iend = True
+        pos += 12 + length
+    assert saw_iend, "PNG missing IEND chunk"
+    assert pos == len(_PROBE_PNG_1X1), "trailing bytes after IEND"
+
+
+@pytest.mark.asyncio
+async def test_check_falls_back_to_text_on_storage_without_multimodal_support(
+    tmp_path: Path,
+) -> None:
+    """When the storage backend doesn't support multimodal versioning,
+    ``ingest()`` silently degrades to the text-only path (api.py: NotSupported
+    → ``mm_cfg = None``). The check must mirror that, otherwise it can fail
+    on a misconfigured multimodal endpoint that real ingest never reaches —
+    the check would no longer describe the behavior operators actually get.
+
+    Filesystem and postgres backends raise ``NotSupported`` from
+    ``upsert_embed_version`` today; sqlite is the only backend with
+    multimodal versioning."""
+    import yaml
+
+    w = tmp_path / "wiki-fs-mm"
+    api.init_wiki(w, description="filesystem + mm fallback test wiki")
+    cfg_path = w / "dikw.yml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw["storage"] = {"backend": "filesystem"}
+    raw.setdefault("assets", {})["multimodal"] = {
+        "provider": "gitee_multimodal",
+        "model": "Qwen3-VL-Embedding-8B",
+        "dim": 4096,
+        "batch": 16,
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    fake_text = FakeEmbeddings()
+    report = await api.check_providers(
+        w, llm=FakeLLM(), embedder=fake_text, embed_only=True
+    )
+    assert report.ok
+    assert report.embed is not None and report.embed.ok
+    # Fallback path is the text leg — no "modalities=" tag.
+    assert "modalities" not in report.embed.detail

@@ -79,3 +79,95 @@ async def test_text_and_image_distinguished() -> None:
 async def test_empty_batch_returns_empty() -> None:
     fake = FakeMultimodalEmbedding(dim=4)
     assert await fake.embed([], model="any") == []
+
+
+# ---- Gitee multimodal request shape tests (no network) ---------------------
+#
+# Gitee's multimodal embeddings endpoint speaks one wire format across all
+# multimodal models it serves (Qwen3-VL-Embedding-8B, jina-clip-v2, …):
+# per-modality input dicts, ``[{"text": "..."}, {"image": "data:..."}]``.
+# The serializer is therefore model-agnostic; these tests pin its shape
+# without mentioning any specific model name.
+
+
+def test_serialize_text_only() -> None:
+    """Text-only input → ``{"text": "..."}``."""
+    from dikw_core.providers.gitee_multimodal import _serialize_input
+
+    out = _serialize_input(MultimodalInput(text="hello"))
+    assert out == {"text": "hello"}
+
+
+def test_serialize_image_only() -> None:
+    """Image-only input → ``{"image": "data:<mime>;base64,..."}``."""
+    from dikw_core.providers.gitee_multimodal import _serialize_input
+
+    out = _serialize_input(
+        MultimodalInput(
+            images=[ImageContent(bytes=b"\x89PNG\r\n", mime="image/png")]
+        )
+    )
+    assert isinstance(out, dict)
+    assert set(out.keys()) == {"image"}
+    assert out["image"].startswith("data:image/png;base64,")
+
+
+def test_serialize_rejects_combined_text_and_image() -> None:
+    """Gitee's multimodal endpoint embeds per-modality; combined inputs must
+    raise loudly rather than silently drop a side."""
+    import pytest
+
+    from dikw_core.providers.base import ProviderError
+    from dikw_core.providers.gitee_multimodal import _serialize_input
+
+    with pytest.raises(ProviderError, match="per-modality"):
+        _serialize_input(
+            MultimodalInput(
+                text="caption",
+                images=[ImageContent(bytes=b"\x89PNG", mime="image/png")],
+            )
+        )
+
+
+def test_serialize_rejects_multiple_images_per_input() -> None:
+    """Each MultimodalInput maps to one wire input; >1 image would lose
+    pairing between source and embedding."""
+    import pytest
+
+    from dikw_core.providers.base import ProviderError
+    from dikw_core.providers.gitee_multimodal import _serialize_input
+
+    with pytest.raises(ProviderError, match="one image"):
+        _serialize_input(
+            MultimodalInput(
+                images=[
+                    ImageContent(bytes=b"\x89PNG", mime="image/png"),
+                    ImageContent(bytes=b"\xff\xd8", mime="image/jpeg"),
+                ]
+            )
+        )
+
+
+def test_factory_resolves_gitee_multimodal() -> None:
+    """``build_multimodal_embedder('gitee_multimodal')`` resolves to the
+    unified Gitee provider — model-agnostic, the model name in
+    ``assets.multimodal.model`` discriminates which Gitee model runs."""
+    from dikw_core.providers import build_multimodal_embedder
+    from dikw_core.providers.gitee_multimodal import GiteeMultimodalEmbedding
+
+    inst = build_multimodal_embedder("gitee_multimodal")
+    assert isinstance(inst, GiteeMultimodalEmbedding)
+
+
+def test_factory_rejects_legacy_gitee_qwen_vl_literal() -> None:
+    """The transient ``gitee_qwen_vl`` literal split one Gitee endpoint into
+    two provider strings even though the wire shape is identical. After the
+    unify pass it must be rejected loudly so stale ``dikw.yml`` configs
+    surface immediately instead of silently falling back."""
+    import pytest
+
+    from dikw_core.providers import build_multimodal_embedder
+    from dikw_core.providers.base import ProviderError
+
+    with pytest.raises(ProviderError, match="unknown multimodal embedding provider"):
+        build_multimodal_embedder("gitee_qwen_vl")

@@ -12,6 +12,7 @@ SQLite adapter.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Literal
@@ -165,6 +166,21 @@ class PostgresStorage:
             row = await cur.fetchone()
         return _row_to_document(row) if row else None
 
+    async def get_documents(
+        self, doc_ids: Iterable[str]
+    ) -> list[DocumentRecord]:
+        ids = list(doc_ids)
+        if not ids:
+            return []
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT doc_id, path, title, hash, mtime, layer, active "
+                "FROM documents WHERE doc_id = ANY(%s)",
+                (ids,),
+            )
+            rows = await cur.fetchall()
+        return [_row_to_document(r) for r in rows]
+
     async def list_documents(
         self,
         *,
@@ -266,6 +282,29 @@ class PostgresStorage:
             text=row[5],
         )
 
+    async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
+        ids = list(chunk_ids)
+        if not ids:
+            return []
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
+                "FROM chunks WHERE chunk_id = ANY(%s)",
+                (ids,),
+            )
+            rows = await cur.fetchall()
+        return [
+            ChunkRecord(
+                chunk_id=int(r[0]),
+                doc_id=r[1],
+                seq=int(r[2]),
+                start=int(r[3]),
+                end=int(r[4]),
+                text=r[5],
+            )
+            for r in rows
+        ]
+
     async def fts_search(
         self, q: str, *, limit: int = 20, layer: Layer | None = None
     ) -> list[FTSHit]:
@@ -311,12 +350,21 @@ class PostgresStorage:
                 f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
             )
 
+        # Cosine distance is undefined for the zero vector. pgvector's
+        # ``<=>`` operator does NOT return NULL on zero vectors — it
+        # returns NaN (sqlite-vec returns NULL, hence the original guard
+        # below). NaN slips past ``IS NOT NULL`` and ``ORDER BY ASC``
+        # places NaN somewhere implementation-defined. Drop both at the
+        # Python layer with ``math.isnan`` so degenerate rows never
+        # surface as hits regardless of which backend produced them.
+        vec = list(embedding)
         sql = (
             "SELECT cv.chunk_id, c.doc_id, (cv.embedding <=> %s::vector) AS dist "
             "FROM chunks_vec cv JOIN chunks c ON c.chunk_id = cv.chunk_id "
-            "JOIN documents d ON d.doc_id = c.doc_id WHERE d.active = TRUE"
+            "JOIN documents d ON d.doc_id = c.doc_id "
+            "WHERE d.active = TRUE AND (cv.embedding <=> %s::vector) IS NOT NULL"
         )
-        params: list[Any] = [list(embedding)]
+        params: list[Any] = [vec, vec]
         if layer is not None:
             sql += " AND d.layer = %s"
             params.append(layer.value)
@@ -327,7 +375,9 @@ class PostgresStorage:
             await cur.execute(sql, params)
             rows = await cur.fetchall()
         return [
-            VecHit(chunk_id=int(r[0]), doc_id=r[1], distance=float(r[2])) for r in rows
+            VecHit(chunk_id=int(r[0]), doc_id=r[1], distance=float(r[2]))
+            for r in rows
+            if r[2] is not None and not math.isnan(r[2])
         ]
 
     # ---- K layer ---------------------------------------------------------

@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,7 +74,9 @@ from .schemas import (
     ChunkRecord,
     DocumentRecord,
     EmbeddingVersion,
+    ImageContent,
     Layer,
+    MultimodalInput,
     StorageCounts,
     WikiLogEntry,
     WisdomEvidence,
@@ -203,6 +207,10 @@ class Citation(BaseModel):
     path: str
     title: str | None = None
     layer: str
+    # Chunk sequence within ``path``; populated when chunk-level retrieval
+    # surfaced this citation. Disambiguates "doc X chunk 2 vs doc X chunk 5"
+    # when multiple chunks from the same document end up in the citation list.
+    seq: int | None = None
     excerpt: str
 
 
@@ -345,20 +353,115 @@ async def _probe_embed(
     return ProbeResult(ok=True, target=target, detail=detail)
 
 
+def _build_probe_png_1x1() -> bytes:
+    """Smallest valid PNG (1x1 black RGB pixel, 69 bytes).
+
+    Built at module load via stdlib ``struct`` + ``zlib`` so the chunk
+    CRCs are guaranteed correct — a hand-written byte literal here was
+    truncated by one CRC byte once and Gitee's image decoder rejected
+    the whole multimodal probe with a misleading "Supported image
+    type:" error that hid the real cause.
+    """
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    # IHDR: width=1, height=1, bit_depth=8, color_type=2 (RGB), the rest 0.
+    ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+    # IDAT: one scanline of [filter=0, R=0, G=0, B=0], deflate-compressed.
+    idat = _chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00", 9))
+    iend = _chunk(b"IEND", b"")
+    return sig + ihdr + idat + iend
+
+
+_PROBE_PNG_1X1 = _build_probe_png_1x1()
+
+# Storage backends that support multimodal embed versioning today.
+# Mirrors ``upsert_embed_version`` support in
+# ``storage/{sqlite,postgres,filesystem}.py``: postgres and filesystem
+# raise ``NotSupported`` from that method, so when the user has
+# ``assets.multimodal`` configured against one of them, ``ingest()``
+# silently degrades to text-only (api.py: ``except NotSupported``).
+# ``check_providers`` mirrors that fallback so the probe describes the
+# same behaviour operators will actually get.
+_MULTIMODAL_STORAGE_BACKENDS: frozenset[str] = frozenset({"sqlite"})
+
+
+async def _probe_multimodal(
+    embedder: MultimodalEmbeddingProvider,
+    model: str,
+    target: str,
+    *,
+    provider_label: str | None = None,
+) -> ProbeResult:
+    """Probe a multimodal embedder with a single batched text+image request.
+
+    Sends two per-modality inputs (one text, one tiny PNG) in **one** HTTP
+    call so latency stays bounded by a single RTT — no sequential probes
+    that would double end-to-end time. Validation hinges on both vectors
+    coming back with a consistent dim; an empty or shape-mismatched
+    response surfaces as an error rather than a silent pass.
+    """
+    inputs = [
+        MultimodalInput(text="ping"),
+        MultimodalInput(images=[ImageContent(bytes=_PROBE_PNG_1X1, mime="image/png")]),
+    ]
+    started = time.perf_counter()
+    try:
+        vectors = await embedder.embed(inputs, model=model)
+    except Exception as e:
+        return ProbeResult(ok=False, target=target, detail=f"{type(e).__name__}: {e}")
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    if len(vectors) != 2:
+        return ProbeResult(
+            ok=False,
+            target=target,
+            detail=(
+                f"{elapsed_ms}ms, expected 2 vectors (text+image), got "
+                f"{len(vectors)} — provider returned a shape-mismatched batch"
+            ),
+        )
+    dim_text = len(vectors[0])
+    dim_image = len(vectors[1])
+    if dim_text != dim_image:
+        return ProbeResult(
+            ok=False,
+            target=target,
+            detail=(
+                f"{elapsed_ms}ms, dim mismatch text={dim_text} image={dim_image} — "
+                f"per-modality vectors must share one space"
+            ),
+        )
+    detail = f"{elapsed_ms}ms, dim={dim_text}, modalities=text+image"
+    if provider_label:
+        detail = f"{detail}, provider={provider_label}"
+    return ProbeResult(ok=True, target=target, detail=detail)
+
+
 async def check_providers(
     path: str | Path | None = None,
     *,
     llm: LLMProvider | None = None,
     embedder: EmbeddingProvider | None = None,
+    multimodal_embedder: MultimodalEmbeddingProvider | None = None,
     llm_only: bool = False,
     embed_only: bool = False,
 ) -> CheckReport:
     """Ping the configured LLM and embedding providers.
 
-    ``llm`` and ``embedder`` are injectable for tests; production callers
-    leave them ``None`` and the factory builds them from ``provider:`` in
-    ``dikw.yml``. Two legs run in parallel and each reports its own result
-    — an LLM failure does not short-circuit the embedding probe.
+    ``llm``, ``embedder``, and ``multimodal_embedder`` are injectable for
+    tests; production callers leave them ``None`` and the factory builds
+    them from ``provider:`` / ``assets.multimodal:`` in ``dikw.yml``. Two
+    legs run in parallel and each reports its own result — an LLM failure
+    does not short-circuit the embedding probe.
+
+    When ``cfg.assets.multimodal`` is configured, the embed leg routes
+    through ``_probe_multimodal`` (one batched text+image request) instead
+    of the text-only ``_probe_embed`` — the multimodal embedder is what
+    ingest actually uses for both chunks and assets, so the check must
+    follow that route to remain truthful.
 
     ``llm_only`` / ``embed_only`` (mutually exclusive) verify a single leg.
     The skipped leg is never built or called, so a misconfigured embedding
@@ -372,34 +475,73 @@ async def check_providers(
     llm_probe: ProbeResult | None = None
     embed_probe: ProbeResult | None = None
     llm_target = cfg.provider.llm_base_url or "(provider default)"
-    embed_target = cfg.provider.embedding_base_url
+    embed_label = cfg.provider.embedding_provider_label
+    mm_cfg = cfg.assets.multimodal
+    # If the storage backend can't hold multimodal version rows,
+    # ``ingest()`` silently degrades to text-only — describe that here
+    # too, otherwise check would fail on a multimodal endpoint that
+    # ingest never reaches.
+    if mm_cfg is not None and cfg.storage.backend not in _MULTIMODAL_STORAGE_BACKENDS:
+        logger.warning(
+            "storage backend %r doesn't support multimodal versioning; "
+            "real ingest would fall back to text-only — probing text leg instead",
+            cfg.storage.backend,
+        )
+        mm_cfg = None
+    # Per-leg target. Multimodal probe hits ``assets.multimodal.base_url``
+    # (or the provider's default), which is independent of the text leg's
+    # ``embedding_base_url``; reporting the wrong one makes a green check
+    # misleading in split-vendor setups.
+    if mm_cfg is not None:
+        embed_target = mm_cfg.base_url or "(provider default)"
+    else:
+        embed_target = cfg.provider.embedding_base_url
+    # Track an internally-built multimodal embedder so we close its httpx
+    # client in ``finally`` — mirrors the ``owned_mm`` pattern in ingest/
+    # query. An *injected* embedder is the caller's lifetime to manage.
+    owned_mm: MultimodalEmbeddingProvider | None = None
 
     if not embed_only:
         llm_inst = llm if llm is not None else build_llm(cfg.provider)
     if not llm_only:
-        embed_inst = embedder if embedder is not None else build_embedder(cfg.provider)
+        if mm_cfg is not None:
+            if multimodal_embedder is not None:
+                mm_inst = multimodal_embedder
+            else:
+                mm_inst = build_multimodal_embedder(
+                    mm_cfg.provider, base_url=mm_cfg.base_url, batch=mm_cfg.batch
+                )
+                owned_mm = mm_inst
+        else:
+            embed_inst = (
+                embedder if embedder is not None else build_embedder(cfg.provider)
+            )
 
-    embed_label = cfg.provider.embedding_provider_label
-
-    if llm_only:
-        llm_probe = await _probe_llm(llm_inst, cfg.provider.llm_model, llm_target)
-    elif embed_only:
-        embed_probe = await _probe_embed(
+    async def _embed_leg() -> ProbeResult:
+        if mm_cfg is not None:
+            return await _probe_multimodal(
+                mm_inst, mm_cfg.model, embed_target, provider_label=embed_label
+            )
+        return await _probe_embed(
             embed_inst,
             cfg.provider.embedding_model,
             embed_target,
             provider_label=embed_label,
         )
-    else:
-        llm_probe, embed_probe = await asyncio.gather(
-            _probe_llm(llm_inst, cfg.provider.llm_model, llm_target),
-            _probe_embed(
-                embed_inst,
-                cfg.provider.embedding_model,
-                embed_target,
-                provider_label=embed_label,
-            ),
-        )
+
+    try:
+        if llm_only:
+            llm_probe = await _probe_llm(llm_inst, cfg.provider.llm_model, llm_target)
+        elif embed_only:
+            embed_probe = await _embed_leg()
+        else:
+            llm_probe, embed_probe = await asyncio.gather(
+                _probe_llm(llm_inst, cfg.provider.llm_model, llm_target),
+                _embed_leg(),
+            )
+    finally:
+        if owned_mm is not None and hasattr(owned_mm, "aclose"):
+            await owned_mm.aclose()
     return CheckReport(llm=llm_probe, embed=embed_probe)
 
 
@@ -1213,14 +1355,22 @@ def _dr_replace(r: DistillReport, **kw: int) -> DistillReport:
 async def _build_excerpts(
     storage: Storage, hits: list[Hit]
 ) -> tuple[str, list[Citation]]:
+    # Chunk-level fusion repeats doc_ids across hits, so a per-hit
+    # ``get_document`` would issue O(hits) round trips for O(unique docs)
+    # of useful work. Batch once up front.
+    unique_doc_ids = list({h.doc_id for h in hits})
+    docs_by_id = {
+        d.doc_id: d for d in await storage.get_documents(unique_doc_ids)
+    }
+
     citations: list[Citation] = []
     lines: list[str] = []
     for i, hit in enumerate(hits, start=1):
-        doc = await storage.get_document(hit.doc_id)
+        doc = docs_by_id.get(hit.doc_id)
         if doc is None:
             continue
         excerpt = hit.snippet
-        if not excerpt and hit.chunk_id is not None:
+        if not excerpt:
             chunk = await storage.get_chunk(hit.chunk_id)
             if chunk is not None:
                 excerpt = chunk.text[:400]
@@ -1233,6 +1383,7 @@ async def _build_excerpts(
                 path=doc.path,
                 title=doc.title,
                 layer=doc.layer.value,
+                seq=hit.seq,
                 excerpt=excerpt,
             )
         )

@@ -57,6 +57,14 @@ class ProviderConfig(BaseModel):
     # profiles (e.g., MiniMax LLM + Gitee AI embeddings).
     llm_max_retries: int = 5
     embedding_max_retries: int = 5
+    # Per-request timeout in seconds. The OpenAI/Anthropic SDKs default to
+    # 600s, which lets a stale keepalive connection hang the whole pipeline
+    # for 10 minutes before the SDK gives up and reconnects (observed
+    # against Gitee AI mid-batch). Bound it tightly per-leg so a dead TCP
+    # connection raises a timeout error fast and the SDK's retry path
+    # establishes a fresh connection on the next attempt.
+    llm_timeout_seconds: float = 120.0
+    embedding_timeout_seconds: float = 60.0
 
 
 class RetrievalConfig(BaseModel):
@@ -100,6 +108,14 @@ class RetrievalConfig(BaseModel):
     # as ``embedding_dimensions``; flip requires wiping the index.
     # See ``docs/providers.md`` gotcha #7 and ``evals/BASELINES.md``.
     cjk_tokenizer: CjkTokenizer = "none"
+    # Diminishing-returns demotion for repeat same-doc chunks after
+    # chunk-level RRF fusion. The 1st chunk per doc is unpenalized; the
+    # N-th chunk is scaled by ``1 / (1 + alpha * (N - 1))``. Lightweight
+    # source diversification (Stage 3 of the RAG retrieval stack); set
+    # to ``0`` to disable, leave at ``0.3`` to soften same-book
+    # dominance without hard-collapsing it. Tuned empirically per
+    # corpus via Phase 3 dogfood (see plan A/B/baseline matrix).
+    same_doc_penalty_alpha: float = Field(default=0.3, ge=0.0)
 
 
 class SQLiteStorageConfig(BaseModel):

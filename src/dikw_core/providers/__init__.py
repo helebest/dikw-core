@@ -21,11 +21,13 @@ def build_llm(config: ProviderConfig) -> LLMProvider:
         return AnthropicLLM(
             base_url=config.llm_base_url,
             max_retries=config.llm_max_retries,
+            timeout_seconds=config.llm_timeout_seconds,
         )
     if config.llm == "openai_compat":
         return OpenAICompatLLM(
             base_url=config.llm_base_url,
             max_retries=config.llm_max_retries,
+            timeout_seconds=config.llm_timeout_seconds,
         )
     raise ProviderError(f"unknown LLM provider: {config.llm!r}")
 
@@ -38,6 +40,7 @@ def build_embedder(config: ProviderConfig) -> EmbeddingProvider:
             base_url=config.embedding_base_url,
             default_dimensions=config.embedding_dimensions,
             max_retries=config.embedding_max_retries,
+            timeout_seconds=config.embedding_timeout_seconds,
         )
     raise ProviderError(f"unknown embedding provider: {config.embedding!r}")
 
@@ -47,9 +50,12 @@ def build_multimodal_embedder(
 ) -> MultimodalEmbeddingProvider:
     """Build a multimodal embedder by name.
 
-    The factory currently knows only ``gitee_multimodal`` (the v1 default);
-    additional providers (Voyage, Cohere, Jina-direct) are easy follow-ons
-    — drop a new file under ``providers/`` and add a branch here.
+    One provider ships today: ``gitee_multimodal`` covers every multimodal
+    model Gitee AI serves (Qwen3-VL-Embedding-8B, jina-clip-v2, …) — they
+    share one wire shape, the model name in ``assets.multimodal.model``
+    discriminates which one runs server-side. Additional vendors (Voyage,
+    Cohere, Jina-direct) are easy follow-ons: drop a new file under
+    ``providers/`` and add a branch here.
     """
     if provider == "gitee_multimodal":
         return GiteeMultimodalEmbedding(base_url=base_url, batch=batch)

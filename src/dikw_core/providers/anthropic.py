@@ -34,14 +34,17 @@ class AnthropicLLM:
         api_key: str | None = None,
         base_url: str | None = None,
         max_retries: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._api_key_explicit = api_key
         self._base_url = base_url
         self._max_retries = max_retries
+        self._timeout_seconds = timeout_seconds
         self._client_cache: AsyncAnthropic | None = None
 
     def _get_client(self) -> AsyncAnthropic:
         if self._client_cache is None:
+            import httpx
             from anthropic import AsyncAnthropic
 
             kwargs: dict[str, Any] = {
@@ -51,6 +54,25 @@ class AnthropicLLM:
                 kwargs["base_url"] = self._base_url
             if self._max_retries is not None:
                 kwargs["max_retries"] = self._max_retries
+            # Default 600s timeout in the SDK lets a stale keepalive hang
+            # the pipeline; bound it so a dead connection raises fast and
+            # the SDK retries with a fresh socket. Disabling keepalive
+            # ensures each retry establishes a new TCP connection rather
+            # than looping on the same dead pooled socket — the failure
+            # mode observed against Gitee AI's batch embedding endpoint
+            # also happens with some Anthropic-compatible LLM proxies.
+            if self._timeout_seconds is not None:
+                timeout = httpx.Timeout(
+                    connect=10.0,
+                    read=self._timeout_seconds,
+                    write=self._timeout_seconds,
+                    pool=5.0,
+                )
+                kwargs["timeout"] = timeout
+                kwargs["http_client"] = httpx.AsyncClient(
+                    timeout=timeout,
+                    limits=httpx.Limits(max_keepalive_connections=0),
+                )
             self._client_cache = AsyncAnthropic(**kwargs)
         return self._client_cache
 

@@ -15,6 +15,11 @@ if TYPE_CHECKING:  # avoid importing openai at module load for envs without it
     from openai import AsyncOpenAI
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
+# Bounded read/write defaults — the SDK's 600s default lets a stale
+# keepalive connection hang a whole batch pipeline. Connect is left short
+# because TLS handshake either succeeds quickly or signals an unhealthy
+# endpoint; pool is short to surface client-side congestion immediately.
+_DEFAULT_TIMEOUT_SECONDS = 60.0
 
 
 def _resolve_api_key(explicit: str | None) -> str:
@@ -44,13 +49,36 @@ def _resolve_embedding_api_key(explicit: str | None) -> str:
 
 
 def _client(
-    base_url: str, api_key: str, *, max_retries: int | None = None
+    base_url: str,
+    api_key: str,
+    *,
+    max_retries: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> AsyncOpenAI:
+    import httpx
     from openai import AsyncOpenAI
 
     kwargs: dict[str, Any] = {"base_url": base_url, "api_key": api_key}
     if max_retries is not None:
         kwargs["max_retries"] = max_retries
+    # ``timeout`` covers the read/write/pool legs separately so a healthy
+    # connection isn't strangled by a tight overall budget while a dead
+    # one still surfaces fast. The retry policy on the SDK reconnects
+    # after a ReadTimeout fires.
+    seconds = timeout_seconds if timeout_seconds is not None else _DEFAULT_TIMEOUT_SECONDS
+    timeout = httpx.Timeout(connect=10.0, read=seconds, write=seconds, pool=5.0)
+    # Hand the SDK a custom httpx client that disables connection keepalive
+    # entirely. Provider endpoints commonly used for batch embedding (Gitee
+    # AI's Qwen3-* family in particular) silently drop idle TCP keepalives
+    # mid-batch; the OpenAI SDK's retry path then loops on the same dead
+    # socket from the pool until the read timeout fires N+1 times. Forcing
+    # a fresh connection per request adds ~50ms TLS handshake overhead but
+    # eliminates the multi-minute-per-batch retry storm.
+    kwargs["http_client"] = httpx.AsyncClient(
+        timeout=timeout,
+        limits=httpx.Limits(max_keepalive_connections=0),
+    )
+    kwargs["timeout"] = timeout
     return AsyncOpenAI(**kwargs)
 
 
@@ -61,10 +89,12 @@ class OpenAICompatLLM:
         base_url: str | None = None,
         api_key: str | None = None,
         max_retries: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._base_url = base_url or os.environ.get("OPENAI_BASE_URL", _DEFAULT_BASE_URL)
         self._api_key_explicit = api_key
         self._max_retries = max_retries
+        self._timeout_seconds = timeout_seconds
         self._client_cache: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
@@ -73,6 +103,7 @@ class OpenAICompatLLM:
                 self._base_url,
                 _resolve_api_key(self._api_key_explicit),
                 max_retries=self._max_retries,
+                timeout_seconds=self._timeout_seconds,
             )
         return self._client_cache
 
@@ -123,11 +154,13 @@ class OpenAICompatEmbeddings:
         api_key: str | None = None,
         default_dimensions: int | None = None,
         max_retries: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._base_url = base_url or os.environ.get("OPENAI_BASE_URL", _DEFAULT_BASE_URL)
         self._api_key_explicit = api_key
         self._default_dimensions = default_dimensions
         self._max_retries = max_retries
+        self._timeout_seconds = timeout_seconds
         self._client_cache: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
@@ -136,6 +169,7 @@ class OpenAICompatEmbeddings:
                 self._base_url,
                 _resolve_embedding_api_key(self._api_key_explicit),
                 max_retries=self._max_retries,
+                timeout_seconds=self._timeout_seconds,
             )
         return self._client_cache
 

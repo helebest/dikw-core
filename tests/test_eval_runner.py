@@ -371,3 +371,55 @@ def test_eval_error_is_raised_for_nonexistent_corpus_dir(tmp_path: Path) -> None
 
     with pytest.raises(EvalError, match="corpus"):
         asyncio.run(run_eval(spec))
+
+
+@pytest.mark.asyncio
+async def test_run_eval_ranked_docs_deduped_after_chunk_level_fusion(
+    tmp_path: Path,
+) -> None:
+    """Chunk-level fusion (Phase 1) repeats the same doc_id across hits
+    when multiple chunks of one doc rank highly. Doc-level metrics
+    (hit@k, MRR, nDCG@k, recall@k) assume unique doc identities in rank
+    order, so the runner must dedup ranked stems while preserving the
+    first-occurrence order. Without the dedup, BEIR/CMTEB benchmarks
+    silently regress.
+
+    Setup: a doc with two chunks both highly relevant + a hit doc that
+    must still appear within top-k after dedup.
+    """
+    ds = tmp_path / "dedup"
+    (ds / "corpus").mkdir(parents=True)
+    # alpha.md has two strongly-matching chunks (separated by a header
+    # so the chunker emits two distinct chunks).
+    (ds / "corpus" / "alpha.md").write_text(
+        "# Alpha\n\n"
+        + ("alpha rank fusion topic body. " * 30)
+        + "\n\n## Subsection\n\n"
+        + ("alpha rank fusion topic continues. " * 30),
+        encoding="utf-8",
+    )
+    (ds / "corpus" / "beta.md").write_text(
+        "# Beta\n\n" + ("alpha rank fusion topic " * 30),
+        encoding="utf-8",
+    )
+    (ds / "dataset.yaml").write_text(
+        "name: dedup\n"
+        "description: chunk-level dedup regression guard\n"
+        "thresholds: {}\n",
+        encoding="utf-8",
+    )
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - q: alpha rank fusion\n"
+        "    expect_any: [alpha, beta]\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    report = await run_eval(spec)
+
+    ranked = report.per_query[0]["ranked"]
+    # The exact ranking depends on chunker + RRF, but the dedup invariant
+    # is unconditional: no consecutive (or any) duplicate stems.
+    assert len(ranked) == len(set(ranked)), (
+        f"ranked stems must be unique after dedup; got {ranked}"
+    )

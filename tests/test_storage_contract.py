@@ -412,6 +412,94 @@ async def test_filesystem_cache_methods_raise_notsupported(
         await fs.close()
 
 
+async def test_vec_search_returns_in_distance_order(storage: Storage) -> None:
+    """KNN MATCH must return rows ordered by ascending cosine distance.
+
+    Builds a deterministic 5-chunk corpus where each chunk's embedding is
+    a known angular distance from the query vector, then asserts the
+    returned ranking matches that distance order.
+    """
+    doc = _make_doc("sources/order.md")
+    await storage.put_content(doc.hash, "body")
+    await storage.upsert_document(doc)
+    # 5 chunks, each with a 4-dim vector at increasing angle from
+    # [1, 0, 0, 0]. Closest first.
+    embeddings = [
+        [1.00, 0.00, 0.00, 0.00],  # cosine dist = 0.0
+        [0.99, 0.10, 0.00, 0.00],  # ~0.005
+        [0.80, 0.60, 0.00, 0.00],  # ~0.20
+        [0.50, 0.866, 0.00, 0.00],  # ~0.50
+        [0.00, 1.00, 0.00, 0.00],  # 1.0
+    ]
+    chunks = [
+        ChunkRecord(doc_id=doc.doc_id, seq=i, start=i * 5, end=i * 5 + 5, text=f"c{i}")
+        for i in range(len(embeddings))
+    ]
+    chunk_ids = await storage.replace_chunks(doc.doc_id, chunks)
+    await storage.upsert_embeddings(
+        [
+            EmbeddingRow(chunk_id=cid, model="test-embed", embedding=emb)
+            for cid, emb in zip(chunk_ids, embeddings, strict=True)
+        ]
+    )
+    hits = await storage.vec_search([1.0, 0.0, 0.0, 0.0], limit=5)
+    assert len(hits) == 5
+    # Returned ranking must follow the embedding insertion order (which
+    # is also the distance order by construction).
+    assert [h.chunk_id for h in hits] == chunk_ids
+    # Distances must be monotone non-decreasing.
+    distances = [h.distance for h in hits]
+    assert distances == sorted(distances), f"distances not in order: {distances}"
+
+
+async def test_vec_search_layer_filter(storage: Storage) -> None:
+    """Layer filter applied after KNN must return only the requested layer.
+
+    Inserts a SOURCE-layer doc and a WIKI-layer doc whose embeddings
+    bracket the query; without the filter both surface, with
+    ``layer=WIKI`` only the wiki chunk surfaces.
+    """
+    src_doc = _make_doc("sources/src.md", layer=Layer.SOURCE)
+    wiki_doc = _make_doc("wiki/page.md", layer=Layer.WIKI)
+    for d in (src_doc, wiki_doc):
+        await storage.put_content(d.hash, "x")
+        await storage.upsert_document(d)
+    src_ids = await storage.replace_chunks(
+        src_doc.doc_id,
+        [ChunkRecord(doc_id=src_doc.doc_id, seq=0, start=0, end=5, text="src")],
+    )
+    wiki_ids = await storage.replace_chunks(
+        wiki_doc.doc_id,
+        [ChunkRecord(doc_id=wiki_doc.doc_id, seq=0, start=0, end=5, text="wiki")],
+    )
+    # Source chunk is the closer match; wiki chunk is the farther one.
+    await storage.upsert_embeddings(
+        [
+            EmbeddingRow(
+                chunk_id=src_ids[0], model="test-embed", embedding=[1.0, 0.0, 0.0, 0.0]
+            ),
+            EmbeddingRow(
+                chunk_id=wiki_ids[0], model="test-embed", embedding=[0.0, 1.0, 0.0, 0.0]
+            ),
+        ]
+    )
+    # Unfiltered: both come back, source first.
+    all_hits = await storage.vec_search([1.0, 0.0, 0.0, 0.0], limit=10)
+    assert {h.chunk_id for h in all_hits} == {src_ids[0], wiki_ids[0]}
+    # Layer-filtered to WIKI: only the wiki chunk surfaces, even though
+    # the over-fetch would have pulled the source chunk into the KNN
+    # candidate set.
+    wiki_hits = await storage.vec_search(
+        [1.0, 0.0, 0.0, 0.0], limit=10, layer=Layer.WIKI
+    )
+    assert [h.chunk_id for h in wiki_hits] == [wiki_ids[0]]
+    # Symmetric check.
+    src_hits = await storage.vec_search(
+        [1.0, 0.0, 0.0, 0.0], limit=10, layer=Layer.SOURCE
+    )
+    assert [h.chunk_id for h in src_hits] == [src_ids[0]]
+
+
 async def test_link_graph(storage: Storage) -> None:
     src_doc = _make_doc("wiki/a.md", layer=Layer.WIKI)
     dst_doc = _make_doc("wiki/b.md", layer=Layer.WIKI)

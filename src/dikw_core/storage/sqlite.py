@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sqlite3
 import time
 from collections.abc import Iterable, Sequence
@@ -48,6 +49,28 @@ from ._vec_codec import serialize_vec as _serialize_vec
 from .base import NotSupported, StorageError
 
 MIGRATIONS_PACKAGE = "dikw_core.storage.migrations.sqlite"
+
+# vec0 defaults to L2; we want cosine for parity with the legacy
+# ``vec_distance_cosine`` ranking so existing BASELINES.md thresholds
+# stay valid. Baked into ``CREATE VIRTUAL TABLE`` and verified at
+# migrate-time on legacy DBs.
+_VEC_DISTANCE_METRIC = "cosine"
+
+# Over-fetch factor when a ``layer`` filter post-filters the KNN heap.
+# A skewed corpus (e.g. 1% WIKI in a SOURCE-heavy vault) can have
+# fewer than ``limit`` of the requested layer in the top-``k``, so we
+# pull a larger candidate set and trim. Tunable; 10x picked to absorb
+# 90/10 skew at ``limit=20`` without an exponential-backoff retry loop.
+#
+# Known limitation: sqlite-vec MATCH can't constrain on the external
+# ``documents.layer`` column, so the layer filter happens after KNN.
+# A query whose first matching-layer chunk ranks beyond
+# ``limit * _LAYER_FILTER_OVER_FETCH`` globally will under-fill (or
+# return ``[]``). Acceptable today because dikw layers (SOURCE/WIKI/
+# WISDOM) are not typically 99.x% skewed. Follow-up: retry with
+# exponential backoff or fall back to brute-force when the candidate
+# set under-fills.
+_LAYER_FILTER_OVER_FETCH = 10
 
 
 class SQLiteStorage:
@@ -123,6 +146,7 @@ class SQLiteStorage:
             ).fetchone()
             if meta is not None:
                 self._embedding_dim = int(meta[0])
+            self._verify_vec_tables_use_cosine(conn)
 
         await asyncio.to_thread(_run)
 
@@ -482,31 +506,34 @@ class SQLiteStorage:
                 raise StorageError(
                     f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
                 )
-            # ``vec_distance_cosine`` returns NULL when either operand is the
-            # zero vector (cosine is undefined). NULLs sort first under SQLite
-            # ASC, so without a WHERE filter they would crowd out real hits at
-            # the top of the result set AND crash ``float(None)`` in the
-            # comprehension below. The function is pure, so calling it twice
-            # is fine; the WHERE prunes degenerate rows before ORDER BY.
-            serialized = _serialize_vec(embedding)
-            sql = (
-                "SELECT cv.rowid AS chunk_id, c.doc_id AS doc_id, "
-                "vec_distance_cosine(cv.embedding, ?) AS dist "
-                "FROM chunks_vec cv JOIN chunks c ON c.chunk_id = cv.rowid "
-                "JOIN documents d ON d.doc_id = c.doc_id "
-                "WHERE vec_distance_cosine(cv.embedding, ?) IS NOT NULL"
+            fetch_k = limit * _LAYER_FILTER_OVER_FETCH if layer is not None else limit
+            ranked = _knn(conn, "chunks_vec", embedding, fetch_k)
+            if not ranked:
+                return []
+            chunk_ids = [cid for cid, _ in ranked]
+            placeholders = ",".join("?" * len(chunk_ids))
+            join_sql = (
+                f"SELECT c.chunk_id, c.doc_id FROM chunks c "
+                f"JOIN documents d ON d.doc_id = c.doc_id "
+                f"WHERE c.chunk_id IN ({placeholders})"
             )
-            params: list[Any] = [serialized, serialized]
+            join_params: list[Any] = list(chunk_ids)
             if layer is not None:
-                sql += " AND d.layer = ?"
-                params.append(layer.value)
-            sql += " ORDER BY dist LIMIT ?"
-            params.append(limit)
-            rows = conn.execute(sql, params).fetchall()
-            return [
-                VecHit(doc_id=r["doc_id"], chunk_id=int(r["chunk_id"]), distance=float(r["dist"]))
-                for r in rows
-            ]
+                join_sql += " AND d.layer = ?"
+                join_params.append(layer.value)
+            doc_id_by_chunk: dict[int, str] = {
+                int(r["chunk_id"]): r["doc_id"]
+                for r in conn.execute(join_sql, join_params).fetchall()
+            }
+            hits: list[VecHit] = []
+            for chunk_id, dist in ranked:
+                doc_id = doc_id_by_chunk.get(chunk_id)
+                if doc_id is None:
+                    continue  # filtered by layer or chunk row gone
+                hits.append(VecHit(doc_id=doc_id, chunk_id=chunk_id, distance=dist))
+                if len(hits) >= limit:
+                    break
+            return hits
 
         return await asyncio.to_thread(_run)
 
@@ -955,26 +982,23 @@ class SQLiteStorage:
             ).fetchone()
             if tbl_exists is None:
                 return []
-            # WHERE filter mirrors ``vec_search`` — see the comment there.
-            # Zero-vector indexed assets (degenerate provider output, or a
-            # pure-text input that the multimodal endpoint maps to all-zero)
-            # return NULL distance and would otherwise crash ``float()``.
-            serialized = _serialize_vec(embedding)
-            rows = conn.execute(
-                f"""
-                SELECT m.asset_id AS asset_id,
-                       vec_distance_cosine(v.embedding, ?) AS dist
-                FROM {table} v
-                JOIN {row_table} m ON m.rowid = v.rowid
-                WHERE vec_distance_cosine(v.embedding, ?) IS NOT NULL
-                ORDER BY dist
-                LIMIT ?
-                """,
-                (serialized, serialized, limit),
-            ).fetchall()
+            ranked = _knn(conn, table, embedding, limit)
+            if not ranked:
+                return []
+            rowids = [rid for rid, _ in ranked]
+            placeholders = ",".join("?" * len(rowids))
+            asset_id_by_rowid: dict[int, str] = {
+                int(r["rowid"]): r["asset_id"]
+                for r in conn.execute(
+                    f"SELECT rowid, asset_id FROM {row_table} "
+                    f"WHERE rowid IN ({placeholders})",
+                    rowids,
+                ).fetchall()
+            }
             return [
-                AssetVecHit(asset_id=r["asset_id"], distance=float(r["dist"]))
-                for r in rows
+                AssetVecHit(asset_id=asset_id_by_rowid[rid], distance=dist)
+                for rid, dist in ranked
+                if rid in asset_id_by_rowid
             ]
 
         return await asyncio.to_thread(_run)
@@ -1105,11 +1129,37 @@ class SQLiteStorage:
             raise StorageError("SQLiteStorage is not connected; call `connect()` first")
         return self._conn
 
+    def _verify_vec_tables_use_cosine(self, conn: sqlite3.Connection) -> None:
+        """Refuse to open a DB whose vec0 tables predate distance_metric=cosine.
+
+        ``CREATE VIRTUAL TABLE IF NOT EXISTS`` makes the cosine clause a
+        no-op against an existing table, so an upgraded user would
+        silently get vec0's L2 default ranking — wrong order, no
+        exception. Inspect the stored CREATE statement and bail out
+        loudly with rebuild instructions before the engine serves
+        miscalibrated results.
+        """
+        rows = conn.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%vec0%'"
+        ).fetchall()
+        for row in rows:
+            sql = row["sql"] or ""
+            if f"distance_metric={_VEC_DISTANCE_METRIC}" not in sql:
+                raise StorageError(
+                    f"vector table {row['name']!r} was created without "
+                    f"distance_metric={_VEC_DISTANCE_METRIC} and would rank "
+                    "by sqlite-vec's L2 default. Delete the SQLite file "
+                    "(`rm .dikw/dikw.sqlite`) and re-run `dikw ingest` to "
+                    "rebuild the index."
+                )
+
     def _ensure_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         if self._embedding_dim is None:
-            # Persist the dim so subsequent startups can restore it without an insert.
             conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[{dim}])"
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec "
+                f"USING vec0(embedding float[{dim}] "
+                f"distance_metric={_VEC_DISTANCE_METRIC})"
             )
             conn.execute(
                 "INSERT OR REPLACE INTO meta_kv(key, value) VALUES ('embedding_dim', ?)",
@@ -1129,14 +1179,51 @@ class SQLiteStorage:
         """Create ``vec_assets_v<version_id>`` lazily. sqlite-vec needs the
         embedding dim baked into the table at CREATE time, so each version
         gets its own dim-locked virtual table — switching multimodal model
-        creates a new version + new table, leaving prior data intact."""
+        creates a new version + new table, leaving prior data intact.
+        """
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_assets_v{version_id} "
-            f"USING vec0(embedding float[{dim}])"
+            f"USING vec0(embedding float[{dim}] "
+            f"distance_metric={_VEC_DISTANCE_METRIC})"
         )
 
 
-# ---- row → DTO helpers ---------------------------------------------------
+# ---- module-level helpers ------------------------------------------------
+
+
+def _knn(
+    conn: sqlite3.Connection, table: str, embedding: list[float], k: int
+) -> list[tuple[int, float]]:
+    """Run sqlite-vec MATCH+k= on ``table`` and return (rowid, distance) pairs.
+
+    Drops zero-vector rows whose distance comes back NULL/NaN — sqlite-vec
+    returns NULL for cosine on the zero vector (mirrors postgres' guard
+    after commit 6ecd539); ``float(None)`` would otherwise crash the
+    caller. Result is in KNN order (ascending distance).
+
+    Known limitation: vec0's MATCH path doesn't accept
+    ``WHERE distance IS NOT NULL`` constraints, so degenerate rows
+    consume KNN slots and the caller may under-fill ``limit`` when
+    the index contains zero-vector rows. Tolerable today because zero
+    vectors are exceptional (provider degeneracies, not typical
+    workload). Follow-up: filter at upsert_embeddings time instead.
+    """
+    serialized = _serialize_vec(embedding)
+    rows = conn.execute(
+        f"SELECT rowid, distance AS dist "
+        f"FROM {table} WHERE embedding MATCH ? AND k = ?",
+        (serialized, k),
+    ).fetchall()
+    ranked: list[tuple[int, float]] = []
+    for r in rows:
+        d = r["dist"]
+        if d is None:
+            continue
+        df = float(d)
+        if math.isnan(df):
+            continue
+        ranked.append((int(r["rowid"]), df))
+    return ranked
 
 
 def _row_to_document(row: sqlite3.Row) -> DocumentRecord:

@@ -750,6 +750,29 @@ async def ingest(
                 chunks=report.chunks + len(chunk_records),
             )
 
+        # Resume scan: pick up chunks that landed in storage during a
+        # prior crashed run but never got their embedding written. The
+        # doc-level shortcut above skips docs whose body_hash matched
+        # storage, so without this scan a half-embedded run can NEVER
+        # finish — its remaining chunks are invisible to the per-doc
+        # loop. The cache lookup in slice 5 makes this nearly free for
+        # chunks whose text is already cached; for true misses (the
+        # tail that crashed mid-flight) we re-pay the provider.
+        if embedder is not None or multimodal_embedder is not None:
+            active_model = (
+                mm_cfg.model
+                if multimodal_embedder is not None and mm_cfg is not None
+                else cfg.provider.embedding_model
+            )
+            already_queued_ids = {c.chunk_id for c in to_embed}
+            missing = await storage.list_chunks_missing_embedding(model=active_model)
+            for chunk in missing:
+                if chunk.chunk_id is None or chunk.chunk_id in already_queued_ids:
+                    continue
+                to_embed.append(
+                    ChunkToEmbed(chunk_id=chunk.chunk_id, text=chunk.text)
+                )
+
         # Chunk-text embeddings: prefer the multimodal pathway when both an
         # mm provider and a configured multimodal version are available.
         # Streaming consume: each batch is upserted as soon as the provider

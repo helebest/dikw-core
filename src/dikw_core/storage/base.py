@@ -123,6 +123,20 @@ class Storage(Protocol):
         """
         ...
 
+    async def list_chunks_missing_embedding(
+        self, *, model: str
+    ) -> list[ChunkRecord]:
+        """Chunks present in storage with no ``embed_meta`` row for ``model``.
+
+        Used by the resume-scan path in ``api.ingest``: after a mid-flight
+        crash the doc-level shortcut on retry skips docs whose hash already
+        landed, but their chunks may have only partially embedded. This
+        method surfaces the missing tail so the caller can re-run them
+        (cache hits make most of those free; only true misses re-pay
+        the provider).
+        """
+        ...
+
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None: ...
     async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
         """Batch-fetch chunks by id. Missing ids are dropped silently.

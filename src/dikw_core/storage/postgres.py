@@ -308,6 +308,31 @@ class PostgresStorage:
                     )
             await conn.commit()
 
+    async def list_chunks_missing_embedding(
+        self, *, model: str
+    ) -> list[ChunkRecord]:
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
+                "FROM chunks "
+                "WHERE chunk_id NOT IN "
+                "(SELECT chunk_id FROM embed_meta WHERE model = %s) "
+                "ORDER BY chunk_id",
+                (model,),
+            )
+            rows = await cur.fetchall()
+        return [
+            ChunkRecord(
+                chunk_id=int(r[0]),
+                doc_id=r[1],
+                seq=int(r[2]),
+                start=int(r[3]),
+                end=int(r[4]),
+                text=r[5],
+            )
+            for r in rows
+        ]
+
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(

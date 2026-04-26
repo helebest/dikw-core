@@ -340,6 +340,49 @@ async def test_cache_partitioned_by_model(storage: Storage) -> None:
     assert got_m2[h] == pytest.approx([0.0, 1.0, 0.0, 0.0])
 
 
+async def test_list_chunks_missing_embedding(storage: Storage) -> None:
+    """Resume-scan: returns chunks without an embed_meta row for ``model``.
+
+    A chunk that's been embedded under a DIFFERENT model still counts
+    as "missing for model X" — model is part of the dedup key, the same
+    chunk text could legitimately be re-embedded under a new model.
+    """
+    doc = _make_doc("sources/scan.md")
+    await storage.put_content(doc.hash, "x" * 30)
+    await storage.upsert_document(doc)
+    chunk_ids = await storage.replace_chunks(
+        doc.doc_id,
+        [
+            ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=10, text="aaa"),
+            ChunkRecord(doc_id=doc.doc_id, seq=1, start=10, end=20, text="bbb"),
+            ChunkRecord(doc_id=doc.doc_id, seq=2, start=20, end=30, text="ccc"),
+        ],
+    )
+    # Embed chunk 0 under model "m1", chunk 1 under "m2"; chunk 2 unembedded.
+    try:
+        await storage.upsert_embeddings(
+            [
+                EmbeddingRow(
+                    chunk_id=chunk_ids[0], model="m1", embedding=[1.0, 0.0, 0.0, 0.0]
+                ),
+                EmbeddingRow(
+                    chunk_id=chunk_ids[1], model="m2", embedding=[0.0, 1.0, 0.0, 0.0]
+                ),
+            ]
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement embeddings")
+    missing = await storage.list_chunks_missing_embedding(model="m1")
+    missing_ids = {c.chunk_id for c in missing}
+    # Under m1: chunk 0 has it; chunks 1 + 2 don't.
+    assert missing_ids == {chunk_ids[1], chunk_ids[2]}
+    # Returned ChunkRecords carry the original text so the caller can
+    # re-embed without a separate fetch.
+    by_id = {c.chunk_id: c for c in missing}
+    assert by_id[chunk_ids[1]].text == "bbb"
+    assert by_id[chunk_ids[2]].text == "ccc"
+
+
 async def test_filesystem_cache_methods_raise_notsupported(
     tmp_path: Path,
 ) -> None:

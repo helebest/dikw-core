@@ -313,6 +313,17 @@ class FilesystemStorage:
         del rows
         raise NotSupported("filesystem backend doesn't implement embed_cache")
 
+    async def list_chunks_missing_embedding(
+        self, *, model: str
+    ) -> list[ChunkRecord]:
+        # In-memory scan: chunks present without an embed_meta row
+        # tagged for this model.
+        return [
+            chunk
+            for cid, chunk in sorted(self._chunks.items())
+            if self._embed_meta.get(cid) != model
+        ]
+
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         return self._chunks.get(chunk_id)
 

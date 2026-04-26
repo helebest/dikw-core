@@ -368,6 +368,33 @@ class SQLiteStorage:
 
         await asyncio.to_thread(_run)
 
+    async def list_chunks_missing_embedding(
+        self, *, model: str
+    ) -> list[ChunkRecord]:
+        def _run() -> list[ChunkRecord]:
+            conn = self._require_conn()
+            rows = conn.execute(
+                'SELECT chunk_id, doc_id, seq, start, "end", text '
+                "FROM chunks "
+                "WHERE chunk_id NOT IN "
+                "(SELECT chunk_id FROM embed_meta WHERE model = ?) "
+                "ORDER BY chunk_id",
+                (model,),
+            ).fetchall()
+            return [
+                ChunkRecord(
+                    chunk_id=r["chunk_id"],
+                    doc_id=r["doc_id"],
+                    seq=r["seq"],
+                    start=r["start"],
+                    end=r["end"],
+                    text=r["text"],
+                )
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_run)
+
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         def _run() -> ChunkRecord | None:
             conn = self._require_conn()

@@ -794,6 +794,7 @@ async def ingest(
                         multimodal_embedder,
                         to_embed,
                         model=mm_cfg.model,
+                        storage=storage,
                         batch_size=mm_cfg.batch,
                     ):
                         await storage.upsert_embeddings(batch)
@@ -816,6 +817,7 @@ async def ingest(
                     embedder,
                     to_embed,
                     model=cfg.provider.embedding_model,
+                    storage=storage,
                     batch_size=cfg.provider.embedding_batch_size,
                 ):
                     await storage.upsert_embeddings(batch)
@@ -1181,7 +1183,9 @@ async def _persist_wiki_page(
             ChunkToEmbed(chunk_id=cid, text=r.text)
             for cid, r in zip(chunk_ids, records, strict=True)
         ]
-        async for batch in embed_chunks(embedder, to_embed, model=embedding_model):
+        async for batch in embed_chunks(
+            embedder, to_embed, model=embedding_model, storage=storage
+        ):
             await storage.upsert_embeddings(batch)
 
     # Link graph — resolve against the current K-layer title index.

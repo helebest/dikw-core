@@ -248,3 +248,137 @@ async def test_api_ingest_resume_scan_picks_up_missing_embeds(
     )
     # Doc-level loop didn't add anything; resume scan did all the work.
     assert report.unchanged == 6
+
+
+# ---- C1-C3: embed_cache short-circuit inside embed_chunks ----------------
+
+
+async def test_embed_chunks_cold_fills_cache(tmp_path: Path) -> None:
+    """Cold run: cache empty → all chunks routed to provider → cache populated.
+
+    First ingest of a fresh corpus must call the provider for every
+    chunk and write the resulting vectors back to embed_cache so the
+    next run can short-circuit them.
+    """
+    wiki = _setup_multibatch_wiki(tmp_path, num_docs=4)
+    embedder = _CountingEmbedder()
+    report = await api.ingest(wiki, embedder=embedder)
+    assert report.embedded == 4
+    assert embedder.total_texts == 4, "every chunk routed to provider on cold run"
+    # Cache must now contain a row per chunk.
+    db = wiki / ".dikw" / "index.sqlite"
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        cache_count = conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0]
+    finally:
+        conn.close()
+    assert cache_count == 4
+
+
+async def test_embed_chunks_warm_reuses_cache_zero_provider_calls(
+    tmp_path: Path,
+) -> None:
+    """Direct ``embed_chunks`` test: pre-populated cache → 0 provider calls.
+
+    Builds a fresh in-memory ``SQLiteStorage``, pre-loads its
+    ``embed_cache`` with vectors for the chunk texts, then asks
+    ``embed_chunks`` to embed those chunks. Because every hash hits
+    the cache, the provider must NOT be called.
+    """
+    from dikw_core.eval.fake_embedder import FakeEmbeddings as _Inner
+    from dikw_core.schemas import CachedEmbeddingRow as _CachedRow
+    from dikw_core.storage.sqlite import SQLiteStorage
+
+    storage = SQLiteStorage(tmp_path / "warm.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    try:
+        chunks = _chunks(4)
+        # Pre-populate cache: compute the same hash embed_chunks will
+        # query, store FakeEmbeddings's deterministic vectors under it.
+        from dikw_core.data.backends.markdown import content_hash as _hash
+
+        seed = _Inner()
+        prep_vectors = await seed.embed(
+            [c.text for c in chunks], model="fake"
+        )
+        await storage.cache_embeddings(
+            [
+                _CachedRow(
+                    content_hash=_hash(c.text),
+                    model="fake",
+                    dim=len(v),
+                    embedding=v,
+                )
+                for c, v in zip(chunks, prep_vectors, strict=True)
+            ]
+        )
+
+        # Now ask embed_chunks to embed those same chunks. With cache
+        # hits on every hash, the provider must see zero calls.
+        warm = _CountingEmbedder()
+        rows: list[EmbeddingRow] = []
+        async for batch in embed_chunks(
+            warm, chunks, model="fake", storage=storage, batch_size=2
+        ):
+            rows.extend(batch)
+        assert warm.embed_calls == 0, (
+            f"provider was called {warm.embed_calls}x despite full cache hits"
+        )
+        assert len(rows) == 4
+        # Returned vectors must match the cached ones (cache wins).
+        for row, vec in zip(rows, prep_vectors, strict=True):
+            assert row.embedding == pytest.approx(vec)
+    finally:
+        await storage.close()
+
+
+async def test_embed_chunks_partial_cache_only_embeds_misses(
+    tmp_path: Path,
+) -> None:
+    """Direct ``embed_chunks`` test: half cached → provider sees only misses."""
+    from dikw_core.eval.fake_embedder import FakeEmbeddings as _Inner
+    from dikw_core.schemas import CachedEmbeddingRow as _CachedRow
+    from dikw_core.storage.sqlite import SQLiteStorage
+
+    storage = SQLiteStorage(tmp_path / "partial.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    try:
+        chunks = _chunks(6)
+        # Pre-populate cache for the FIRST 3 chunks only.
+        from dikw_core.data.backends.markdown import content_hash as _hash
+
+        seed = _Inner()
+        prep_vectors = await seed.embed(
+            [c.text for c in chunks[:3]], model="fake"
+        )
+        await storage.cache_embeddings(
+            [
+                _CachedRow(
+                    content_hash=_hash(c.text),
+                    model="fake",
+                    dim=len(v),
+                    embedding=v,
+                )
+                for c, v in zip(chunks[:3], prep_vectors, strict=True)
+            ]
+        )
+
+        embedder = _CountingEmbedder()
+        rows: list[EmbeddingRow] = []
+        async for batch in embed_chunks(
+            embedder, chunks, model="fake", storage=storage, batch_size=2
+        ):
+            rows.extend(batch)
+        # Provider only saw the 3 cache misses. Order preserved.
+        assert embedder.total_texts == 3, (
+            f"provider saw {embedder.total_texts} texts; expected 3 (cache misses)"
+        )
+        assert [r.chunk_id for r in rows] == [c.chunk_id for c in chunks]
+        # The 3 misses are now in cache too (write-back on success).
+        all_hashes = [_hash(c.text) for c in chunks]
+        cached_after = await storage.get_cached_embeddings(all_hashes, model="fake")
+        assert set(cached_after.keys()) == set(all_hashes)
+    finally:
+        await storage.close()

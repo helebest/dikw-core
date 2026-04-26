@@ -23,6 +23,7 @@ public-benchmark baselines (BEIR, CMTEB).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -58,6 +59,7 @@ EvalMode = RetrievalMode | Literal["all"]
 CacheMode = Literal["read_write", "rebuild", "off"]
 
 
+@functools.cache
 def _max_migration_number() -> int:
     """Highest numeric prefix in storage/migrations/sqlite/*.sql.
 
@@ -287,17 +289,21 @@ async def run_eval(
     effective_retrieval_cfg = retrieval_config or RetrievalConfig()
     modes = _resolve_modes(mode)
 
+    async def _build(target: Path) -> Path:
+        wiki = _materialise_wiki(
+            target,
+            spec,
+            provider_cfg=effective_provider_cfg,
+            retrieval_cfg=effective_retrieval_cfg,
+        )
+        _copy_corpus(spec.corpus_dir, wiki / "sources")
+        await api.ingest(wiki, embedder=effective_embedder)
+        return wiki
+
     if cache_mode == "off":
         # Original behaviour: throwaway temp dir, no cache touched.
         with tempfile.TemporaryDirectory(prefix="dikw-eval-") as tmp:
-            wiki = _materialise_wiki(
-                Path(tmp),
-                spec,
-                provider_cfg=effective_provider_cfg,
-                retrieval_cfg=effective_retrieval_cfg,
-            )
-            _copy_corpus(spec.corpus_dir, wiki / "sources")
-            await api.ingest(wiki, embedder=effective_embedder)
+            wiki = await _build(Path(tmp))
             per_mode = await _run_queries(
                 wiki,
                 spec,
@@ -324,24 +330,15 @@ async def run_eval(
             if partial_dir.exists():
                 shutil.rmtree(partial_dir)
 
-        if cache_dir.exists():
-            wiki = cache_dir / "wiki"
-        else:
+        if not cache_dir.exists():
             # Cache miss → build under .partial, atomic-rename on success.
             if partial_dir.exists():
                 shutil.rmtree(partial_dir)
             partial_dir.mkdir(parents=True)
-            wiki = _materialise_wiki(
-                partial_dir,
-                spec,
-                provider_cfg=effective_provider_cfg,
-                retrieval_cfg=effective_retrieval_cfg,
-            )
-            _copy_corpus(spec.corpus_dir, wiki / "sources")
-            await api.ingest(wiki, embedder=effective_embedder)
+            await _build(partial_dir)
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
             os.replace(partial_dir, cache_dir)
-            wiki = cache_dir / "wiki"
+        wiki = cache_dir / "wiki"
 
         per_mode = await _run_queries(
             wiki,

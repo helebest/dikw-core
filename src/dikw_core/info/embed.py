@@ -22,10 +22,9 @@ providers' per-request input caps.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ..data.backends.markdown import content_hash
 from ..providers import EmbeddingProvider, MultimodalEmbeddingProvider
@@ -37,11 +36,34 @@ from ..schemas import (
     ImageContent,
     MultimodalInput,
 )
-
-if TYPE_CHECKING:
-    from ..storage.base import Storage
+from ..storage.base import NotSupported, Storage
 
 logger = logging.getLogger(__name__)
+
+
+async def _safe_cache_lookup(
+    storage: Storage, hashes: Sequence[str], model: str
+) -> dict[str, list[float]]:
+    """Cache lookup that degrades to empty on NotSupported / transient faults."""
+    try:
+        return await storage.get_cached_embeddings(hashes, model=model)
+    except NotSupported:
+        return {}
+    except Exception as exc:
+        logger.warning("embed_cache lookup failed: %s; falling back", exc)
+        return {}
+
+
+async def _safe_cache_write(
+    storage: Storage, rows: Sequence[CachedEmbeddingRow]
+) -> None:
+    """Cache write-back that degrades to no-op on NotSupported / transient faults."""
+    try:
+        await storage.cache_embeddings(rows)
+    except NotSupported:
+        return
+    except Exception as exc:
+        logger.warning("embed_cache write failed: %s; ignoring", exc)
 
 
 @dataclass(frozen=True)
@@ -71,14 +93,13 @@ async def embed_chunks(
     cache entirely (no-op fast path for callers that don't have a wiki
     handy). Adapters that return ``NotSupported`` (filesystem) silently
     degrade to no-cache.
-
-    NOTE: when many cache hits land in one batch, the residual miss
-    batch sent to the provider can be small (under-utilizes per-request
-    capacity). Acceptable tradeoff: correctness beats throughput at
-    pre-alpha.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+
+    async def _call(misses: list[ChunkToEmbed]) -> list[list[float]]:
+        return await provider.embed([c.text for c in misses], model=model)
+
     total_batches = (len(chunks) + batch_size - 1) // batch_size
     for batch_idx, start in enumerate(range(0, len(chunks), batch_size)):
         batch = chunks[start : start + batch_size]
@@ -93,82 +114,12 @@ async def embed_chunks(
             start + len(batch) - 1,
         )
         yield await _embed_one_batch(
-            provider, batch, model=model, storage=storage
+            batch,
+            model=model,
+            storage=storage,
+            embed_misses=_call,
+            error_template="embedding provider returned {got} vectors for {want} texts",
         )
-
-
-async def _embed_one_batch(
-    provider: EmbeddingProvider,
-    batch: Sequence[ChunkToEmbed],
-    *,
-    model: str,
-    storage: Storage | None,
-) -> list[EmbeddingRow]:
-    """Embed one batch, consulting the cache when ``storage`` is given.
-
-    Returns rows in input order regardless of how hits/misses interleave.
-    """
-    hashes = [content_hash(c.text) for c in batch]
-    cached: dict[str, list[float]] = {}
-    if storage is not None:
-        try:
-            cached = await storage.get_cached_embeddings(hashes, model=model)
-        except Exception as exc:
-            # Storage adapters declaring NotSupported (filesystem) or
-            # raising on a transient cache fault must NOT abort the run
-            # — degrade to no-cache and log once per batch.
-            from ..storage.base import NotSupported
-
-            if isinstance(exc, NotSupported):
-                cached = {}
-            else:
-                logger.warning("embed_cache lookup failed: %s; falling back", exc)
-                cached = {}
-
-    miss_idx: list[int] = []
-    miss_texts: list[str] = []
-    for i, (chunk, h) in enumerate(zip(batch, hashes, strict=True)):
-        if h not in cached:
-            miss_idx.append(i)
-            miss_texts.append(chunk.text)
-
-    new_vectors: list[list[float]] = []
-    if miss_texts:
-        new_vectors = await provider.embed(miss_texts, model=model)
-        if len(new_vectors) != len(miss_texts):
-            raise RuntimeError(
-                f"embedding provider returned {len(new_vectors)} vectors for "
-                f"{len(miss_texts)} texts"
-            )
-
-    rows: list[EmbeddingRow] = []
-    miss_iter = iter(zip(miss_idx, new_vectors, strict=True))
-    next_miss = next(miss_iter, None)
-    new_cache_rows: list[CachedEmbeddingRow] = []
-    for i, (chunk, h) in enumerate(zip(batch, hashes, strict=True)):
-        if next_miss is not None and i == next_miss[0]:
-            vec = next_miss[1]
-            next_miss = next(miss_iter, None)
-            new_cache_rows.append(
-                CachedEmbeddingRow(
-                    content_hash=h, model=model, dim=len(vec), embedding=vec
-                )
-            )
-        else:
-            vec = cached[h]
-        rows.append(EmbeddingRow(chunk_id=chunk.chunk_id, model=model, embedding=vec))
-
-    if storage is not None and new_cache_rows:
-        try:
-            await storage.cache_embeddings(new_cache_rows)
-        except Exception as exc:
-            from ..storage.base import NotSupported
-
-            if not isinstance(exc, NotSupported):
-                logger.warning("embed_cache write failed: %s; ignoring", exc)
-            # NotSupported is silent — filesystem etc. don't keep a cache.
-
-    return rows
 
 
 async def embed_chunks_multimodal(
@@ -196,80 +147,74 @@ async def embed_chunks_multimodal(
         # otherwise.
         await provider.embed([], model=model)
         return
+
+    async def _call(misses: list[ChunkToEmbed]) -> list[list[float]]:
+        return await provider.embed(
+            [MultimodalInput(text=c.text) for c in misses], model=model
+        )
+
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start : start + batch_size]
-        yield await _embed_one_batch_multimodal(
-            provider, batch, model=model, storage=storage
+        yield await _embed_one_batch(
+            batch,
+            model=model,
+            storage=storage,
+            embed_misses=_call,
+            error_template="multimodal provider returned {got} vectors for {want} chunk inputs",
         )
 
 
-async def _embed_one_batch_multimodal(
-    provider: MultimodalEmbeddingProvider,
+async def _embed_one_batch(
     batch: Sequence[ChunkToEmbed],
     *,
     model: str,
     storage: Storage | None,
+    embed_misses: Callable[[list[ChunkToEmbed]], Awaitable[list[list[float]]]],
+    error_template: str,
 ) -> list[EmbeddingRow]:
-    """Multimodal-path counterpart of ``_embed_one_batch``.
+    """Embed one batch, consulting the cache when ``storage`` is given.
 
-    Same cache contract; only the provider call shape differs (wraps
-    text in ``MultimodalInput``).
+    Returns rows in input order regardless of how hits/misses interleave.
+    Within-batch duplicate hashes are sent to the provider once — vectors
+    for the same content+model are deterministic by cache contract, so
+    deduping saves a round-trip without changing semantics.
     """
     hashes = [content_hash(c.text) for c in batch]
     cached: dict[str, list[float]] = {}
     if storage is not None:
-        try:
-            cached = await storage.get_cached_embeddings(hashes, model=model)
-        except Exception as exc:
-            from ..storage.base import NotSupported
+        cached = await _safe_cache_lookup(storage, hashes, model)
 
-            if isinstance(exc, NotSupported):
-                cached = {}
-            else:
-                logger.warning("embed_cache lookup failed: %s; falling back", exc)
-                cached = {}
-
-    miss_idx: list[int] = []
-    miss_inputs: list[MultimodalInput] = []
-    for i, (chunk, h) in enumerate(zip(batch, hashes, strict=True)):
-        if h not in cached:
-            miss_idx.append(i)
-            miss_inputs.append(MultimodalInput(text=chunk.text))
+    miss_chunks: list[ChunkToEmbed] = []
+    miss_hashes: list[str] = []
+    queued: set[str] = set()
+    for chunk, h in zip(batch, hashes, strict=True):
+        if h in cached or h in queued:
+            continue
+        miss_chunks.append(chunk)
+        miss_hashes.append(h)
+        queued.add(h)
 
     new_vectors: list[list[float]] = []
-    if miss_inputs:
-        new_vectors = await provider.embed(miss_inputs, model=model)
-        if len(new_vectors) != len(miss_inputs):
+    if miss_chunks:
+        new_vectors = await embed_misses(miss_chunks)
+        if len(new_vectors) != len(miss_chunks):
             raise RuntimeError(
-                f"multimodal provider returned {len(new_vectors)} vectors for "
-                f"{len(miss_inputs)} chunk inputs"
+                error_template.format(got=len(new_vectors), want=len(miss_chunks))
             )
 
-    rows: list[EmbeddingRow] = []
-    new_cache_rows: list[CachedEmbeddingRow] = []
-    miss_iter = iter(zip(miss_idx, new_vectors, strict=True))
-    next_miss = next(miss_iter, None)
-    for i, (chunk, h) in enumerate(zip(batch, hashes, strict=True)):
-        if next_miss is not None and i == next_miss[0]:
-            vec = next_miss[1]
-            next_miss = next(miss_iter, None)
-            new_cache_rows.append(
-                CachedEmbeddingRow(
-                    content_hash=h, model=model, dim=len(vec), embedding=vec
-                )
-            )
-        else:
-            vec = cached[h]
-        rows.append(EmbeddingRow(chunk_id=chunk.chunk_id, model=model, embedding=vec))
+    cached.update(zip(miss_hashes, new_vectors, strict=True))
+    new_cache_rows = [
+        CachedEmbeddingRow(content_hash=h, model=model, dim=len(v), embedding=v)
+        for h, v in zip(miss_hashes, new_vectors, strict=True)
+    ]
+
+    rows = [
+        EmbeddingRow(chunk_id=c.chunk_id, model=model, embedding=cached[h])
+        for c, h in zip(batch, hashes, strict=True)
+    ]
 
     if storage is not None and new_cache_rows:
-        try:
-            await storage.cache_embeddings(new_cache_rows)
-        except Exception as exc:
-            from ..storage.base import NotSupported
-
-            if not isinstance(exc, NotSupported):
-                logger.warning("embed_cache write failed: %s; ignoring", exc)
+        await _safe_cache_write(storage, new_cache_rows)
 
     return rows
 

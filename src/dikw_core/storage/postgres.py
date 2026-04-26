@@ -13,7 +13,6 @@ SQLite adapter.
 from __future__ import annotations
 
 import math
-import struct
 import time
 from collections.abc import Iterable, Sequence
 from importlib import resources
@@ -41,6 +40,7 @@ from ..schemas import (
     WisdomKind,
     WisdomStatus,
 )
+from ._vec_codec import deserialize_vec, serialize_vec
 from .base import NotSupported, StorageError
 
 if TYPE_CHECKING:  # imports happen in connect() so base install works without pg deps
@@ -279,33 +279,29 @@ class PostgresStorage:
                 (model, hashes),
             )
             rows = await cur.fetchall()
-        # Same struct-packed float32 LE bytes as the sqlite adapter so
-        # the cross-backend cache contract is byte-exact.
-        return {
-            str(r[0]): list(struct.unpack(f"{int(r[1])}f", bytes(r[2])))
-            for r in rows
-        }
+        # Cross-backend byte-exact contract: see storage/_vec_codec.py.
+        return {str(r[0]): deserialize_vec(bytes(r[2]), int(r[1])) for r in rows}
 
     async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
         if not rows:
             return
         now = time.time()
+        params = [
+            (r.content_hash, r.model, r.dim, serialize_vec(list(r.embedding)), now)
+            for r in rows
+        ]
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
-                for r in rows:
-                    blob = struct.pack(
-                        f"{r.dim}f", *list(r.embedding)
-                    )
-                    # ON CONFLICT DO NOTHING — idempotent contract; vectors
-                    # for the same (content_hash, model) are deterministic
-                    # so we never overwrite.
-                    await cur.execute(
-                        "INSERT INTO embed_cache"
-                        "(content_hash, model, dim, embedding, created_ts) "
-                        "VALUES (%s, %s, %s, %s, %s) "
-                        "ON CONFLICT (content_hash, model) DO NOTHING",
-                        (r.content_hash, r.model, r.dim, blob, now),
-                    )
+                # ON CONFLICT DO NOTHING — idempotent contract; vectors
+                # for the same (content_hash, model) are deterministic
+                # so we never overwrite.
+                await cur.executemany(
+                    "INSERT INTO embed_cache"
+                    "(content_hash, model, dim, embedding, created_ts) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (content_hash, model) DO NOTHING",
+                    params,
+                )
             await conn.commit()
 
     async def list_chunks_missing_embedding(

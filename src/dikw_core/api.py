@@ -27,6 +27,7 @@ import logging
 import struct
 import time
 import zlib
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +74,7 @@ from .schemas import (
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
+    EmbeddingRow,
     EmbeddingVersion,
     ImageContent,
     Layer,
@@ -168,6 +170,21 @@ WIKI_INIT_FILES: dict[str, str] = {
     ".dikw/.gitkeep": "",
     ".gitignore": ".dikw/\n",
 }
+
+
+async def _consume_embedding_stream(
+    stream: AsyncIterator[list[EmbeddingRow]], storage: Storage
+) -> int:
+    """Drain an embed_chunks-style stream, upserting each batch as it arrives.
+
+    Per-batch upsert is the durability guarantee: a mid-flight provider
+    failure leaves prior batches on disk instead of throwing them away.
+    """
+    embedded = 0
+    async for batch in stream:
+        await storage.upsert_embeddings(batch)
+        embedded += len(batch)
+    return embedded
 
 
 # ---- public result models ------------------------------------------------
@@ -788,17 +805,17 @@ async def ingest(
                 # chunk-vec write with a clear warning so ingest doesn't
                 # die. v1 limitation: per-version chunk vec tables land
                 # in v1.5.
-                embedded = 0
                 try:
-                    async for batch in embed_chunks_multimodal(
-                        multimodal_embedder,
-                        to_embed,
-                        model=mm_cfg.model,
-                        storage=storage,
-                        batch_size=mm_cfg.batch,
-                    ):
-                        await storage.upsert_embeddings(batch)
-                        embedded += len(batch)
+                    embedded = await _consume_embedding_stream(
+                        embed_chunks_multimodal(
+                            multimodal_embedder,
+                            to_embed,
+                            model=mm_cfg.model,
+                            storage=storage,
+                            batch_size=mm_cfg.batch,
+                        ),
+                        storage,
+                    )
                     report = _replace(report, embedded=embedded)
                 except StorageError as e:
                     if "dim mismatch" in str(e):
@@ -812,16 +829,16 @@ async def ingest(
                     else:
                         raise
             elif embedder is not None:
-                embedded = 0
-                async for batch in embed_chunks(
-                    embedder,
-                    to_embed,
-                    model=cfg.provider.embedding_model,
-                    storage=storage,
-                    batch_size=cfg.provider.embedding_batch_size,
-                ):
-                    await storage.upsert_embeddings(batch)
-                    embedded += len(batch)
+                embedded = await _consume_embedding_stream(
+                    embed_chunks(
+                        embedder,
+                        to_embed,
+                        model=cfg.provider.embedding_model,
+                        storage=storage,
+                        batch_size=cfg.provider.embedding_batch_size,
+                    ),
+                    storage,
+                )
                 report = _replace(report, embedded=embedded)
 
         # Asset embeddings — only when multimodal is configured AND a real
@@ -1183,10 +1200,12 @@ async def _persist_wiki_page(
             ChunkToEmbed(chunk_id=cid, text=r.text)
             for cid, r in zip(chunk_ids, records, strict=True)
         ]
-        async for batch in embed_chunks(
-            embedder, to_embed, model=embedding_model, storage=storage
-        ):
-            await storage.upsert_embeddings(batch)
+        await _consume_embedding_stream(
+            embed_chunks(
+                embedder, to_embed, model=embedding_model, storage=storage
+            ),
+            storage,
+        )
 
     # Link graph — resolve against the current K-layer title index.
     k_docs = list(await storage.list_documents(layer=Layer.WIKI, active=True))

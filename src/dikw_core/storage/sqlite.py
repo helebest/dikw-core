@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-import struct
 import time
 from collections.abc import Iterable, Sequence
 from importlib import resources
@@ -44,19 +43,11 @@ from ..schemas import (
     WisdomKind,
     WisdomStatus,
 )
+from ._vec_codec import deserialize_vec as _deserialize_vec
+from ._vec_codec import serialize_vec as _serialize_vec
 from .base import NotSupported, StorageError
 
 MIGRATIONS_PACKAGE = "dikw_core.storage.migrations.sqlite"
-
-
-def _serialize_vec(values: list[float]) -> bytes:
-    """Pack a float32 vector for sqlite-vec."""
-    return struct.pack(f"{len(values)}f", *values)
-
-
-def _deserialize_vec(blob: bytes, dim: int) -> list[float]:
-    """Unpack a float32 vector blob (inverse of ``_serialize_vec``)."""
-    return list(struct.unpack(f"{dim}f", blob))
 
 
 class SQLiteStorage:

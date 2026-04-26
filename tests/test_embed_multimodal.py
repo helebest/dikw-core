@@ -30,10 +30,6 @@ def _asset(asset_id: str, *, stored_path: str, mime: str = "image/png") -> Asset
         stored_path=stored_path,
         original_paths=["x.png"],
         bytes=1,
-        width=None,
-        height=None,
-        caption=None,
-        caption_model=None,
         created_ts=time.time(),
     )
 

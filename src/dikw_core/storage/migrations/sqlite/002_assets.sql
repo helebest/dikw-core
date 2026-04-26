@@ -15,10 +15,7 @@ CREATE TABLE IF NOT EXISTS assets (
     stored_path    TEXT NOT NULL,            -- relative to project_root
     original_paths TEXT NOT NULL,            -- JSON list of source-side names
     bytes          INTEGER NOT NULL,
-    width          INTEGER,
-    height         INTEGER,
-    caption        TEXT,                     -- v1: NULL (Phase 1.5 backfills via VisionProvider)
-    caption_model  TEXT,
+    media_meta     TEXT,                     -- per-kind JSON; image: {"kind":"image","width":...,"height":...}
     created_ts     REAL NOT NULL
 );
 

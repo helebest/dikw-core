@@ -25,6 +25,7 @@ from dikw_core.schemas import (
     DocumentRecord,
     EmbeddingRow,
     EmbeddingVersion,
+    ImageMediaMeta,
     Layer,
     LinkRecord,
     LinkType,
@@ -645,7 +646,13 @@ async def test_wisdom_lifecycle(storage: Storage) -> None:
 # ---- Multimedia assets + chunk_asset_refs (Phase F) ----------------------
 
 
-def _make_asset(asset_id: str, *, original_path: str = "img.png") -> AssetRecord:
+def _make_asset(
+    asset_id: str,
+    *,
+    original_path: str = "img.png",
+    width: int | None = 100,
+    height: int | None = 80,
+) -> AssetRecord:
     return AssetRecord(
         asset_id=asset_id,
         hash=asset_id,
@@ -654,10 +661,7 @@ def _make_asset(asset_id: str, *, original_path: str = "img.png") -> AssetRecord
         stored_path=f"assets/{asset_id[:2]}/{asset_id[:8]}-img.png",
         original_paths=[original_path],
         bytes=42,
-        width=100,
-        height=80,
-        caption=None,
-        caption_model=None,
+        media_meta=ImageMediaMeta(width=width, height=height),
         created_ts=time.time(),
     )
 
@@ -674,7 +678,39 @@ async def test_asset_upsert_and_get_roundtrip(storage: Storage) -> None:
     assert fetched.asset_id == a.asset_id
     assert fetched.mime == "image/png"
     assert fetched.original_paths == ["img.png"]
-    assert fetched.width == 100
+    assert isinstance(fetched.media_meta, ImageMediaMeta)
+    assert fetched.media_meta.width == 100
+    assert fetched.media_meta.height == 80
+
+
+async def test_asset_media_meta_none_round_trips(storage: Storage) -> None:
+    """SVG / WebP / probe-miss path stores media_meta=None — the round-trip
+    must preserve None rather than coerce to an empty ImageMediaMeta()."""
+    a = _make_asset("dead0001" + "0" * 56).model_copy(update={"media_meta": None})
+    try:
+        await storage.upsert_asset(a)
+    except NotSupported:
+        pytest.skip("backend doesn't implement assets yet")
+
+    fetched = await storage.get_asset(a.asset_id)
+    assert fetched is not None
+    assert fetched.media_meta is None
+
+
+async def test_asset_media_meta_partial_dimensions(storage: Storage) -> None:
+    """Some image probes recover only one dimension — the JSON round-trip
+    must keep the missing side as None (not 0, not absent-as-error)."""
+    a = _make_asset("dead0002" + "0" * 56, width=120, height=None)
+    try:
+        await storage.upsert_asset(a)
+    except NotSupported:
+        pytest.skip("backend doesn't implement assets yet")
+
+    fetched = await storage.get_asset(a.asset_id)
+    assert fetched is not None
+    assert isinstance(fetched.media_meta, ImageMediaMeta)
+    assert fetched.media_meta.width == 120
+    assert fetched.media_meta.height is None
 
 
 async def test_asset_upsert_replaces_with_new_metadata(storage: Storage) -> None:

@@ -12,6 +12,7 @@ SQLite adapter.
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from collections.abc import Iterable, Sequence
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from ..schemas import (
     AssetEmbeddingRow,
+    AssetKind,
     AssetRecord,
     AssetVecHit,
     CachedEmbeddingRow,
@@ -39,6 +41,8 @@ from ..schemas import (
     WisdomItem,
     WisdomKind,
     WisdomStatus,
+    dump_media_meta,
+    load_media_meta,
 )
 from ._vec_codec import deserialize_vec, serialize_vec
 from .base import NotSupported, StorageError
@@ -663,17 +667,57 @@ class PostgresStorage:
             last_wiki_log_ts=float(last) if last is not None else None,
         )
 
-    # ---- multimedia assets (Phase 5: not yet implemented) ----------------
+    # ---- multimedia assets ------------------------------------------------
     #
-    # Postgres adapter's asset / version-aware embedding support lands in a
-    # follow-up phase. Until then every new method raises NotSupported so
-    # callers (and contract tests) can detect and skip cleanly.
+    # ``upsert_asset`` / ``get_asset`` mirror the SQLite adapter against the
+    # ``assets`` table from migrations/postgres/003_assets.sql. The chunk↔
+    # asset bridge, embed-version table, and per-version pgvector tables
+    # are still Phase 5 work — those methods continue to raise
+    # ``NotSupported`` so contract tests skip them cleanly.
 
     async def upsert_asset(self, asset: AssetRecord) -> None:
-        raise NotSupported("postgres adapter: assets not implemented yet")
+        async with self._acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO assets (
+                        asset_id, hash, kind, mime, stored_path,
+                        original_paths, bytes, media_meta, created_ts
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (asset_id) DO UPDATE SET
+                        hash = EXCLUDED.hash,
+                        kind = EXCLUDED.kind,
+                        mime = EXCLUDED.mime,
+                        stored_path = EXCLUDED.stored_path,
+                        original_paths = EXCLUDED.original_paths,
+                        bytes = EXCLUDED.bytes,
+                        media_meta = EXCLUDED.media_meta
+                    """,
+                    (
+                        asset.asset_id,
+                        asset.hash,
+                        asset.kind.value,
+                        asset.mime,
+                        asset.stored_path,
+                        json.dumps(asset.original_paths),
+                        asset.bytes,
+                        dump_media_meta(asset.media_meta),
+                        asset.created_ts,
+                    ),
+                )
+            await conn.commit()
 
     async def get_asset(self, asset_id: str) -> AssetRecord | None:
-        raise NotSupported("postgres adapter: assets not implemented yet")
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT asset_id, hash, kind, mime, stored_path, "
+                "original_paths, bytes, media_meta, created_ts "
+                "FROM assets WHERE asset_id = %s",
+                (asset_id,),
+            )
+            row = await cur.fetchone()
+        return _row_to_asset(row) if row else None
 
     async def replace_chunk_asset_refs(
         self, chunk_id: int, refs: Sequence[ChunkAssetRef]
@@ -813,6 +857,20 @@ def _row_to_document(row: Any) -> DocumentRecord:
         mtime=float(row[4] or 0.0),
         layer=Layer(row[5]),
         active=bool(row[6]),
+    )
+
+
+def _row_to_asset(row: Any) -> AssetRecord:
+    return AssetRecord(
+        asset_id=row[0],
+        hash=row[1],
+        kind=AssetKind(row[2]),
+        mime=row[3],
+        stored_path=row[4],
+        original_paths=json.loads(row[5]),
+        bytes=int(row[6]),
+        media_meta=load_media_meta(row[7]),
+        created_ts=float(row[8]),
     )
 
 

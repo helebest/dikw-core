@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ..schemas import AssetKind, AssetRecord, AssetRef
+from ..schemas import AssetKind, AssetRecord, AssetRef, ImageMediaMeta
 from .hashing import hash_bytes, hash_file
 
 logger = logging.getLogger(__name__)
@@ -403,10 +403,11 @@ async def materialize_asset(
         stored_path=rel_stored,
         original_paths=[ref.original_path],
         bytes=len(data),
-        width=width,
-        height=height,
-        caption=None,
-        caption_model=None,
+        media_meta=(
+            ImageMediaMeta(width=width, height=height)
+            if (width is not None or height is not None)
+            else None
+        ),
         created_ts=time.time(),
     )
     await upsert_asset(record)

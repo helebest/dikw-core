@@ -595,12 +595,29 @@ a matching image even when the chunk text contains no matching tokens.
 The asset channel is opt-in — installations without multimodal config
 get the original 2-leg behavior unchanged.
 
-**Scope (v1) vs. roadmap.** v1 ships images only. Caption regeneration
-via a `VisionProvider` (currently `assets.caption` stays NULL), audio /
-video transcription with timestamp anchors, true mixed text+image
-chunk encoding, and image-bytes-in-prompt LLM synthesis are all
-designed to slot into the existing schema (`AssetKind` is an enum
-with reserved values, `chunk_asset_refs` PK is `(chunk_id, ord)` not
-tied to text-only assumptions, `LLMProvider` can grow an `images`
-parameter behind a capability flag) but are deferred to v1.5/v2.
+**Per-kind metadata via `media_meta`.** Modality-specific fields
+(image dimensions today; audio sample rate / channels and video
+duration / fps tomorrow) live in a single `media_meta TEXT` column
+holding JSON validated through a pydantic discriminated union
+(`Annotated[ImageMediaMeta | …, Field(discriminator="kind")]`). This
+keeps the `assets` table schema modality-agnostic — adding audio /
+video doesn't require an `ALTER TABLE`, just a new `MediaMeta` sibling
+on the DTO and a new `AssetKind` enum member. The same JSON wire
+format is shared between SQLite (`TEXT`) and Postgres (`TEXT`, with a
+non-breaking upgrade path to `JSONB` if/when query-side JSON ops earn
+their keep).
+
+**Scope (v1) vs. roadmap.** v1 ships images only. Audio / video
+transcription with timestamp anchors, true mixed text+image chunk
+encoding, image-bytes-in-prompt LLM synthesis, and content-generation
+features such as automatic captions are all designed to slot into the
+existing seams without re-shaping `assets` itself. `AssetKind` is an
+enum with reserved values, `MediaMeta` extends through pydantic
+discriminator dispatch, `chunk_asset_refs` PK is `(chunk_id, ord)`
+not tied to text-only assumptions, and `LLMProvider` can grow an
+`images` parameter behind a capability flag. Generated content (e.g.
+LLM captions or transcripts) is **not** intended to live as columns
+on `assets`; it lands in a dedicated provider-driven side table or as
+K-layer wiki annotations so a re-run with a different model is a pure
+write, never a schema change.
 

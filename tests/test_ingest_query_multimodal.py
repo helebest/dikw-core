@@ -135,8 +135,9 @@ async def test_query_returns_asset_refs_for_image_bearing_chunk(
         )
         asset = hits_with_assets[0].asset_refs[0]
         assert asset.mime == "image/png"
-        assert asset.width == 640
-        assert asset.height == 480
+        assert asset.media_meta is not None
+        assert asset.media_meta.width == 640
+        assert asset.media_meta.height == 480
         assert asset.stored_path.startswith("assets/")
         assert "arch" in asset.stored_path
     finally:

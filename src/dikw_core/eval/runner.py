@@ -23,10 +23,13 @@ public-benchmark baselines (BEIR, CMTEB).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any, Literal, get_args
 
@@ -51,6 +54,70 @@ from .metrics import (
 SEARCH_LIMIT = 100
 
 EvalMode = RetrievalMode | Literal["all"]
+
+CacheMode = Literal["read_write", "rebuild", "off"]
+
+
+def _max_migration_number() -> int:
+    """Highest numeric prefix in storage/migrations/sqlite/*.sql.
+
+    Used in the eval-snapshot cache key so any schema bump invalidates
+    every snapshot automatically — opening an old snapshot under a new
+    code version would otherwise risk a broken migration.
+    """
+    pkg = resources.files("dikw_core.storage.migrations.sqlite")
+    nums: list[int] = []
+    for r in pkg.iterdir():
+        if r.is_file() and r.name.endswith(".sql"):
+            head = r.name.split("_", 1)[0]
+            if head.isdigit():
+                nums.append(int(head))
+    return max(nums) if nums else 0
+
+
+def _default_snapshot_root() -> Path:
+    """Resolve ``<repo>/evals/.cache/snapshots/`` by walking up from this file.
+
+    Used as the default cache root when ``run_eval(cache_root=None)``.
+    Raises ``EvalError`` if ``evals/`` can't be located (e.g., the wheel
+    install layout has no sibling ``evals/``); the caller should pass an
+    explicit ``cache_root`` in that case or use ``cache_mode="off"``.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "evals").is_dir():
+            return parent / "evals" / ".cache" / "snapshots"
+    raise EvalError(
+        "could not locate evals/ root for snapshot cache; pass cache_root "
+        "explicitly or use cache_mode='off'"
+    )
+
+
+def _corpus_cache_key(spec: DatasetSpec, model: str, dim: int | None) -> str:
+    """Stable cache key combining dataset name, model, dim, corpus hash, schema.
+
+    Algorithm:
+      1. sha256 over sorted (rel_posix_path, file_bytes) pairs in corpus_dir
+      2. take first 8 hex chars (collision ~1/4B per dataset+model — acceptable;
+         ``cache_mode="rebuild"`` is the escape hatch)
+      3. format: ``{dataset}/{model}__{dim}__{digest}__mig{N}``
+
+    ``as_posix()`` keeps the key cross-platform (Windows / Linux yield
+    the same digest). Embedding ``dim=None`` is rendered as ``0`` so the
+    key is still usable when the provider doesn't pin a dim.
+    """
+    h = hashlib.sha256()
+    for path in sorted(spec.corpus_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        h.update(path.relative_to(spec.corpus_dir).as_posix().encode("utf-8"))
+        h.update(b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    digest = h.hexdigest()[:8]
+    dim_str = str(dim if dim is not None else 0)
+    mig_n = _max_migration_number()
+    return f"{spec.name}/{model}__{dim_str}__{digest}__mig{mig_n}"
 
 
 class EvalError(RuntimeError):
@@ -178,6 +245,8 @@ async def run_eval(
     retrieval_config: RetrievalConfig | None = None,
     mode: EvalMode = "hybrid",
     raw_dump_path: Path | None = None,
+    cache_mode: CacheMode = "read_write",
+    cache_root: Path | None = None,
 ) -> EvalReport:
     """Run a single dataset end-to-end; return metrics + diagnostics.
 
@@ -218,16 +287,61 @@ async def run_eval(
     effective_retrieval_cfg = retrieval_config or RetrievalConfig()
     modes = _resolve_modes(mode)
 
-    with tempfile.TemporaryDirectory(prefix="dikw-eval-") as tmp:
-        wiki = _materialise_wiki(
-            Path(tmp),
+    if cache_mode == "off":
+        # Original behaviour: throwaway temp dir, no cache touched.
+        with tempfile.TemporaryDirectory(prefix="dikw-eval-") as tmp:
+            wiki = _materialise_wiki(
+                Path(tmp),
+                spec,
+                provider_cfg=effective_provider_cfg,
+                retrieval_cfg=effective_retrieval_cfg,
+            )
+            _copy_corpus(spec.corpus_dir, wiki / "sources")
+            await api.ingest(wiki, embedder=effective_embedder)
+            per_mode = await _run_queries(
+                wiki,
+                spec,
+                embedder=effective_embedder,
+                embedding_model=effective_provider_cfg.embedding_model,
+                modes=modes,
+            )
+    else:
+        # read_write or rebuild: persistent snapshot under cache_root.
+        root = cache_root if cache_root is not None else _default_snapshot_root()
+        key = _corpus_cache_key(
             spec,
-            provider_cfg=effective_provider_cfg,
-            retrieval_cfg=effective_retrieval_cfg,
+            effective_provider_cfg.embedding_model,
+            effective_provider_cfg.embedding_dimensions,
         )
-        _copy_corpus(spec.corpus_dir, wiki / "sources")
+        cache_dir = root / key
+        partial_dir = cache_dir.parent / (cache_dir.name + ".partial")
 
-        await api.ingest(wiki, embedder=effective_embedder)
+        if cache_mode == "rebuild":
+            # Force cold rebuild: drop both the final and any half-built
+            # leftover from a prior crashed run.
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+            if partial_dir.exists():
+                shutil.rmtree(partial_dir)
+
+        if cache_dir.exists():
+            wiki = cache_dir / "wiki"
+        else:
+            # Cache miss → build under .partial, atomic-rename on success.
+            if partial_dir.exists():
+                shutil.rmtree(partial_dir)
+            partial_dir.mkdir(parents=True)
+            wiki = _materialise_wiki(
+                partial_dir,
+                spec,
+                provider_cfg=effective_provider_cfg,
+                retrieval_cfg=effective_retrieval_cfg,
+            )
+            _copy_corpus(spec.corpus_dir, wiki / "sources")
+            await api.ingest(wiki, embedder=effective_embedder)
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(partial_dir, cache_dir)
+            wiki = cache_dir / "wiki"
 
         per_mode = await _run_queries(
             wiki,

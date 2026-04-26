@@ -255,8 +255,8 @@ async def test_hybrid_search_returns_hits(tmp_path) -> None:
         to_embed.extend(ChunkToEmbed(chunk_id=cid, text=r.text) for cid, r in zip(ids, records, strict=True))
 
     embedder = FakeEmbeddings()
-    rows = await embed_chunks(embedder, to_embed, model="fake")
-    await storage.upsert_embeddings(rows)
+    async for batch in embed_chunks(embedder, to_embed, model="fake"):
+        await storage.upsert_embeddings(batch)
 
     searcher = HybridSearcher(storage, embedder, embedding_model="fake")
     hits = await searcher.search("reciprocal rank fusion", limit=3)
@@ -312,8 +312,8 @@ async def _populate_fixture_corpus(storage):
         )
 
     embedder = FakeEmbeddings()
-    rows = await embed_chunks(embedder, to_embed, model="fake")
-    await storage.upsert_embeddings(rows)
+    async for batch in embed_chunks(embedder, to_embed, model="fake"):
+        await storage.upsert_embeddings(batch)
     return embedder
 
 
@@ -493,8 +493,8 @@ async def _populate_multi_chunk_corpus(storage: SQLiteStorage) -> FakeEmbeddings
         )
 
     embedder = FakeEmbeddings()
-    rows = await embed_chunks(embedder, to_embed, model="fake")
-    await storage.upsert_embeddings(rows)
+    async for batch in embed_chunks(embedder, to_embed, model="fake"):
+        await storage.upsert_embeddings(batch)
     return embedder
 
 

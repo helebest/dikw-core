@@ -752,14 +752,11 @@ async def ingest(
 
         # Chunk-text embeddings: prefer the multimodal pathway when both an
         # mm provider and a configured multimodal version are available.
+        # Streaming consume: each batch is upserted as soon as the provider
+        # returns it, so a mid-flight crash keeps the prior batches' vectors
+        # on disk instead of throwing away the entire run's API spend.
         if to_embed:
             if multimodal_embedder is not None and mm_cfg is not None:
-                rows = await embed_chunks_multimodal(
-                    multimodal_embedder,
-                    to_embed,
-                    model=mm_cfg.model,
-                    batch_size=mm_cfg.batch,
-                )
                 # The legacy chunks_vec table is dim-locked at first
                 # write; if the user previously indexed with a different
                 # text-embedding dim, writing mm vectors here would
@@ -768,9 +765,17 @@ async def ingest(
                 # chunk-vec write with a clear warning so ingest doesn't
                 # die. v1 limitation: per-version chunk vec tables land
                 # in v1.5.
+                embedded = 0
                 try:
-                    await storage.upsert_embeddings(rows)
-                    report = _replace(report, embedded=len(rows))
+                    async for batch in embed_chunks_multimodal(
+                        multimodal_embedder,
+                        to_embed,
+                        model=mm_cfg.model,
+                        batch_size=mm_cfg.batch,
+                    ):
+                        await storage.upsert_embeddings(batch)
+                        embedded += len(batch)
+                    report = _replace(report, embedded=embedded)
                 except StorageError as e:
                     if "dim mismatch" in str(e):
                         logger.warning(
@@ -783,14 +788,16 @@ async def ingest(
                     else:
                         raise
             elif embedder is not None:
-                rows = await embed_chunks(
+                embedded = 0
+                async for batch in embed_chunks(
                     embedder,
                     to_embed,
                     model=cfg.provider.embedding_model,
                     batch_size=cfg.provider.embedding_batch_size,
-                )
-                await storage.upsert_embeddings(rows)
-                report = _replace(report, embedded=len(rows))
+                ):
+                    await storage.upsert_embeddings(batch)
+                    embedded += len(batch)
+                report = _replace(report, embedded=embedded)
 
         # Asset embeddings — only when multimodal is configured AND a real
         # mm provider is available. New-this-run assets only; previously
@@ -1151,8 +1158,8 @@ async def _persist_wiki_page(
             ChunkToEmbed(chunk_id=cid, text=r.text)
             for cid, r in zip(chunk_ids, records, strict=True)
         ]
-        rows = await embed_chunks(embedder, to_embed, model=embedding_model)
-        await storage.upsert_embeddings(rows)
+        async for batch in embed_chunks(embedder, to_embed, model=embedding_model):
+            await storage.upsert_embeddings(batch)
 
     # Link graph — resolve against the current K-layer title index.
     k_docs = list(await storage.list_documents(layer=Layer.WIKI, active=True))

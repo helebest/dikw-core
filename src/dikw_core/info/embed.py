@@ -22,7 +22,7 @@ providers' per-request input caps.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,11 +50,16 @@ async def embed_chunks(
     *,
     model: str,
     batch_size: int = 64,
-) -> list[EmbeddingRow]:
-    """Embed ``chunks`` in fixed-size batches and return ``EmbeddingRow``s in order."""
+) -> AsyncIterator[list[EmbeddingRow]]:
+    """Embed ``chunks`` in fixed-size batches.
+
+    Streams one ``list[EmbeddingRow]`` per provider call so the caller
+    can persist each batch immediately. This keeps mid-flight failures
+    cheap: prior batches are already on disk when the next API call
+    raises (or the user kills the process).
+    """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    rows: list[EmbeddingRow] = []
     total_batches = (len(chunks) + batch_size - 1) // batch_size
     for batch_idx, start in enumerate(range(0, len(chunks), batch_size)):
         batch = chunks[start : start + batch_size]
@@ -75,11 +80,10 @@ async def embed_chunks(
                 f"embedding provider returned {len(vectors)} vectors for "
                 f"{len(batch)} texts"
             )
-        rows.extend(
+        yield [
             EmbeddingRow(chunk_id=c.chunk_id, model=model, embedding=v)
             for c, v in zip(batch, vectors, strict=True)
-        )
-    return rows
+        ]
 
 
 async def embed_chunks_multimodal(
@@ -88,21 +92,23 @@ async def embed_chunks_multimodal(
     *,
     model: str,
     batch_size: int = 16,
-) -> list[EmbeddingRow]:
+) -> AsyncIterator[list[EmbeddingRow]]:
     """Embed text chunks via the multimodal provider (text-only inputs).
 
-    Uses the same EmbeddingRow output shape as the legacy text pathway
-    so chunk vectors can land in the same ``chunks_vec`` table — switching
-    a corpus to a multimodal model in v1 is a config change at the
-    factory level; the storage shape doesn't move.
+    Streams one ``list[EmbeddingRow]`` per batch — same contract shape
+    as ``embed_chunks``. Uses the same EmbeddingRow output so chunk
+    vectors can land in the same ``chunks_vec`` table — switching a
+    corpus to a multimodal model in v1 is a config change at the factory
+    level; the storage shape doesn't move.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if not chunks:
-        # Still notify the provider so its last_inputs reflects an empty call.
+        # Still notify the provider so its last_inputs reflects an empty
+        # call (a legacy contract some tests rely on). Empty generator
+        # otherwise.
         await provider.embed([], model=model)
-        return []
-    rows: list[EmbeddingRow] = []
+        return
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start : start + batch_size]
         inputs = [MultimodalInput(text=c.text) for c in batch]
@@ -112,11 +118,10 @@ async def embed_chunks_multimodal(
                 f"multimodal provider returned {len(vectors)} vectors for "
                 f"{len(batch)} chunk inputs"
             )
-        rows.extend(
+        yield [
             EmbeddingRow(chunk_id=c.chunk_id, model=model, embedding=v)
             for c, v in zip(batch, vectors, strict=True)
-        )
-    return rows
+        ]
 
 
 async def embed_assets(

@@ -28,7 +28,8 @@ The fix landed across four commits on `feat/fts5-cjk-tokenizer`:
    runs `jieba.cut_for_search` over CJK runs only (regex-sliced so
    ASCII identifiers like `retrieval.rrf_k` pass through intact).
 2. `RetrievalConfig.cjk_tokenizer: "none" | "jieba"` (default
-   `"none"` — existing ASCII-only wikis unchanged).
+   `"none"` at v2 baseline time — flipped to `"jieba"` in PR #24
+   on 2026-04-26 so T7's chunker fix ships without config).
 3. `SQLiteStorage` preprocesses title + body before the FTS insert;
    `_sanitize_fts` preprocesses the query identically. Locked at
    first ingest (same shape as `embedding_dimensions`).

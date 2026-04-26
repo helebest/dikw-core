@@ -146,11 +146,13 @@ SQLite FTS5's default `unicode61` tokenizer splits CJK one character
 at a time, which collapses BM25 on Chinese / Japanese into single-char
 IDF. Measured on CMTEB T2Retrieval: **nDCG@10 = 0.031**, 91.7% of
 queries zero-recall — vs ≈ 0.5–0.65 on the published Anserini+jieba
-baselines. If your corpus contains Chinese (or Japanese Han text), set:
+baselines. The default is now `jieba`, so a fresh wiki picks up the
+right tokenizer with no config; pin it explicitly only if you need
+the legacy whitespace path:
 
 ```yaml
 retrieval:
-  cjk_tokenizer: jieba       # default is "none"
+  cjk_tokenizer: jieba       # default since 2026-04 (was "none")
 ```
 
 …and install the optional extra:

@@ -36,12 +36,15 @@ src/dikw_core/
 ├── schemas.py             cross-layer DTOs
 ├── data/
 │   ├── sources.py         source-file scanner (glob + ignore)
+│   ├── assets.py          image/asset materialization (sha-streamed)
+│   ├── hashing.py         streaming + in-memory SHA-256 helpers
 │   └── backends/          registry-dispatched parsers
 │       ├── base.py        SourceBackend Protocol + registry
 │       ├── markdown.py    .md / .markdown
 │       └── html.py        .html / .htm (stdlib-only)
 ├── info/
 │   ├── chunk.py           heading-aware paragraph chunker
+│   ├── tokenize.py        CJK-aware preprocessing + token counting
 │   ├── embed.py           batched embedding worker
 │   └── search.py          RRF-fused FTS + vector hybrid
 ├── knowledge/

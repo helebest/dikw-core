@@ -26,6 +26,7 @@ from ..schemas import (
     AssetKind,
     AssetRecord,
     AssetVecHit,
+    CachedEmbeddingRow,
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
@@ -51,6 +52,11 @@ MIGRATIONS_PACKAGE = "dikw_core.storage.migrations.sqlite"
 def _serialize_vec(values: list[float]) -> bytes:
     """Pack a float32 vector for sqlite-vec."""
     return struct.pack(f"{len(values)}f", *values)
+
+
+def _deserialize_vec(blob: bytes, dim: int) -> list[float]:
+    """Unpack a float32 vector blob (inverse of ``_serialize_vec``)."""
+    return list(struct.unpack(f"{dim}f", blob))
 
 
 class SQLiteStorage:
@@ -309,6 +315,55 @@ class SQLiteStorage:
                     conn.execute(
                         "INSERT OR REPLACE INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
                         (r.chunk_id, _serialize_vec(r.embedding)),
+                    )
+
+        await asyncio.to_thread(_run)
+
+    async def get_cached_embeddings(
+        self, content_hashes: Sequence[str], *, model: str
+    ) -> dict[str, list[float]]:
+        hashes = list(content_hashes)
+        if not hashes:
+            return {}
+
+        def _run() -> dict[str, list[float]]:
+            conn = self._require_conn()
+            placeholders = ",".join("?" * len(hashes))
+            rows = conn.execute(
+                f"SELECT content_hash, dim, embedding FROM embed_cache "
+                f"WHERE model = ? AND content_hash IN ({placeholders})",
+                [model, *hashes],
+            ).fetchall()
+            return {
+                str(r["content_hash"]): _deserialize_vec(r["embedding"], int(r["dim"]))
+                for r in rows
+            }
+
+        return await asyncio.to_thread(_run)
+
+    async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
+        if not rows:
+            return
+
+        def _run() -> None:
+            conn = self._require_conn()
+            now = time.time()
+            with conn:
+                for r in rows:
+                    # INSERT OR IGNORE: idempotent on (content_hash, model);
+                    # the cache contract is "vectors for the same content+model
+                    # are deterministic", so we never overwrite.
+                    conn.execute(
+                        "INSERT OR IGNORE INTO embed_cache"
+                        "(content_hash, model, dim, embedding, created_ts) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            r.content_hash,
+                            r.model,
+                            r.dim,
+                            _serialize_vec(list(r.embedding)),
+                            now,
+                        ),
                     )
 
         await asyncio.to_thread(_run)

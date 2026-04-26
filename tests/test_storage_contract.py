@@ -19,6 +19,7 @@ from dikw_core.schemas import (
     AssetEmbeddingRow,
     AssetKind,
     AssetRecord,
+    CachedEmbeddingRow,
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
@@ -246,6 +247,126 @@ async def test_vec_search_skips_zero_vector_embeddings(storage: Storage) -> None
     # No hit should carry NaN/None — the float() coercion would crash.
     for h in hits:
         assert h.distance == h.distance, f"NaN distance: {h}"  # NaN != NaN
+
+
+# ---- embed_cache (chunk-level content-hash cache) ------------------------
+#
+# Skip cleanly on backends that don't implement the cache (filesystem,
+# pre-alpha). The cache is keyed by (sha256(chunk.text), model) and
+# decouples embedding reuse from chunks.chunk_id, so re-ingest under
+# replace_chunks's delete-and-reinsert semantics doesn't lose API spend
+# on byte-identical chunks.
+
+
+async def test_get_cached_embeddings_empty_input_no_roundtrip(
+    storage: Storage,
+) -> None:
+    """Empty input list must short-circuit before touching the DB."""
+    try:
+        result = await storage.get_cached_embeddings([], model="any-model")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed cache")
+    assert result == {}
+
+
+async def test_cache_then_get_roundtrip(storage: Storage) -> None:
+    """cache_embeddings → get_cached_embeddings returns the same vectors."""
+    rows = [
+        CachedEmbeddingRow(
+            content_hash="a" * 64, model="m1", dim=4, embedding=[1.0, 0.0, 0.0, 0.0]
+        ),
+        CachedEmbeddingRow(
+            content_hash="b" * 64, model="m1", dim=4, embedding=[0.0, 1.0, 0.0, 0.0]
+        ),
+        CachedEmbeddingRow(
+            content_hash="c" * 64, model="m1", dim=4, embedding=[0.0, 0.0, 1.0, 0.0]
+        ),
+    ]
+    try:
+        await storage.cache_embeddings(rows)
+        got = await storage.get_cached_embeddings(
+            ["a" * 64, "b" * 64, "c" * 64, "z" * 64], model="m1"
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed cache")
+    assert set(got.keys()) == {"a" * 64, "b" * 64, "c" * 64}
+    assert got["a" * 64] == pytest.approx([1.0, 0.0, 0.0, 0.0])
+    assert got["b" * 64] == pytest.approx([0.0, 1.0, 0.0, 0.0])
+    assert got["c" * 64] == pytest.approx([0.0, 0.0, 1.0, 0.0])
+
+
+async def test_cache_embeddings_idempotent(storage: Storage) -> None:
+    """Inserting the same (content_hash, model) twice is a no-op.
+
+    Vectors for the same content + model are deterministic by definition,
+    so the second insert must NOT raise and MUST NOT clobber the first
+    (the cache is a content-addressed lookup table, not a version log).
+    """
+    row = CachedEmbeddingRow(
+        content_hash="d" * 64, model="m1", dim=4, embedding=[0.5, 0.5, 0.5, 0.5]
+    )
+    try:
+        await storage.cache_embeddings([row])
+        await storage.cache_embeddings([row])  # second call: no-op, no exception
+        got = await storage.get_cached_embeddings(["d" * 64], model="m1")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed cache")
+    assert got["d" * 64] == pytest.approx([0.5, 0.5, 0.5, 0.5])
+
+
+async def test_cache_partitioned_by_model(storage: Storage) -> None:
+    """Same content_hash under two different models = two independent rows.
+
+    Lookup must filter by model so a content-hash can carry vectors for
+    multiple embedding models in parallel without collision.
+    """
+    h = "e" * 64
+    try:
+        await storage.cache_embeddings(
+            [
+                CachedEmbeddingRow(
+                    content_hash=h, model="m1", dim=4, embedding=[1.0, 0.0, 0.0, 0.0]
+                ),
+                CachedEmbeddingRow(
+                    content_hash=h, model="m2", dim=4, embedding=[0.0, 1.0, 0.0, 0.0]
+                ),
+            ]
+        )
+        got_m1 = await storage.get_cached_embeddings([h], model="m1")
+        got_m2 = await storage.get_cached_embeddings([h], model="m2")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed cache")
+    assert got_m1[h] == pytest.approx([1.0, 0.0, 0.0, 0.0])
+    assert got_m2[h] == pytest.approx([0.0, 1.0, 0.0, 0.0])
+
+
+async def test_filesystem_cache_methods_raise_notsupported(
+    tmp_path: Path,
+) -> None:
+    """Filesystem adapter declines the embed cache (pre-alpha).
+
+    Documents the contract explicitly, separate from the parametrized
+    cache tests above (which skip rather than fail).
+    """
+    fs = FilesystemStorage(tmp_path / ".dikw" / "fs", embed=True)
+    await fs.connect()
+    await fs.migrate()
+    try:
+        with pytest.raises(NotSupported):
+            await fs.get_cached_embeddings(["a" * 64], model="m1")
+        with pytest.raises(NotSupported):
+            await fs.cache_embeddings(
+                [
+                    CachedEmbeddingRow(
+                        content_hash="a" * 64,
+                        model="m1",
+                        dim=4,
+                        embedding=[1.0, 0.0, 0.0, 0.0],
+                    )
+                ]
+            )
+    finally:
+        await fs.close()
 
 
 async def test_link_graph(storage: Storage) -> None:

@@ -37,6 +37,7 @@ from ..schemas import (
     AssetEmbeddingRow,
     AssetRecord,
     AssetVecHit,
+    CachedEmbeddingRow,
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
@@ -299,6 +300,18 @@ class FilesystemStorage:
                     "utf-8",
                 )
             await self._flush_embed_meta()
+
+    async def get_cached_embeddings(
+        self, content_hashes: Sequence[str], *, model: str
+    ) -> dict[str, list[float]]:
+        # Pre-alpha: filesystem backend doesn't carry an embed cache;
+        # re-ingest re-pays the provider. Add when needed.
+        del content_hashes, model
+        raise NotSupported("filesystem backend doesn't implement embed_cache")
+
+    async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
+        del rows
+        raise NotSupported("filesystem backend doesn't implement embed_cache")
 
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         return self._chunks.get(chunk_id)

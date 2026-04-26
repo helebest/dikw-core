@@ -423,3 +423,171 @@ async def test_run_eval_ranked_docs_deduped_after_chunk_level_fusion(
     assert len(ranked) == len(set(ranked)), (
         f"ranked stems must be unique after dedup; got {ranked}"
     )
+
+
+# ---- Slice 6: eval-snapshot cache (D1-D5) -------------------------------
+
+
+async def test_corpus_cache_key_is_deterministic_and_path_stable(
+    tmp_path: Path,
+) -> None:
+    """D1: same corpus → same key; touching content → key changes; key
+    uses POSIX paths so Windows + Linux yield the same digest.
+    """
+    from dikw_core.eval.runner import _corpus_cache_key
+
+    ds = _write_dataset(
+        tmp_path,
+        queries=[("foo", ["alpha"])],
+    )
+    spec = load_dataset(ds)
+    k1 = _corpus_cache_key(spec, "fake", 64)
+    k2 = _corpus_cache_key(spec, "fake", 64)
+    assert k1 == k2
+
+    # Mutate one file's bytes — key must change.
+    (ds / "corpus" / "alpha.md").write_text(
+        "# Alpha\n\nDifferent body now.\n", encoding="utf-8"
+    )
+    k3 = _corpus_cache_key(spec, "fake", 64)
+    assert k3 != k1
+
+    # Different model → different key.
+    k4 = _corpus_cache_key(spec, "other-model", 64)
+    assert k4 != k1
+    # Format sanity.
+    assert k1.startswith("toy/fake__64__")
+    assert "__mig" in k1
+
+
+async def test_eval_snapshot_cache_hit_skips_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2: second run_eval against the same spec skips api.ingest.
+
+    Spy on ``api.ingest`` via monkeypatch; expect call_count == 1
+    across two run_eval calls (cold then warm).
+    """
+    from dikw_core import api as api_mod
+    from dikw_core.eval import runner as runner_mod
+
+    ds = _write_dataset(
+        tmp_path / "ds",
+        queries=[("alpha", ["alpha"])],
+    )
+    spec = load_dataset(ds)
+    cache_root = tmp_path / "cache"
+
+    ingest_calls = 0
+    real_ingest = api_mod.ingest
+
+    async def spy_ingest(*args: object, **kwargs: object) -> object:
+        nonlocal ingest_calls
+        ingest_calls += 1
+        return await real_ingest(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod.api, "ingest", spy_ingest)
+
+    await run_eval(spec, cache_root=cache_root)
+    assert ingest_calls == 1
+    await run_eval(spec, cache_root=cache_root)
+    assert ingest_calls == 1, "warm run must not re-ingest"
+    # Snapshot dir landed at the expected location.
+    snapshot_dirs = list((cache_root / "toy").glob("fake__*"))
+    assert len(snapshot_dirs) == 1
+    assert (snapshot_dirs[0] / "wiki" / ".dikw" / "index.sqlite").exists()
+
+
+async def test_eval_cache_mode_rebuild_forces_cold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: cache_mode='rebuild' deletes any existing snapshot and rebuilds."""
+    from dikw_core import api as api_mod
+    from dikw_core.eval import runner as runner_mod
+
+    ds = _write_dataset(
+        tmp_path / "ds",
+        queries=[("alpha", ["alpha"])],
+    )
+    spec = load_dataset(ds)
+    cache_root = tmp_path / "cache"
+
+    ingest_calls = 0
+    real_ingest = api_mod.ingest
+
+    async def spy_ingest(*args: object, **kwargs: object) -> object:
+        nonlocal ingest_calls
+        ingest_calls += 1
+        return await real_ingest(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod.api, "ingest", spy_ingest)
+
+    await run_eval(spec, cache_root=cache_root)  # cold
+    assert ingest_calls == 1
+    await run_eval(spec, cache_root=cache_root, cache_mode="rebuild")  # rebuild
+    assert ingest_calls == 2, "rebuild must re-ingest"
+    await run_eval(spec, cache_root=cache_root)  # warm again
+    assert ingest_calls == 2, "post-rebuild warm hits the new snapshot"
+
+
+async def test_eval_cache_mode_off_neither_reads_nor_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: cache_mode='off' uses tempdir (legacy path); never touches cache_root."""
+    from dikw_core import api as api_mod
+    from dikw_core.eval import runner as runner_mod
+
+    ds = _write_dataset(
+        tmp_path / "ds",
+        queries=[("alpha", ["alpha"])],
+    )
+    spec = load_dataset(ds)
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()  # exists, but empty
+    assert list(cache_root.iterdir()) == []
+
+    ingest_calls = 0
+    real_ingest = api_mod.ingest
+
+    async def spy_ingest(*args: object, **kwargs: object) -> object:
+        nonlocal ingest_calls
+        ingest_calls += 1
+        return await real_ingest(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod.api, "ingest", spy_ingest)
+
+    await run_eval(spec, cache_root=cache_root, cache_mode="off")
+    await run_eval(spec, cache_root=cache_root, cache_mode="off")
+    assert ingest_calls == 2, "off mode must ingest every run"
+    # cache_root never touched.
+    assert list(cache_root.iterdir()) == []
+
+
+async def test_eval_cache_mid_build_crash_leaves_partial_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D5: when api.ingest raises mid-build, .partial/ survives, <key>/ does not."""
+    from dikw_core.eval import runner as runner_mod
+
+    ds = _write_dataset(
+        tmp_path / "ds",
+        queries=[("alpha", ["alpha"])],
+    )
+    spec = load_dataset(ds)
+    cache_root = tmp_path / "cache"
+
+    async def boom_ingest(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("simulated mid-build crash")
+
+    monkeypatch.setattr(runner_mod.api, "ingest", boom_ingest)
+
+    with pytest.raises(RuntimeError, match="simulated mid-build crash"):
+        await run_eval(spec, cache_root=cache_root)
+
+    # Final snapshot dir must NOT exist (atomic rename never happened).
+    final_dirs = list((cache_root / "toy").glob("fake__*"))
+    final_dirs = [d for d in final_dirs if not d.name.endswith(".partial")]
+    assert final_dirs == [], f"partial state leaked into final cache: {final_dirs}"
+    # .partial/ should still be there for diagnostics.
+    partial_dirs = list((cache_root / "toy").glob("fake__*.partial"))
+    assert len(partial_dirs) == 1

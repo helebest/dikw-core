@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import typer
 from rich.console import Console
@@ -463,6 +463,28 @@ def eval_cmd(
             ),
         ),
     ] = None,
+    rebuild_cache: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild-cache",
+            help=(
+                "Force a cold rebuild of the eval-snapshot cache "
+                "(evals/.cache/snapshots/) for each dataset. Mutually "
+                "exclusive with --no-cache."
+            ),
+        ),
+    ] = False,
+    no_cache: Annotated[
+        bool,
+        typer.Option(
+            "--no-cache",
+            help=(
+                "Disable the eval-snapshot cache for this run; ingest "
+                "into a tempdir and discard. Mutually exclusive with "
+                "--rebuild-cache."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Run retrieval-quality evaluation against one or every packaged dataset."""
     # Lazy imports: keep top-of-module `from . import api` light for the
@@ -489,6 +511,15 @@ def eval_cmd(
             f"got {retrieval!r}"
         )
         raise typer.Exit(code=2)
+
+    if rebuild_cache and no_cache:
+        console.print(
+            "[red]error:[/red] --rebuild-cache and --no-cache are mutually exclusive"
+        )
+        raise typer.Exit(code=2)
+    cache_mode: Literal["read_write", "rebuild", "off"] = (
+        "rebuild" if rebuild_cache else "off" if no_cache else "read_write"
+    )
 
     # --dump-raw needs both legs' rankings to be useful; warn-and-ignore
     # in single-mode runs rather than silently writing a file the sweep
@@ -559,6 +590,7 @@ def eval_cmd(
                     retrieval_config=retrieval_cfg,
                     mode=retrieval,  # type: ignore[arg-type]
                     raw_dump_path=dump_raw,
+                    cache_mode=cache_mode,
                 )
             )
         except Exception as e:  # runner-level error — report, fail this dataset

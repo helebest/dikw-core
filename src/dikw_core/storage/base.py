@@ -20,6 +20,7 @@ from ..schemas import (
     AssetEmbeddingRow,
     AssetRecord,
     AssetVecHit,
+    CachedEmbeddingRow,
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
@@ -97,6 +98,45 @@ class Storage(Protocol):
         embeddings with persisted rows."""
         ...
     async def upsert_embeddings(self, rows: Sequence[EmbeddingRow]) -> None: ...
+
+    # Content-hash embed cache. Decouples vector reuse from chunks.chunk_id
+    # so re-ingest under replace_chunks's delete-and-reinsert semantics
+    # doesn't lose API spend on byte-identical chunk text. Adapters that
+    # don't implement the cache raise ``NotSupported``.
+    async def get_cached_embeddings(
+        self, content_hashes: Sequence[str], *, model: str
+    ) -> dict[str, list[float]]:
+        """Batch lookup keyed by ``sha256(chunk.text)``.
+
+        Returns a dict mapping content_hash -> vector for HITS only;
+        missing hashes are misses (absent from the dict). Empty input
+        is a no-op returning an empty dict.
+        """
+        ...
+
+    async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
+        """Idempotent batch insert.
+
+        ``(content_hash, model)`` is the primary key; collisions are
+        no-ops (do NOT overwrite — vectors for the same content + model
+        must be deterministic). Empty input is a no-op.
+        """
+        ...
+
+    async def list_chunks_missing_embedding(
+        self, *, model: str
+    ) -> list[ChunkRecord]:
+        """Chunks present in storage with no ``embed_meta`` row for ``model``.
+
+        Used by the resume-scan path in ``api.ingest``: after a mid-flight
+        crash the doc-level shortcut on retry skips docs whose hash already
+        landed, but their chunks may have only partially embedded. This
+        method surfaces the missing tail so the caller can re-run them
+        (cache hits make most of those free; only true misses re-pay
+        the provider).
+        """
+        ...
+
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None: ...
     async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
         """Batch-fetch chunks by id. Missing ids are dropped silently.

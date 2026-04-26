@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-import struct
 import time
 from collections.abc import Iterable, Sequence
 from importlib import resources
@@ -26,6 +25,7 @@ from ..schemas import (
     AssetKind,
     AssetRecord,
     AssetVecHit,
+    CachedEmbeddingRow,
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
@@ -43,14 +43,11 @@ from ..schemas import (
     WisdomKind,
     WisdomStatus,
 )
+from ._vec_codec import deserialize_vec as _deserialize_vec
+from ._vec_codec import serialize_vec as _serialize_vec
 from .base import NotSupported, StorageError
 
 MIGRATIONS_PACKAGE = "dikw_core.storage.migrations.sqlite"
-
-
-def _serialize_vec(values: list[float]) -> bytes:
-    """Pack a float32 vector for sqlite-vec."""
-    return struct.pack(f"{len(values)}f", *values)
 
 
 class SQLiteStorage:
@@ -312,6 +309,82 @@ class SQLiteStorage:
                     )
 
         await asyncio.to_thread(_run)
+
+    async def get_cached_embeddings(
+        self, content_hashes: Sequence[str], *, model: str
+    ) -> dict[str, list[float]]:
+        hashes = list(content_hashes)
+        if not hashes:
+            return {}
+
+        def _run() -> dict[str, list[float]]:
+            conn = self._require_conn()
+            placeholders = ",".join("?" * len(hashes))
+            rows = conn.execute(
+                f"SELECT content_hash, dim, embedding FROM embed_cache "
+                f"WHERE model = ? AND content_hash IN ({placeholders})",
+                [model, *hashes],
+            ).fetchall()
+            return {
+                str(r["content_hash"]): _deserialize_vec(r["embedding"], int(r["dim"]))
+                for r in rows
+            }
+
+        return await asyncio.to_thread(_run)
+
+    async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
+        if not rows:
+            return
+
+        def _run() -> None:
+            conn = self._require_conn()
+            now = time.time()
+            with conn:
+                for r in rows:
+                    # INSERT OR IGNORE: idempotent on (content_hash, model);
+                    # the cache contract is "vectors for the same content+model
+                    # are deterministic", so we never overwrite.
+                    conn.execute(
+                        "INSERT OR IGNORE INTO embed_cache"
+                        "(content_hash, model, dim, embedding, created_ts) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            r.content_hash,
+                            r.model,
+                            r.dim,
+                            _serialize_vec(list(r.embedding)),
+                            now,
+                        ),
+                    )
+
+        await asyncio.to_thread(_run)
+
+    async def list_chunks_missing_embedding(
+        self, *, model: str
+    ) -> list[ChunkRecord]:
+        def _run() -> list[ChunkRecord]:
+            conn = self._require_conn()
+            rows = conn.execute(
+                'SELECT chunk_id, doc_id, seq, start, "end", text '
+                "FROM chunks "
+                "WHERE chunk_id NOT IN "
+                "(SELECT chunk_id FROM embed_meta WHERE model = ?) "
+                "ORDER BY chunk_id",
+                (model,),
+            ).fetchall()
+            return [
+                ChunkRecord(
+                    chunk_id=r["chunk_id"],
+                    doc_id=r["doc_id"],
+                    seq=r["seq"],
+                    start=r["start"],
+                    end=r["end"],
+                    text=r["text"],
+                )
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_run)
 
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         def _run() -> ChunkRecord | None:

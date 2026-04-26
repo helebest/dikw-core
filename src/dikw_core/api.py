@@ -27,6 +27,7 @@ import logging
 import struct
 import time
 import zlib
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +74,7 @@ from .schemas import (
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
+    EmbeddingRow,
     EmbeddingVersion,
     ImageContent,
     Layer,
@@ -168,6 +170,21 @@ WIKI_INIT_FILES: dict[str, str] = {
     ".dikw/.gitkeep": "",
     ".gitignore": ".dikw/\n",
 }
+
+
+async def _consume_embedding_stream(
+    stream: AsyncIterator[list[EmbeddingRow]], storage: Storage
+) -> int:
+    """Drain an embed_chunks-style stream, upserting each batch as it arrives.
+
+    Per-batch upsert is the durability guarantee: a mid-flight provider
+    failure leaves prior batches on disk instead of throwing them away.
+    """
+    embedded = 0
+    async for batch in stream:
+        await storage.upsert_embeddings(batch)
+        embedded += len(batch)
+    return embedded
 
 
 # ---- public result models ------------------------------------------------
@@ -750,16 +767,36 @@ async def ingest(
                 chunks=report.chunks + len(chunk_records),
             )
 
+        # Resume scan: pick up chunks that landed in storage during a
+        # prior crashed run but never got their embedding written. The
+        # doc-level shortcut above skips docs whose body_hash matched
+        # storage, so without this scan a half-embedded run can NEVER
+        # finish — its remaining chunks are invisible to the per-doc
+        # loop. The cache lookup in slice 5 makes this nearly free for
+        # chunks whose text is already cached; for true misses (the
+        # tail that crashed mid-flight) we re-pay the provider.
+        if embedder is not None or multimodal_embedder is not None:
+            active_model = (
+                mm_cfg.model
+                if multimodal_embedder is not None and mm_cfg is not None
+                else cfg.provider.embedding_model
+            )
+            already_queued_ids = {c.chunk_id for c in to_embed}
+            missing = await storage.list_chunks_missing_embedding(model=active_model)
+            for chunk in missing:
+                if chunk.chunk_id is None or chunk.chunk_id in already_queued_ids:
+                    continue
+                to_embed.append(
+                    ChunkToEmbed(chunk_id=chunk.chunk_id, text=chunk.text)
+                )
+
         # Chunk-text embeddings: prefer the multimodal pathway when both an
         # mm provider and a configured multimodal version are available.
+        # Streaming consume: each batch is upserted as soon as the provider
+        # returns it, so a mid-flight crash keeps the prior batches' vectors
+        # on disk instead of throwing away the entire run's API spend.
         if to_embed:
             if multimodal_embedder is not None and mm_cfg is not None:
-                rows = await embed_chunks_multimodal(
-                    multimodal_embedder,
-                    to_embed,
-                    model=mm_cfg.model,
-                    batch_size=mm_cfg.batch,
-                )
                 # The legacy chunks_vec table is dim-locked at first
                 # write; if the user previously indexed with a different
                 # text-embedding dim, writing mm vectors here would
@@ -769,8 +806,17 @@ async def ingest(
                 # die. v1 limitation: per-version chunk vec tables land
                 # in v1.5.
                 try:
-                    await storage.upsert_embeddings(rows)
-                    report = _replace(report, embedded=len(rows))
+                    embedded = await _consume_embedding_stream(
+                        embed_chunks_multimodal(
+                            multimodal_embedder,
+                            to_embed,
+                            model=mm_cfg.model,
+                            storage=storage,
+                            batch_size=mm_cfg.batch,
+                        ),
+                        storage,
+                    )
+                    report = _replace(report, embedded=embedded)
                 except StorageError as e:
                     if "dim mismatch" in str(e):
                         logger.warning(
@@ -783,14 +829,17 @@ async def ingest(
                     else:
                         raise
             elif embedder is not None:
-                rows = await embed_chunks(
-                    embedder,
-                    to_embed,
-                    model=cfg.provider.embedding_model,
-                    batch_size=cfg.provider.embedding_batch_size,
+                embedded = await _consume_embedding_stream(
+                    embed_chunks(
+                        embedder,
+                        to_embed,
+                        model=cfg.provider.embedding_model,
+                        storage=storage,
+                        batch_size=cfg.provider.embedding_batch_size,
+                    ),
+                    storage,
                 )
-                await storage.upsert_embeddings(rows)
-                report = _replace(report, embedded=len(rows))
+                report = _replace(report, embedded=embedded)
 
         # Asset embeddings — only when multimodal is configured AND a real
         # mm provider is available. New-this-run assets only; previously
@@ -1151,8 +1200,12 @@ async def _persist_wiki_page(
             ChunkToEmbed(chunk_id=cid, text=r.text)
             for cid, r in zip(chunk_ids, records, strict=True)
         ]
-        rows = await embed_chunks(embedder, to_embed, model=embedding_model)
-        await storage.upsert_embeddings(rows)
+        await _consume_embedding_stream(
+            embed_chunks(
+                embedder, to_embed, model=embedding_model, storage=storage
+            ),
+            storage,
+        )
 
     # Link graph — resolve against the current K-layer title index.
     k_docs = list(await storage.list_documents(layer=Layer.WIKI, active=True))

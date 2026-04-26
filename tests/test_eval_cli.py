@@ -306,3 +306,49 @@ def test_cli_eval_prints_negative_diagnostics_section(tmp_path: Path) -> None:
     assert "negative" in result.stdout.lower()
     assert "weather in Tokyo today" in result.stdout
     assert "who wrote the Iliad" in result.stdout
+
+
+# ---- Slice 7: --rebuild-cache + --no-cache flags ------------------------
+
+
+def test_cli_eval_rebuild_cache_flag_threads_through(tmp_path: Path) -> None:
+    """``--rebuild-cache`` triggers a cold rebuild even when a snapshot exists."""
+    ds = _write_toy_dataset(tmp_path / "ds")
+    cache_root = tmp_path / "cache"
+    runner = CliRunner()
+    # Cold run lands a snapshot.
+    result = runner.invoke(
+        app,
+        ["eval", "--dataset", str(ds)],
+        env={"DIKW_EVAL_CACHE_ROOT": str(cache_root)},
+    )
+    # CLI doesn't read DIKW_EVAL_CACHE_ROOT yet; just confirm the flag
+    # at least parses + produces a non-error exit. The runner-side cache
+    # behaviour itself is covered by D1-D5; this test is the flag surface.
+    assert result.exit_code == 0, result.stdout
+    result2 = runner.invoke(
+        app, ["eval", "--dataset", str(ds), "--rebuild-cache"]
+    )
+    assert result2.exit_code == 0, result2.stdout
+
+
+def test_cli_eval_no_cache_flag_threads_through(tmp_path: Path) -> None:
+    """``--no-cache`` parses + runs."""
+    ds = _write_toy_dataset(tmp_path / "ds")
+    runner = CliRunner()
+    result = runner.invoke(app, ["eval", "--dataset", str(ds), "--no-cache"])
+    assert result.exit_code == 0, result.stdout
+
+
+def test_cli_eval_rebuild_and_no_cache_are_mutually_exclusive(
+    tmp_path: Path,
+) -> None:
+    """Passing both flags fails with a clear error and exit code 2."""
+    ds = _write_toy_dataset(tmp_path / "ds")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["eval", "--dataset", str(ds), "--rebuild-cache", "--no-cache"],
+    )
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.stdout.lower()

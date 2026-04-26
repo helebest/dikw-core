@@ -13,6 +13,7 @@ SQLite adapter.
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Iterable, Sequence
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Literal
@@ -21,6 +22,7 @@ from ..schemas import (
     AssetEmbeddingRow,
     AssetRecord,
     AssetVecHit,
+    CachedEmbeddingRow,
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
@@ -38,6 +40,7 @@ from ..schemas import (
     WisdomKind,
     WisdomStatus,
 )
+from ._vec_codec import deserialize_vec, serialize_vec
 from .base import NotSupported, StorageError
 
 if TYPE_CHECKING:  # imports happen in connect() so base install works without pg deps
@@ -108,11 +111,15 @@ class PostgresStorage:
 
     async def migrate(self) -> None:
         # Extensions + schema are created in ``connect()`` so the pool can
-        # register pgvector. Migrations here just apply tables/indexes.
-        sql_text = self._load_migration_sql()
+        # register pgvector. Migrations here just apply tables/indexes;
+        # apply every *.sql file under MIGRATIONS_PACKAGE in sorted order
+        # so additions like 002_embed_cache.sql land automatically (mirrors
+        # the sqlite adapter's discovery).
+        scripts = self._load_migration_scripts()
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql_text)
+                for sql_text in scripts:
+                    await cur.execute(sql_text)
             await conn.commit()
         # Restore the vector dim (if we've indexed before).
         await self._load_embedding_dim()
@@ -262,6 +269,69 @@ class PostgresStorage:
                         (row.chunk_id, list(row.embedding)),
                     )
             await conn.commit()
+
+    async def get_cached_embeddings(
+        self, content_hashes: Sequence[str], *, model: str
+    ) -> dict[str, list[float]]:
+        hashes = list(content_hashes)
+        if not hashes:
+            return {}
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT content_hash, dim, embedding FROM embed_cache "
+                "WHERE model = %s AND content_hash = ANY(%s)",
+                (model, hashes),
+            )
+            rows = await cur.fetchall()
+        # Cross-backend byte-exact contract: see storage/_vec_codec.py.
+        return {str(r[0]): deserialize_vec(bytes(r[2]), int(r[1])) for r in rows}
+
+    async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
+        if not rows:
+            return
+        now = time.time()
+        params = [
+            (r.content_hash, r.model, r.dim, serialize_vec(list(r.embedding)), now)
+            for r in rows
+        ]
+        async with self._acquire() as conn:
+            async with conn.cursor() as cur:
+                # ON CONFLICT DO NOTHING — idempotent contract; vectors
+                # for the same (content_hash, model) are deterministic
+                # so we never overwrite.
+                await cur.executemany(
+                    "INSERT INTO embed_cache"
+                    "(content_hash, model, dim, embedding, created_ts) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (content_hash, model) DO NOTHING",
+                    params,
+                )
+            await conn.commit()
+
+    async def list_chunks_missing_embedding(
+        self, *, model: str
+    ) -> list[ChunkRecord]:
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
+                "FROM chunks "
+                "WHERE chunk_id NOT IN "
+                "(SELECT chunk_id FROM embed_meta WHERE model = %s) "
+                "ORDER BY chunk_id",
+                (model,),
+            )
+            rows = await cur.fetchall()
+        return [
+            ChunkRecord(
+                chunk_id=int(r[0]),
+                doc_id=r[1],
+                seq=int(r[2]),
+                start=int(r[3]),
+                end=int(r[4]),
+                text=r[5],
+            )
+            for r in rows
+        ]
 
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         async with self._acquire() as conn, conn.cursor() as cur:
@@ -662,12 +732,14 @@ class PostgresStorage:
             raise StorageError("PostgresStorage is not connected; call `connect()` first")
         return _ConnectionContext(self._pool, self._schema)
 
-    def _load_migration_sql(self) -> str:
-        return (
-            resources.files(MIGRATIONS_PACKAGE)
-            .joinpath("001_init.sql")
-            .read_text(encoding="utf-8")
+    def _load_migration_scripts(self) -> list[str]:
+        pkg = resources.files(MIGRATIONS_PACKAGE)
+        names = sorted(
+            r.name
+            for r in pkg.iterdir()
+            if r.is_file() and r.name.endswith(".sql")
         )
+        return [pkg.joinpath(n).read_text(encoding="utf-8") for n in names]
 
     async def _ensure_vec_table(self, conn: AsyncConnection, dim: int) -> None:
         if self._embedding_dim is None:

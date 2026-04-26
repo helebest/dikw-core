@@ -41,13 +41,23 @@ def _asset(asset_id: str, *, stored_path: str, mime: str = "image/png") -> Asset
 # ---- embed_chunks_multimodal --------------------------------------------
 
 
+async def _collect(gen: object) -> list:
+    """Flatten an async generator of batches into a single list of rows."""
+    out: list = []
+    async for batch in gen:  # type: ignore[attr-defined]
+        out.extend(batch)
+    return out
+
+
 async def test_embed_chunks_multimodal_returns_one_row_per_chunk() -> None:
     fake = FakeMultimodalEmbedding(dim=4)
     chunks = [
         ChunkToEmbed(chunk_id=10, text="alpha"),
         ChunkToEmbed(chunk_id=20, text="beta"),
     ]
-    rows = await embed_chunks_multimodal(fake, chunks, model="fake-mm-v1")
+    rows = await _collect(
+        embed_chunks_multimodal(fake, chunks, model="fake-mm-v1")
+    )
     assert len(rows) == 2
     assert rows[0].chunk_id == 10
     assert rows[1].chunk_id == 20
@@ -59,7 +69,8 @@ async def test_embed_chunks_multimodal_returns_one_row_per_chunk() -> None:
 
 async def test_embed_chunks_multimodal_empty_returns_empty() -> None:
     fake = FakeMultimodalEmbedding(dim=4)
-    assert await embed_chunks_multimodal(fake, [], model="any") == []
+    rows = await _collect(embed_chunks_multimodal(fake, [], model="any"))
+    assert rows == []
     assert fake.last_inputs == []
 
 
@@ -70,7 +81,7 @@ async def test_embed_chunks_multimodal_preserves_order() -> None:
         ChunkToEmbed(chunk_id=2, text="y"),
         ChunkToEmbed(chunk_id=3, text="z"),
     ]
-    rows = await embed_chunks_multimodal(fake, chunks, model="m")
+    rows = await _collect(embed_chunks_multimodal(fake, chunks, model="m"))
     assert [r.chunk_id for r in rows] == [1, 2, 3]
 
 
@@ -79,7 +90,9 @@ async def test_embed_chunks_multimodal_batches() -> None:
     produce 5 ordered rows."""
     fake = FakeMultimodalEmbedding(dim=4)
     chunks = [ChunkToEmbed(chunk_id=i, text=str(i)) for i in range(5)]
-    rows = await embed_chunks_multimodal(fake, chunks, model="m", batch_size=2)
+    rows = await _collect(
+        embed_chunks_multimodal(fake, chunks, model="m", batch_size=2)
+    )
     assert [r.chunk_id for r in rows] == [0, 1, 2, 3, 4]
 
 

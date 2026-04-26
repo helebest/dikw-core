@@ -107,3 +107,6 @@ disable_error_code = ["no-untyped-call", "untyped-decorator", "unused-ignore", "
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-ra -q"
+markers = [
+    "perf: wallclock-budget tests (skip with `-m 'not perf'` if CI is noisy)",
+]

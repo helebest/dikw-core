@@ -22,9 +22,31 @@ zero behavioural change for ASCII-only corpora. See
 from __future__ import annotations
 
 import re
+from types import ModuleType
 from typing import Literal
 
 CjkTokenizer = Literal["none", "jieba"]
+
+# Cached jieba lookup: ``None`` until first attempted, then either the
+# loaded module or stays ``None`` to mean "not installed". We track
+# ``_JIEBA_TRIED`` separately so subsequent calls don't pay the
+# import-failure path twice.
+_JIEBA_MODULE: ModuleType | None = None
+_JIEBA_TRIED: bool = False
+
+
+def _try_load_jieba() -> ModuleType | None:
+    """Return the ``jieba`` module if installed, else ``None`` once."""
+    global _JIEBA_MODULE, _JIEBA_TRIED
+    if _JIEBA_TRIED:
+        return _JIEBA_MODULE
+    _JIEBA_TRIED = True
+    try:
+        import jieba
+    except ImportError:
+        return None
+    _JIEBA_MODULE = jieba
+    return _JIEBA_MODULE
 
 # Basic CJK Unified Ideographs (U+4E00 - U+9FFF). Enough for Chinese
 # and Japanese Han. Kana, Hangul, and extension-B ideographs aren't
@@ -94,6 +116,10 @@ def count_tokens(text: str, *, tokenizer: CjkTokenizer = "jieba") -> int:
     and counts whitespace tokens elsewhere; an all-ASCII body returns
     exactly ``len(text.split())``. ``tokenizer="none"`` is the
     whitespace-only escape hatch for eval reproducibility.
+
+    When the ``[cjk]`` extra is not installed, the jieba mode falls back
+    to a char-based estimate (~2 CJK chars per token) so the chunker
+    still trips on long Chinese paragraphs without requiring the extra.
     """
     if tokenizer == "none":
         return len(text.split())
@@ -102,14 +128,17 @@ def count_tokens(text: str, *, tokenizer: CjkTokenizer = "jieba") -> int:
     if not has_cjk(text):
         return len(text.split())
 
-    import jieba
-
+    jieba = _try_load_jieba()
     total = 0
     last = 0
     for m in _CJK_RUN.finditer(text):
         if m.start() > last:
             total += len(text[last : m.start()].split())
-        total += sum(1 for t in jieba.cut_for_search(m.group(0)) if t.strip())
+        run = m.group(0)
+        if jieba is None:
+            total += max(1, len(run) // 2)
+        else:
+            total += sum(1 for t in jieba.cut_for_search(run) if t.strip())
         last = m.end()
     if last < len(text):
         total += len(text[last:].split())

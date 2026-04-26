@@ -15,3 +15,8 @@ def hash_file(path: Path, *, chunk_size: int = _DEFAULT_CHUNK_SIZE) -> str:
         for block in iter(lambda: f.read(chunk_size), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def hash_bytes(data: bytes) -> str:
+    """SHA-256 hex digest of ``data`` already in memory."""
+    return hashlib.sha256(data).hexdigest()

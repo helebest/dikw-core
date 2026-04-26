@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..schemas import AssetKind, AssetRecord, AssetRef
-from .hashing import hash_file
+from .hashing import hash_bytes, hash_file
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +338,28 @@ async def materialize_asset(
     except OSError as e:
         logger.warning("failed to read %s: %s", abs_path, e)
         return None
+
+    # Race window: the file may have changed between hash_file and the
+    # slurp above. Persist under the canonical hash of the bytes we
+    # actually have, and re-check cache so a content-address dedup hit
+    # still wins. Cost: one extra in-memory sha256 on cache-miss only.
+    canonical_sha = hash_bytes(data)
+    if canonical_sha != sha:
+        sha = canonical_sha
+        existing = await get_asset(sha)
+        if existing is not None:
+            if ref.original_path not in existing.original_paths:
+                updated = existing.model_copy(
+                    update={
+                        "original_paths": [
+                            *existing.original_paths,
+                            ref.original_path,
+                        ]
+                    }
+                )
+                await upsert_asset(updated)
+                return updated, False
+            return existing, False
 
     _, ext_hint = _split_basename_and_ext(ref.original_path)
     mime = _detect_image_mime(data, ext_hint=ext_hint)

@@ -124,3 +124,25 @@ def test_count_tokens_none_passthrough_on_cjk() -> None:
 def test_count_tokens_rejects_unknown_mode() -> None:
     with pytest.raises(ValueError, match="cjk_tokenizer"):
         count_tokens("anything", tokenizer="trigram")  # type: ignore[arg-type]
+
+
+def test_count_tokens_falls_back_when_jieba_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the ``[cjk]`` extra isn't installed, CJK runs use a char-based
+    estimate so the chunker still trips on long Chinese paragraphs.
+    Otherwise core install + Chinese content = ModuleNotFoundError on
+    every ingest. Simulate a missing jieba by clearing the cached module
+    and rejecting the import.
+    """
+    import sys
+
+    import dikw_core.info.tokenize as tk
+
+    monkeypatch.setattr(tk, "_JIEBA_MODULE", None)
+    monkeypatch.setattr(tk, "_JIEBA_TRIED", False)
+    monkeypatch.setitem(sys.modules, "jieba", None)
+
+    text = "机器学习" * 100  # 400 CJK chars; char fallback ≈ 200 tokens
+    n = count_tokens(text)
+    assert n >= 100, f"fallback should still surface many tokens, got {n}"

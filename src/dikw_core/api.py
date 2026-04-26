@@ -668,7 +668,6 @@ async def ingest(
                 )
                 continue
 
-            await storage.put_content(parsed.hash, parsed.body)
             await storage.upsert_document(_to_document(parsed, doc_id=doc_id))
 
             # Materialize image references first so asset_ids are known
@@ -1175,7 +1174,6 @@ async def _persist_wiki_page(
     abs_path = (root / page.path).resolve()
     mtime = abs_path.stat().st_mtime if abs_path.is_file() else time.time()
 
-    await storage.put_content(body_hash, page.body)
     await storage.upsert_document(
         DocumentRecord(
             doc_id=doc_id,

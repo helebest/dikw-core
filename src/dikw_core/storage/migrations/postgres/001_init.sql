@@ -11,22 +11,20 @@ CREATE TABLE IF NOT EXISTS meta_kv (
 
 -- ---- D layer -------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS content (
-    hash TEXT PRIMARY KEY,
-    body TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS documents (
     doc_id TEXT PRIMARY KEY,
     path   TEXT UNIQUE NOT NULL,
     title  TEXT,
-    hash   TEXT NOT NULL REFERENCES content(hash),
+    hash   TEXT NOT NULL,
     mtime  DOUBLE PRECISION,
     layer  TEXT NOT NULL CHECK (layer IN ('source','wiki','wisdom')),
     active BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE INDEX IF NOT EXISTS documents_layer_active ON documents(layer, active);
+
+-- Reverse lookup by content hash.
+CREATE INDEX IF NOT EXISTS documents_hash_idx ON documents(hash);
 
 -- ---- I layer -------------------------------------------------------------
 

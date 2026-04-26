@@ -121,20 +121,11 @@ class PostgresStorage:
                 for sql_text in scripts:
                     await cur.execute(sql_text)
             await conn.commit()
+            await self._verify_no_legacy_content_table(conn)
         # Restore the vector dim (if we've indexed before).
         await self._load_embedding_dim()
 
     # ---- D layer ---------------------------------------------------------
-
-    async def put_content(self, hash_: str, body: str) -> None:
-        async with self._acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO content(hash, body) VALUES (%s, %s) "
-                    "ON CONFLICT (hash) DO NOTHING",
-                    (hash_, body),
-                )
-            await conn.commit()
 
     async def upsert_document(self, doc: DocumentRecord) -> None:
         async with self._acquire() as conn:
@@ -774,6 +765,21 @@ class PostgresStorage:
                 self._embedding_dim = int(row[0])
             except (ValueError, TypeError):
                 self._embedding_dim = None
+
+    async def _verify_no_legacy_content_table(self, conn: AsyncConnection) -> None:
+        """Bail if a pre-refactor ``content`` table is still present.
+
+        See ``SQLiteStorage._verify_no_legacy_content_table`` for the rationale.
+        """
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT to_regclass('content')")
+            row = await cur.fetchone()
+        if row is not None and row[0] is not None:
+            raise StorageError(
+                "legacy `content` table detected from a pre-refactor schema. "
+                "Drop the schema (`DROP SCHEMA <schema> CASCADE`) and re-run "
+                "`dikw ingest` to rebuild on the new D-layer schema."
+            )
 
 
 class _ConnectionContext:

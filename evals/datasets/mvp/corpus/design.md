@@ -29,7 +29,7 @@ Design decisions already locked in (via clarifying Q&A):
 
 | Layer | What it is | Storage | Who writes it |
 |---|---|---|---|
-| **D — Data** | Raw, immutable sources (markdown files the user curates) | filesystem + content-addressed hash table in SQLite | human |
+| **D — Data** | Raw, immutable sources (markdown files the user curates) | filesystem + indexed `documents` table in SQLite (path, content hash, layer, active) | human |
 | **I — Information** | Parsed, chunked, embedded, indexed — enables fast lookup | SQLite FTS5 + sqlite-vec (`.dikw/index.sqlite`) | engine (deterministic) |
 | **K — Knowledge** | LLM-authored wiki pages: summaries, entities, concepts, cross-refs, `index.md`, `log.md` | markdown files in `wiki/` | LLM, human-editable |
 | **W — Wisdom** | Distilled principles, heuristics, lessons, patterns — transferable beyond a single source | markdown files in `wisdom/` with explicit provenance & review status | LLM proposes, human confirms |
@@ -94,7 +94,7 @@ Module boundaries are chosen so each subpackage fits in a single reading pass an
 
 Known patterns to reuse from references (concrete sources):
 - **Hybrid search pipeline (BM25 + vector + RRF + rerank)** — `mineru-doc-explorer/src/hybrid-search.ts`, `mineru-doc-explorer/src/search.ts`. Port the RRF fusion + position-aware blending logic.
-- **SQLite schema design + content-addressed storage** — `mineru-doc-explorer/src/db-schema.ts`, `mineru-doc-explorer/src/store.ts` (content table, documents table, links table, wiki_log).
+- **SQLite schema design + content-addressed storage** — `mineru-doc-explorer/src/db-schema.ts`, `mineru-doc-explorer/src/store.ts` (documents table with indexed content hash, links table, wiki_log).
 - **Smart markdown chunking (~900 tokens, 15% overlap, heading-aware)** — `mineru-doc-explorer/src/store.ts` chunking section; `qmd/src/store.ts` lines ~257–310.
 - **Wikilink parsing + forward/backward graph** — `mineru-doc-explorer/src/links.ts`, `mineru-doc-explorer/src/wiki/{log,lint,index-gen}.ts`. Port to a small `knowledge/links.py`.
 - **MCP tool grouping** — `mineru-doc-explorer/src/mcp/tools/{core,document,wiki}.ts`. Mirror the grouping shape in Python.
@@ -249,16 +249,16 @@ The logical model is backend-agnostic; the SQL below is the **SQLite reference s
 
 ```sql
 -- D
-CREATE TABLE content (hash TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE documents (
     doc_id TEXT PRIMARY KEY,
     path   TEXT UNIQUE NOT NULL,
     title  TEXT,
-    hash   TEXT NOT NULL REFERENCES content(hash),
+    hash   TEXT NOT NULL,                 -- sha256 of body; indexed for reverse lookup
     mtime  REAL,
     layer  TEXT CHECK (layer IN ('source','wiki','wisdom')) NOT NULL,
     active INTEGER DEFAULT 1
 );
+CREATE INDEX documents_hash_idx ON documents(hash);
 
 -- I
 CREATE VIRTUAL TABLE documents_fts USING fts5(path, title, body, content='');
@@ -378,7 +378,6 @@ class Storage(Protocol):
     async def migrate(self) -> None: ...             # idempotent schema bring-up
 
     # D layer
-    async def put_content(self, hash_: str, body: str) -> None: ...
     async def upsert_document(self, doc: DocumentRecord) -> None: ...
     async def get_document(self, doc_id: str) -> DocumentRecord | None: ...
     async def list_documents(self, *, layer: Layer, active: bool | None = True,
@@ -428,7 +427,7 @@ postgres = ["psycopg[binary,pool] >=3.2", "pgvector >=0.3"]
 Purpose: a DB-less mode where the Obsidian vault itself holds everything the engine needs, so the whole knowledge base is one portable, human-readable directory.
 
 How it maps to the Storage Protocol:
-- `put_content` / `upsert_document` — the files already exist on disk; this becomes a small JSON manifest in `.dikw/fs/documents.jsonl` keyed by content hash (path + title + mtime + layer).
+- `upsert_document` — the files already exist on disk; this becomes a small JSON manifest in `.dikw/fs/documents.jsonl` keyed by content hash (path + title + mtime + layer).
 - `fts_search` — simple in-process scan (lunr-style inverted index built at startup from the manifest) or just substring + front-matter tag filtering. Good enough at ≤200 pages.
 - `vec_search` — **optional**. If `storage.embed: true`, embeddings are stored as per-chunk JSON sidecars under `.dikw/fs/vecs/<chunk_id>.json` and searched via in-process cosine (numpy). If `false`, `vec_search` raises `NotSupported` and `info/search.py` falls back to a **navigation mode**: pass `index.md` + relevant folders' file list to the LLM, let it pick pages to read, then answer.
 - `upsert_link` / `links_from` / `links_to` — maintained in `.dikw/fs/links.jsonl`, regenerated from parsing wiki MD on `ingest` / `synth`.

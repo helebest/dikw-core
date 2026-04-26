@@ -147,21 +147,11 @@ class SQLiteStorage:
             if meta is not None:
                 self._embedding_dim = int(meta[0])
             self._verify_vec_tables_use_cosine(conn)
+            self._verify_no_legacy_content_table(conn)
 
         await asyncio.to_thread(_run)
 
     # ---- D layer ---------------------------------------------------------
-
-    async def put_content(self, hash_: str, body: str) -> None:
-        def _run() -> None:
-            conn = self._require_conn()
-            with conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO content(hash, body) VALUES (?, ?)",
-                    (hash_, body),
-                )
-
-        await asyncio.to_thread(_run)
 
     async def upsert_document(self, doc: DocumentRecord) -> None:
         def _run() -> None:
@@ -1153,6 +1143,22 @@ class SQLiteStorage:
                     "(`rm .dikw/dikw.sqlite`) and re-run `dikw ingest` to "
                     "rebuild the index."
                 )
+
+    def _verify_no_legacy_content_table(self, conn: sqlite3.Connection) -> None:
+        """Bail if a pre-refactor ``content`` table is still present.
+
+        ``CREATE TABLE IF NOT EXISTS`` won't remove it, so the FK on
+        ``documents.hash`` would silently re-engage and break ingest.
+        """
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content'"
+        ).fetchone()
+        if row is not None:
+            raise StorageError(
+                "legacy `content` table detected from a pre-refactor schema. "
+                "Delete the SQLite file (`rm .dikw/dikw.sqlite`) and re-run "
+                "`dikw ingest` to rebuild on the new D-layer schema."
+            )
 
     def _ensure_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         if self._embedding_dim is None:

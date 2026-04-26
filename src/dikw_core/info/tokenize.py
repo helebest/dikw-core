@@ -88,21 +88,12 @@ def _jieba_segment(text: str) -> str:
 
 
 def count_tokens(text: str, *, tokenizer: CjkTokenizer = "jieba") -> int:
-    """Estimate the token count of ``text`` for chunk-budgeting.
+    """Token count for chunk-budgeting.
 
-    The chunker compares paragraph token counts against a budget
-    (``max_tokens``) to decide where to split. ``len(text.split())`` is
-    fine for ASCII but reports ~1 for an entire Chinese paragraph (no
-    whitespace), which made long CJK docs slip past the budget and arrive
-    at the embedding provider as a single oversize chunk.
-
-    - ``tokenizer="none"``: pure whitespace split — preserves byte-for-byte
-      legacy behaviour, kept as an escape hatch for eval reproducibility
-      (same rationale as ``cjk_tokenizer="none"`` default).
-    - ``tokenizer="jieba"`` (default for chunking): segment CJK runs with
-      ``jieba.cut_for_search`` and count whitespace tokens elsewhere. ASCII
-      runs pass through unchanged so the count for an all-ASCII body is
-      identical to ``len(text.split())``.
+    ``tokenizer="jieba"`` segments CJK runs with ``jieba.cut_for_search``
+    and counts whitespace tokens elsewhere; an all-ASCII body returns
+    exactly ``len(text.split())``. ``tokenizer="none"`` is the
+    whitespace-only escape hatch for eval reproducibility.
     """
     if tokenizer == "none":
         return len(text.split())

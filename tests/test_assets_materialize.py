@@ -231,14 +231,9 @@ async def test_materialize_cache_hit_does_not_slurp_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Streaming-hash refactor invariant: when ``get_asset`` returns an
-    existing record, the materializer must NOT load the full file into
-    memory. Hashing is now done via streaming reads, and slurping after a
-    confirmed cache hit would defeat the entire memory-bound rewrite.
-
-    We verify by patching ``Path.read_bytes`` to raise *after* the first
-    (legitimate) materialize call. The second call exercises the cache
-    hit path; if it succeeds, ``read_bytes`` was not invoked.
+    """Invariant: a cache hit must materialize without loading the full
+    file into memory. Verified by poisoning ``Path.read_bytes`` after the
+    first call so any slurp on the cache-hit path fails loudly.
     """
     project_root = tmp_path / "project"
     project_root.mkdir()

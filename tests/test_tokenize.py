@@ -92,33 +92,30 @@ def test_preprocess_jieba_idempotent_on_pre_segmented_text() -> None:
 
 
 def test_count_tokens_ascii_matches_split() -> None:
-    """ASCII parity: ``count_tokens`` must equal ``len(text.split())`` so
-    English fixtures and existing budget tuning stay byte-identical.
+    """ASCII parity: ``count_tokens(s) == len(s.split())`` for any
+    all-ASCII string, so English chunk-budget tuning stays unchanged.
     """
     for s in ["lorem " * 40, "alpha beta gamma", "retrieval.rrf_k weight_a", ""]:
         assert count_tokens(s) == len(s.split())
 
 
 def test_count_tokens_cjk_segments_at_word_level() -> None:
-    """A short Chinese phrase must produce more than one token so the
-    chunk budget actually trips on CJK content. Exact count depends on
-    jieba's dictionary; assert a lower bound only.
+    """A short Chinese phrase yields more than one token — necessary
+    condition for the chunk budget to ever trip on CJK content. Exact
+    count is jieba-dictionary-dependent; assert only a lower bound.
     """
     assert count_tokens("机器学习入门") >= 3
 
 
 def test_count_tokens_mixed_ascii_and_cjk_sums_runs() -> None:
-    """Mixed text: ASCII identifiers count as whitespace tokens, CJK
-    runs count as jieba segments, and the total is the sum.
-    """
-    # "hello" + "world" + ≥ 2 CJK tokens for "机器学习"
+    """Mixed text totals ASCII whitespace tokens plus jieba CJK segments."""
+    # "hello" + "world" + >= 2 CJK tokens for "机器学习"
     assert count_tokens("hello 机器学习 world") >= 4
 
 
 def test_count_tokens_none_passthrough_on_cjk() -> None:
-    """``tokenizer="none"`` is the legacy escape hatch — even on Chinese
-    input it must return ``len(text.split())``. Loud regression guard
-    against accidentally rewiring eval reproducibility.
+    """``tokenizer="none"`` returns ``len(text.split())`` on any input,
+    Chinese included — preserves the escape hatch for eval reproducibility.
     """
     assert count_tokens("机器学习入门", tokenizer="none") == 1
     assert count_tokens("机器 学习 入门", tokenizer="none") == 3

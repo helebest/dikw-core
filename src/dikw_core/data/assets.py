@@ -311,14 +311,11 @@ async def materialize_asset(
         )
         return None
 
-    # Hash the file via streaming reads BEFORE pulling all bytes into RAM.
-    # On a cache hit (same content seen before) the slurp below never runs —
-    # the common re-ingest path then has O(chunk_size) peak memory instead
-    # of O(file_size).
+    # Stream-hash first so cache hits never have to slurp the file.
     try:
         sha = hash_file(abs_path)
     except OSError as e:
-        logger.warning("failed to read %s: %s", abs_path, e)
+        logger.warning("failed to hash %s: %s", abs_path, e)
         return None
 
     existing = await get_asset(sha)
@@ -336,8 +333,6 @@ async def materialize_asset(
             return updated, False
         return existing, False
 
-    # Cache miss — mime sniffing, dimension probing, and the atomic write
-    # all need the full bytes, so slurp once now.
     try:
         data = abs_path.read_bytes()
     except OSError as e:

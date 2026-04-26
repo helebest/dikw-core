@@ -263,11 +263,11 @@ CREATE INDEX documents_hash_idx ON documents(hash);
 -- I
 CREATE VIRTUAL TABLE documents_fts USING fts5(path, title, body, content='');
 CREATE TABLE chunks (
-    chunk_id INTEGER PRIMARY KEY,
-    doc_id   TEXT REFERENCES documents(doc_id),
-    seq      INTEGER,
-    start    INTEGER, end INTEGER,
-    text     TEXT
+    chunk_id  INTEGER PRIMARY KEY,
+    doc_id    TEXT REFERENCES documents(doc_id),
+    seq       INTEGER,
+    start_off INTEGER, end_off INTEGER,
+    text      TEXT
 );
 CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[EMB_DIM]);
 CREATE TABLE embed_meta (chunk_id INTEGER, model TEXT, PRIMARY KEY(chunk_id, model));

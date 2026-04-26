@@ -26,6 +26,5 @@ venv/
 # throwaway smoke / debug tools under evals/tools — names prefixed with _
 evals/tools/_*_smoke.py
 # eval-snapshot cache (per-dataset ingested wikis; built on first eval run,
-# reused across re-runs). Each snapshot is ~30-150 MB SQLite + corpus copy;
-# do not check in. Cache lookup logic lands separately in task #5.
+# reused across re-runs). Each snapshot is ~30-150 MB SQLite + corpus copy.
 evals/.cache/

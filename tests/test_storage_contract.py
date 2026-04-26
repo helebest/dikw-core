@@ -111,7 +111,6 @@ async def test_migrate_is_idempotent(storage: Storage) -> None:
 
 async def test_document_roundtrip(storage: Storage) -> None:
     doc = _make_doc("sources/a.md")
-    await storage.put_content(doc.hash, "hello world")
     await storage.upsert_document(doc)
 
     fetched = await storage.get_document(doc.doc_id)
@@ -127,14 +126,72 @@ async def test_document_roundtrip(storage: Storage) -> None:
     assert active_docs == []
 
 
+async def test_storage_has_no_put_content(storage: Storage) -> None:
+    """The legacy ``put_content`` Protocol method is gone — D-layer schema
+    no longer carries a write-only ``content`` table. Sentinel that catches
+    accidental re-introduction of the API."""
+    assert not hasattr(storage, "put_content")
+
+
+async def test_upsert_document_without_put_content(storage: Storage) -> None:
+    """``upsert_document`` must succeed without any prior content-table write.
+
+    Pre-refactor this failed on SQLite/Postgres because ``documents.hash``
+    was an FK to ``content(hash)``. After the refactor the FK is gone and
+    ``documents.hash`` is just an indexed text column, so the call stands
+    on its own.
+    """
+    doc = _make_doc("sources/no-content.md")
+    await storage.upsert_document(doc)
+    fetched = await storage.get_document(doc.doc_id)
+    assert fetched is not None
+    assert fetched.hash == doc.hash
+
+
+async def test_documents_hash_indexed(storage: Storage) -> None:
+    """``documents.hash`` must be indexed so content-addressed lookups
+    (``WHERE hash = ?``) don't fall back to a sequential scan once the
+    legacy ``content`` table is gone.
+
+    Filesystem skips: no SQL indexes, the in-memory dicts already hash by
+    doc_id and the documents file is small enough to scan.
+    """
+    if isinstance(storage, FilesystemStorage):
+        pytest.skip("filesystem adapter has no SQL indexes")
+
+    # Schema-introspection assertion — by design the Storage Protocol exposes no
+    # raw connection, so this contract test reaches into adapter internals to
+    # verify the migration actually created the index. Adding a Protocol method
+    # just to dedupe one assertion would leak SQL up to the engine.
+    if isinstance(storage, SQLiteStorage):
+        conn = storage._conn
+        assert conn is not None
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='documents'"
+        ).fetchall()
+        names = {r[0] for r in rows}
+    else:  # PostgresStorage
+        async with storage._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename = 'documents' "
+                "AND schemaname = current_schema()"
+            )
+            rows = await cur.fetchall()
+        names = {r[0] for r in rows}
+
+    assert "documents_hash_idx" in names, (
+        f"expected documents_hash_idx among {sorted(names)}"
+    )
+
+
 async def test_get_documents_batch(storage: Storage) -> None:
     """Batch fetch is the N+1 fix used by chunk-level retrieval — every
     adapter must satisfy it (missing ids are dropped silently, not raised).
     """
     a = _make_doc("sources/batch_a.md")
     b = _make_doc("sources/batch_b.md")
-    await storage.put_content(a.hash, "a body")
-    await storage.put_content(b.hash, "b body")
     await storage.upsert_document(a)
     await storage.upsert_document(b)
 
@@ -153,7 +210,6 @@ async def test_get_chunks_batch(storage: Storage) -> None:
     chunk side. Used by the search path to avoid N+1 over retrieved
     chunk_ids."""
     doc = _make_doc("sources/chunks_batch.md")
-    await storage.put_content(doc.hash, "x" * 16)
     await storage.upsert_document(doc)
     ids = await storage.replace_chunks(
         doc.doc_id,
@@ -173,7 +229,6 @@ async def test_get_chunks_batch(storage: Storage) -> None:
 
 async def test_chunks_and_fts_search(storage: Storage) -> None:
     doc = _make_doc("sources/chunked.md")
-    await storage.put_content(doc.hash, "x" * 10)
     await storage.upsert_document(doc)
 
     await storage.replace_chunks(
@@ -191,7 +246,6 @@ async def test_chunks_and_fts_search(storage: Storage) -> None:
 
 async def test_embeddings_and_vec_search(storage: Storage) -> None:
     doc = _make_doc("sources/vec.md")
-    await storage.put_content(doc.hash, "body")
     await storage.upsert_document(doc)
     ids = await storage.replace_chunks(
         doc.doc_id,
@@ -219,7 +273,6 @@ async def test_vec_search_skips_zero_vector_embeddings(storage: Storage) -> None
     a = _make_doc("sources/normal.md")
     b = _make_doc("sources/zero.md")
     for d in (a, b):
-        await storage.put_content(d.hash, "x")
         await storage.upsert_document(d)
     a_ids = await storage.replace_chunks(
         a.doc_id, [ChunkRecord(doc_id=a.doc_id, seq=0, start=0, end=5, text="alpha")]
@@ -348,7 +401,6 @@ async def test_list_chunks_missing_embedding(storage: Storage) -> None:
     chunk text could legitimately be re-embedded under a new model.
     """
     doc = _make_doc("sources/scan.md")
-    await storage.put_content(doc.hash, "x" * 30)
     await storage.upsert_document(doc)
     chunk_ids = await storage.replace_chunks(
         doc.doc_id,
@@ -420,7 +472,6 @@ async def test_vec_search_returns_in_distance_order(storage: Storage) -> None:
     returned ranking matches that distance order.
     """
     doc = _make_doc("sources/order.md")
-    await storage.put_content(doc.hash, "body")
     await storage.upsert_document(doc)
     # 5 chunks, each with a 4-dim vector at increasing angle from
     # [1, 0, 0, 0]. Closest first.
@@ -462,7 +513,6 @@ async def test_vec_search_layer_filter(storage: Storage) -> None:
     src_doc = _make_doc("sources/src.md", layer=Layer.SOURCE)
     wiki_doc = _make_doc("wiki/page.md", layer=Layer.WIKI)
     for d in (src_doc, wiki_doc):
-        await storage.put_content(d.hash, "x")
         await storage.upsert_document(d)
     src_ids = await storage.replace_chunks(
         src_doc.doc_id,
@@ -504,7 +554,6 @@ async def test_link_graph(storage: Storage) -> None:
     src_doc = _make_doc("wiki/a.md", layer=Layer.WIKI)
     dst_doc = _make_doc("wiki/b.md", layer=Layer.WIKI)
     for d in (src_doc, dst_doc):
-        await storage.put_content(d.hash, "x")
         await storage.upsert_document(d)
 
     link = LinkRecord(
@@ -534,7 +583,6 @@ async def test_wiki_log_append(storage: Storage) -> None:
 
 async def test_wisdom_lifecycle(storage: Storage) -> None:
     doc = _make_doc("wiki/concept.md", layer=Layer.WIKI)
-    await storage.put_content(doc.hash, "body")
     await storage.upsert_document(doc)
 
     ts = time.time()
@@ -614,7 +662,6 @@ async def test_asset_upsert_replaces_with_new_metadata(storage: Storage) -> None
 
 async def test_chunk_asset_refs_roundtrip(storage: Storage) -> None:
     doc = _make_doc("sources/with-image.md")
-    await storage.put_content(doc.hash, "x")
     await storage.upsert_document(doc)
     ids = await storage.replace_chunks(
         doc.doc_id,
@@ -668,7 +715,6 @@ async def test_chunk_asset_refs_roundtrip(storage: Storage) -> None:
 async def test_chunk_asset_refs_replaced_on_reupsert(storage: Storage) -> None:
     """Calling replace_chunk_asset_refs again must wipe the previous set."""
     doc = _make_doc("sources/replace.md")
-    await storage.put_content(doc.hash, "x")
     await storage.upsert_document(doc)
     ids = await storage.replace_chunks(
         doc.doc_id,
@@ -703,7 +749,6 @@ async def test_chunk_asset_refs_cascade_on_chunk_delete(storage: Storage) -> Non
     """When the parent chunk is replaced (DELETE-then-INSERT pattern), the
     chunk_asset_refs rows must cascade so they don't dangle."""
     doc = _make_doc("sources/cascade.md")
-    await storage.put_content(doc.hash, "x")
     await storage.upsert_document(doc)
     ids = await storage.replace_chunks(
         doc.doc_id,

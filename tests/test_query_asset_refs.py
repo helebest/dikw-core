@@ -110,7 +110,6 @@ async def test_search_without_mm_embedder_unchanged(
     """Backward-compat: passing no multimodal config means no asset
     channel; existing 2-leg behavior is preserved exactly."""
     doc = _doc("sources/a.md")
-    await storage.put_content(doc.hash, "x")
     await storage.upsert_document(doc)
     await storage.replace_chunks(
         doc.doc_id,
@@ -130,7 +129,6 @@ async def test_asset_hit_promotes_parent_chunk(
     text gets retrieved because the image it references matches the
     query vector."""
     doc = _doc("sources/visual.md")
-    await storage.put_content(doc.hash, "x")
     await storage.upsert_document(doc)
     chunk_ids = await storage.replace_chunks(
         doc.doc_id,
@@ -207,7 +205,6 @@ async def test_asset_refs_attached_for_text_match_too(
     references must come back attached to the Hit so the consumer can
     render them."""
     doc = _doc("sources/text.md")
-    await storage.put_content(doc.hash, "x")
     await storage.upsert_document(doc)
     chunk_ids = await storage.replace_chunks(
         doc.doc_id,
@@ -266,7 +263,6 @@ async def test_search_handles_no_asset_index(storage: SQLiteStorage) -> None:
     """When asset indexing is configured but no asset embeddings exist
     yet, search should still succeed (degrade to BM25 + chunk-vec only)."""
     doc = _doc("sources/no-assets.md")
-    await storage.put_content(doc.hash, "x")
     await storage.upsert_document(doc)
     await storage.replace_chunks(
         doc.doc_id,

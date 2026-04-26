@@ -234,7 +234,6 @@ async def test_hybrid_search_returns_hits(tmp_path) -> None:
     for md_path in sorted(fixtures.glob("*.md")):
         parsed = parse_file(md_path, rel_path=f"sources/notes/{md_path.name}")
         doc_id = f"source:sources/notes/{md_path.name}"
-        await storage.put_content(parsed.hash, parsed.body)
         await storage.upsert_document(
             DocumentRecord(
                 doc_id=doc_id,
@@ -288,7 +287,6 @@ async def _populate_fixture_corpus(storage):
     for md_path in sorted(fixtures.glob("*.md")):
         parsed = parse_file(md_path, rel_path=f"sources/notes/{md_path.name}")
         doc_id = f"source:sources/notes/{md_path.name}"
-        await storage.put_content(parsed.hash, parsed.body)
         await storage.upsert_document(
             DocumentRecord(
                 doc_id=doc_id,
@@ -464,8 +462,6 @@ async def _populate_multi_chunk_corpus(storage: SQLiteStorage) -> FakeEmbeddings
     to_embed: list[ChunkToEmbed] = []
     for stem, chunk_texts in doc_specs:
         doc_id = f"source:sources/{stem}.md"
-        body = "\n\n".join(chunk_texts)
-        await storage.put_content(f"h-{stem}", body)
         await storage.upsert_document(
             DocumentRecord(
                 doc_id=doc_id,
@@ -629,7 +625,6 @@ async def test_cjk_tokenizer_jieba_ingest_stores_segmented_body(tmp_path) -> Non
     await storage.migrate()
 
     doc_id = "source:zh.md"
-    await storage.put_content("h1", "机器学习入门")
     await storage.upsert_document(
         DocumentRecord(
             doc_id=doc_id,
@@ -686,7 +681,6 @@ async def test_cjk_tokenizer_jieba_end_to_end_bm25_recovers(tmp_path) -> None:
         await s.migrate()
         doc_id = "source:zh.md"
         body = "机器学习入门是一本经典的机器学习教材"
-        await s.put_content("h", body)
         await s.upsert_document(
             DocumentRecord(
                 doc_id=doc_id,
@@ -733,7 +727,6 @@ async def test_cjk_tokenizer_none_leaves_body_verbatim(tmp_path) -> None:
 
     doc_id = "source:en.md"
     body_text = "reciprocal rank fusion survives preprocessing"
-    await storage.put_content("h2", body_text)
     await storage.upsert_document(
         DocumentRecord(
             doc_id=doc_id,

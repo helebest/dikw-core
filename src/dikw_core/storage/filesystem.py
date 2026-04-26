@@ -68,7 +68,6 @@ class FilesystemStorage:
     """Storage Protocol impl backed by JSONL files under ``.dikw/fs/``."""
 
     DOC_FILE = "documents.jsonl"
-    CONTENT_DIR = "content"
     CHUNKS_FILE = "chunks.jsonl"
     EMBED_META_FILE = "embed_meta.jsonl"
     EMBED_DIM_FILE = "embed_dim.txt"
@@ -107,7 +106,6 @@ class FilesystemStorage:
     async def connect(self) -> None:
         def _load() -> None:
             self._root.mkdir(parents=True, exist_ok=True)
-            (self._p(self.CONTENT_DIR)).mkdir(exist_ok=True)
             (self._p(self.VECS_DIR)).mkdir(exist_ok=True)
 
             # documents
@@ -180,24 +178,11 @@ class FilesystemStorage:
         # No schema to apply; just ensure directories exist (idempotent).
         def _run() -> None:
             self._root.mkdir(parents=True, exist_ok=True)
-            (self._p(self.CONTENT_DIR)).mkdir(exist_ok=True)
             (self._p(self.VECS_DIR)).mkdir(exist_ok=True)
 
         await asyncio.to_thread(_run)
 
     # ---- D layer ---------------------------------------------------------
-
-    async def put_content(self, hash_: str, body: str) -> None:
-        async with self._lock:
-            path = self._p(self.CONTENT_DIR) / f"{hash_}.txt"
-            if path.exists():
-                return
-
-            def _write() -> None:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(body, encoding="utf-8")
-
-            await asyncio.to_thread(_write)
 
     async def upsert_document(self, doc: DocumentRecord) -> None:
         async with self._lock:

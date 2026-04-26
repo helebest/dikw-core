@@ -129,3 +129,78 @@ they asked for top-5.
 it or the HTTP API lands. Observational.
 
 ---
+
+## T5 — multimodal `q_vec` leaking into `chunks_vec.vec_search`
+
+**What:** When a multimodal embedder is configured, `HybridSearcher`
+produces `q_vec` from the multimodal model and passes it into
+`storage.vec_search()` against the legacy text `chunks_vec` index.
+
+**Why:** Two failure modes:
+- If the text and multimodal models share a vector dim, ranking is
+  silently corrupted because cosine distances mix incompatible spaces.
+- If dims differ, the text-vec leg drops on every query via the
+  dim-mismatch fallback at the storage boundary.
+Either way hybrid search regresses instead of cleanly gaining the asset
+leg.
+
+**Pros:**
+- Restores correct text-vec ranking under multimodal configurations
+- Unblocks the eventual "joint chunk-with-image encoding" path (Phase 1.5)
+
+**Cons:**
+- Real fix requires the text side to land version-aware vec tables
+  (vec_chunks_v<id> per `embed_versions` row) — that's M2 in the schema
+  refactor outline. Spot fix without M2 means routing two different
+  embedders for two query legs, which adds config surface.
+
+**Context for pickup:**
+- Surfaced by codex review during D-layer refactor (round 1, Apr 2026)
+- Code path: `src/dikw_core/info/search.py:276-277` builds `q_vec` from
+  `self._mm.embedder` and feeds the same vector to `storage.vec_search`
+- Repro: a wiki with both text chunks (legacy embedder) and multimodal
+  assets, run any query — observe vec-leg behavior depending on the
+  dim relationship between the two embedders
+
+**Depends on / blocked by:** M2 (text-side `embed_versions` integration)
+for the clean fix. Spot guard ("if multimodal is on, gate text vec_search
+on dim match") is a stopgap.
+
+---
+
+## T6 — `embed_versions` UNIQUE missing `modality`
+
+**What:** The `embed_versions` UNIQUE constraint and
+`upsert_embed_version()` match key are
+`(provider, model, revision, dim, normalize, distance)` — `modality` is
+not part of either.
+
+**Why:** A CLIP-style provider exposes the same `model` name as both a
+text encoder and a multimodal encoder. Today registering it under both
+modalities collapses to a single row, so
+`get_active_embed_version(modality="text")` and `modality="multimodal"`
+return the same `version_id` — the second registration's modality is
+silently overwritten by the first.
+
+**Pros:**
+- Unblocks shared-model multimodal providers (CLIP, SigLIP, BGE-M3)
+- Aligns the SQL constraint with the conceptual identity (modality is
+  semantically part of "what version of an embedder this is")
+
+**Cons:**
+- Schema change touches `002_assets.sql` UNIQUE — pre-alpha policy says
+  rebuild the DB, but coordinate with M2 + M3 (migrations versioning)
+  to avoid two startup guards in close succession
+
+**Context for pickup:**
+- Surfaced by codex review during D-layer refactor (round 1, Apr 2026)
+- Code path: `src/dikw_core/storage/sqlite.py:upsert_embed_version` match
+  key (~L1005); SQL constraint at
+  `src/dikw_core/storage/migrations/sqlite/002_assets.sql:54`
+- Postgres adapter doesn't ship `embed_versions` yet, so the fix
+  currently only needs SQLite changes
+
+**Depends on / blocked by:** None for the SQL change; coordinate with
+M2/M3 if those land first.
+
+---

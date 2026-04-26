@@ -33,6 +33,7 @@ from ..schemas import (
     EmbeddingRow,
     EmbeddingVersion,
     FTSHit,
+    ImageMediaMeta,
     Layer,
     LinkRecord,
     LinkType,
@@ -43,6 +44,8 @@ from ..schemas import (
     WisdomItem,
     WisdomKind,
     WisdomStatus,
+    dump_media_meta,
+    load_media_meta,
 )
 from ._vec_codec import deserialize_vec as _deserialize_vec
 from ._vec_codec import serialize_vec as _serialize_vec
@@ -149,6 +152,7 @@ class SQLiteStorage:
             self._verify_vec_tables_use_cosine(conn)
             self._verify_no_legacy_content_table(conn)
             self._migrate_legacy_chunk_offset_columns(conn)
+            self._migrate_legacy_assets_columns(conn)
 
         await asyncio.to_thread(_run)
 
@@ -732,9 +736,9 @@ class SQLiteStorage:
                     """
                     INSERT INTO assets(
                         asset_id, hash, kind, mime, stored_path, original_paths,
-                        bytes, width, height, caption, caption_model, created_ts
+                        bytes, media_meta, created_ts
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(asset_id) DO UPDATE SET
                         hash = excluded.hash,
                         kind = excluded.kind,
@@ -742,10 +746,7 @@ class SQLiteStorage:
                         stored_path = excluded.stored_path,
                         original_paths = excluded.original_paths,
                         bytes = excluded.bytes,
-                        width = excluded.width,
-                        height = excluded.height,
-                        caption = excluded.caption,
-                        caption_model = excluded.caption_model
+                        media_meta = excluded.media_meta
                     """,
                     (
                         asset.asset_id,
@@ -755,10 +756,7 @@ class SQLiteStorage:
                         asset.stored_path,
                         json.dumps(asset.original_paths),
                         asset.bytes,
-                        asset.width,
-                        asset.height,
-                        asset.caption,
-                        asset.caption_model,
+                        dump_media_meta(asset.media_meta),
                         asset.created_ts,
                     ),
                 )
@@ -1185,6 +1183,54 @@ class SQLiteStorage:
         if "end" in cols:
             conn.execute('ALTER TABLE chunks RENAME COLUMN "end" TO end_off')
 
+    def _migrate_legacy_assets_columns(self, conn: sqlite3.Connection) -> None:
+        """Migrate legacy ``assets`` columns to the per-kind ``media_meta`` JSON.
+
+        Drops ``width``/``height``/``caption``/``caption_model`` and adds
+        ``media_meta`` for DBs created before the per-kind JSON refactor;
+        any populated ``width``/``height`` is backfilled into ``media_meta``
+        first so an upgrade doesn't silently lose dimensions captured by
+        ``_probe_dimensions`` on real PNG/JPEG/GIF assets.
+
+        ``caption`` / ``caption_model`` are dropped without backfill because
+        they were unused placeholders on every prior install. ``DROP COLUMN``
+        is SQLite ≥3.35 (Python 3.12 ships 3.35+); asset_id stays the
+        primary key throughout, so chunk_asset_refs / asset_embed_meta FKs
+        survive untouched.
+
+        Idempotent: each step short-circuits when the prior shape is gone,
+        and the backfill only writes into ``media_meta`` rows that are still
+        NULL — so re-running on a partially-migrated DB never clobbers
+        already-converted JSON.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info('assets')")}
+        if not cols:
+            return
+        if "media_meta" not in cols:
+            conn.execute("ALTER TABLE assets ADD COLUMN media_meta TEXT")
+        # The select + filter use the same expressions so a crashed prior
+        # migration that dropped only ``width`` (or only ``height``) still
+        # backfills cleanly — referencing a column that no longer exists
+        # would otherwise raise ``no such column`` and brick the upgrade.
+        width_expr = "width" if "width" in cols else "NULL"
+        height_expr = "height" if "height" in cols else "NULL"
+        if "width" in cols or "height" in cols:
+            rows = conn.execute(
+                f"SELECT asset_id, {width_expr} AS width, "
+                f"{height_expr} AS height FROM assets "
+                "WHERE media_meta IS NULL "
+                f"AND ({width_expr} IS NOT NULL OR {height_expr} IS NOT NULL)"
+            ).fetchall()
+            for r in rows:
+                meta = ImageMediaMeta(width=r["width"], height=r["height"])
+                conn.execute(
+                    "UPDATE assets SET media_meta = ? WHERE asset_id = ?",
+                    (meta.model_dump_json(), r["asset_id"]),
+                )
+        for legacy in ("caption", "caption_model", "height", "width"):
+            if legacy in cols:
+                conn.execute(f"ALTER TABLE assets DROP COLUMN {legacy}")
+
     def _ensure_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         if self._embedding_dim is None:
             conn.execute(
@@ -1302,10 +1348,7 @@ def _row_to_asset(row: sqlite3.Row) -> AssetRecord:
         stored_path=row["stored_path"],
         original_paths=json.loads(row["original_paths"]),
         bytes=int(row["bytes"]),
-        width=int(row["width"]) if row["width"] is not None else None,
-        height=int(row["height"]) if row["height"] is not None else None,
-        caption=row["caption"],
-        caption_model=row["caption_model"],
+        media_meta=load_media_meta(row["media_meta"]),
         created_ts=float(row["created_ts"]),
     )
 

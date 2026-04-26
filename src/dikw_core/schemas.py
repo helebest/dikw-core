@@ -7,7 +7,7 @@ no SQL types, no ORM handles, no cursors.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -193,12 +193,49 @@ class MultimodalInput(BaseModel):
     images: list[ImageContent] = Field(default_factory=list)
 
 
+class ImageMediaMeta(BaseModel):
+    """Per-kind media metadata for an image asset.
+
+    The ``kind`` literal is the pydantic discriminator that lets ``MediaMeta``
+    grow ``AudioMediaMeta`` / ``VideoMediaMeta`` siblings later without
+    touching the ``assets`` table schema.
+    """
+
+    kind: Literal["image"] = "image"
+    width: int | None = None
+    height: int | None = None
+
+
+# Discriminated union over per-kind metadata. Add ``AudioMediaMeta`` /
+# ``VideoMediaMeta`` here when ``AssetKind`` grows.
+MediaMeta = Annotated[ImageMediaMeta, Field(discriminator="kind")]
+
+
+def dump_media_meta(meta: MediaMeta | None) -> str | None:
+    """Serialize ``MediaMeta`` to the JSON text stored in ``assets.media_meta``.
+
+    Mirror of ``load_media_meta`` — both adapters call this pair so the
+    storage codec stays consistent across SQLite ``TEXT`` and Postgres
+    ``TEXT`` (and any future ``JSONB`` upgrade)."""
+    return meta.model_dump_json() if meta is not None else None
+
+
+def load_media_meta(payload: str | None) -> MediaMeta | None:
+    """Inverse of ``dump_media_meta``."""
+    # While ``AssetKind`` is image-only the dispatch is trivial; switch to
+    # ``TypeAdapter[MediaMeta]`` here when a second member earns its keep.
+    return ImageMediaMeta.model_validate_json(payload) if payload is not None else None
+
+
 class AssetRecord(BaseModel):
     """A multimedia asset materialized into the engine-managed vault path.
 
     ``asset_id`` is the sha256 of the bytes and is the single source of
     truth for identity; ``hash`` is kept as a separate column so it can
-    be queried/indexed without parsing the asset_id.
+    be queried/indexed without parsing the asset_id. ``media_meta`` is a
+    per-kind discriminated union — for v1 (image-only) it carries width
+    and height; future modalities slot in their own fields without an
+    ``ALTER TABLE``.
     """
 
     asset_id: str
@@ -208,10 +245,7 @@ class AssetRecord(BaseModel):
     stored_path: str  # relative to project_root, e.g. "assets/ab/ab3f12ef-foo.png"
     original_paths: list[str] = Field(default_factory=list)
     bytes: int
-    width: int | None = None
-    height: int | None = None
-    caption: str | None = None  # v1 stays None; v1.5 backfills via VisionProvider
-    caption_model: str | None = None
+    media_meta: MediaMeta | None = None
     created_ts: float
 
 

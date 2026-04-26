@@ -112,8 +112,9 @@ async def test_materialize_local_png_copies_and_records(tmp_path: Path) -> None:
     assert rec.kind == AssetKind.IMAGE
     assert rec.mime == "image/png"
     assert rec.bytes == len(png_bytes)
-    assert rec.width == 640
-    assert rec.height == 480
+    assert rec.media_meta is not None
+    assert rec.media_meta.width == 640
+    assert rec.media_meta.height == 480
     assert rec.original_paths == ["./diagrams/arch.png"]
     # File materialized at the engine path.
     on_disk = project_root / rec.stored_path
@@ -313,10 +314,7 @@ async def test_materialize_revalidates_cache_hit_against_current_file(
         stored_path="assets/00/00000000-old.png",
         original_paths=["a.png"],
         bytes=10,
-        width=1,
-        height=1,
-        caption=None,
-        caption_model=None,
+        media_meta=None,
         created_ts=0.0,
     )
 
@@ -446,8 +444,9 @@ async def test_materialize_jpeg_dimensions(tmp_path: Path) -> None:
     rec = None if rec is None else rec[0]
     assert rec is not None
     assert rec.mime == "image/jpeg"
-    assert rec.width == 800
-    assert rec.height == 600
+    assert rec.media_meta is not None
+    assert rec.media_meta.width == 800
+    assert rec.media_meta.height == 600
 
 
 async def test_materialize_gif_dimensions(tmp_path: Path) -> None:
@@ -472,8 +471,9 @@ async def test_materialize_gif_dimensions(tmp_path: Path) -> None:
     rec = None if rec is None else rec[0]
     assert rec is not None
     assert rec.mime == "image/gif"
-    assert rec.width == 50
-    assert rec.height == 40
+    assert rec.media_meta is not None
+    assert rec.media_meta.width == 50
+    assert rec.media_meta.height == 40
 
 
 async def test_materialize_svg_records_no_dims(tmp_path: Path) -> None:
@@ -499,8 +499,7 @@ async def test_materialize_svg_records_no_dims(tmp_path: Path) -> None:
     rec = None if rec is None else rec[0]
     assert rec is not None
     assert rec.mime == "image/svg+xml"
-    assert rec.width is None
-    assert rec.height is None
+    assert rec.media_meta is None
 
 
 async def test_materialize_unsupported_format_skipped(tmp_path: Path) -> None:

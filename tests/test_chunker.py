@@ -50,3 +50,34 @@ def test_paragraph_larger_than_budget_does_not_loop() -> None:
     # Just terminating is the contract; we also expect both paragraphs represented.
     joined = " ".join(c.text for c in chunks)
     assert "small paragraph" in joined
+
+
+def test_cjk_long_doc_splits_into_multiple_chunks() -> None:
+    """Chinese docs at default ``max_tokens=900`` must split. Pre-T7
+    behaviour returned 1 chunk because ``str.split()`` reports ~1 token
+    per CJK paragraph, so the budget never tripped and the whole doc was
+    sent past the embedding model's 8K-token context. Closes T7.
+    """
+    # ASCII punctuation between CJK runs is enough — jieba segments the
+    # CJK fragments regardless. Each para emits well over 300 tokens via
+    # cut_for_search; three of them blow the 900 budget.
+    para = "机器学习是一种实现人工智能的方法,深度学习是机器学习的一个分支." * 80
+    body = "\n\n".join([para] * 3)
+    chunks = chunk_markdown(body, max_tokens=900)
+    assert len(chunks) >= 2
+
+
+def test_ascii_token_counts_unchanged_after_refactor() -> None:
+    """Lock the ASCII path: ``count_tokens`` on an ASCII body must equal
+    ``len(body.split())`` so the new tokenizer doesn't silently re-baseline
+    every English chunker test fixture in this file.
+    """
+    from dikw_core.info.tokenize import count_tokens
+
+    for body in [
+        "lorem " * 40,
+        "alpha " * 200,
+        "Hello world. This is plain English.",
+        "retrieval.rrf_k tuning_param weight_a",
+    ]:
+        assert count_tokens(body) == len(body.split())

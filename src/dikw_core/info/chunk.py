@@ -13,11 +13,10 @@ Strategy (inspired by ``qmd/src/store.ts:257-310`` and
   not by word, so character offsets stay exact and no paragraph is split
   mid-sentence.
 
-Token counting uses whitespace-split — cheap, deterministic, and close enough
-for English. **Known limitation: CJK long docs never get chunked** because
-``str.split()`` returns ~1 token for an entire Chinese paragraph, so the
-``max_tokens`` budget is never hit. Tracked as TODOS T7; reuse jieba from
-``info/tokenize.py`` when this becomes urgent (Phase 3 dogfood).
+Token counting goes through ``info/tokenize.count_tokens`` so CJK
+paragraphs (which contain no whitespace) get jieba-segmented before the
+budget comparison. ASCII bodies fall through to ``len(text.split())``,
+preserving the cheap deterministic behaviour the chunker was tuned for.
 """
 
 from __future__ import annotations
@@ -27,6 +26,8 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from pydantic import BaseModel
+
+from dikw_core.info.tokenize import count_tokens
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
 _PARA_SEP = re.compile(r"\n\s*\n")
@@ -73,7 +74,7 @@ def _paragraph_spans(text: str) -> list[_Para]:
         stripped_end = end - (len(para_text) - len(para_text.rstrip()))
         if stripped_end <= start:
             continue
-        tokens = len(para_text.split())
+        tokens = count_tokens(para_text)
         if tokens == 0:
             continue
         spans.append(_Para(start, stripped_end, tokens))

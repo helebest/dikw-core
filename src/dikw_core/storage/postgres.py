@@ -111,11 +111,15 @@ class PostgresStorage:
 
     async def migrate(self) -> None:
         # Extensions + schema are created in ``connect()`` so the pool can
-        # register pgvector. Migrations here just apply tables/indexes.
-        sql_text = self._load_migration_sql()
+        # register pgvector. Migrations here just apply tables/indexes;
+        # apply every *.sql file under MIGRATIONS_PACKAGE in sorted order
+        # so additions like 002_embed_cache.sql land automatically (mirrors
+        # the sqlite adapter's discovery).
+        scripts = self._load_migration_scripts()
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql_text)
+                for sql_text in scripts:
+                    await cur.execute(sql_text)
             await conn.commit()
         # Restore the vector dim (if we've indexed before).
         await self._load_embedding_dim()
@@ -728,12 +732,14 @@ class PostgresStorage:
             raise StorageError("PostgresStorage is not connected; call `connect()` first")
         return _ConnectionContext(self._pool, self._schema)
 
-    def _load_migration_sql(self) -> str:
-        return (
-            resources.files(MIGRATIONS_PACKAGE)
-            .joinpath("001_init.sql")
-            .read_text(encoding="utf-8")
+    def _load_migration_scripts(self) -> list[str]:
+        pkg = resources.files(MIGRATIONS_PACKAGE)
+        names = sorted(
+            r.name
+            for r in pkg.iterdir()
+            if r.is_file() and r.name.endswith(".sql")
         )
+        return [pkg.joinpath(n).read_text(encoding="utf-8") for n in names]
 
     async def _ensure_vec_table(self, conn: AsyncConnection, dim: int) -> None:
         if self._embedding_dim is None:

@@ -148,7 +148,7 @@ class SQLiteStorage:
                 self._embedding_dim = int(meta[0])
             self._verify_vec_tables_use_cosine(conn)
             self._verify_no_legacy_content_table(conn)
-            self._verify_no_legacy_chunk_offset_columns(conn)
+            self._migrate_legacy_chunk_offset_columns(conn)
 
         await asyncio.to_thread(_run)
 
@@ -1161,26 +1161,29 @@ class SQLiteStorage:
                 "`dikw ingest` to rebuild on the new D-layer schema."
             )
 
-    def _verify_no_legacy_chunk_offset_columns(
+    def _migrate_legacy_chunk_offset_columns(
         self, conn: sqlite3.Connection
     ) -> None:
-        """Bail if ``chunks`` still carries pre-rename columns ``start``/``"end"``.
+        """Rename pre-Phase-X chunks columns ``start``/``"end"`` to
+        ``start_off``/``end_off`` in place.
 
-        ``CREATE TABLE IF NOT EXISTS`` in 001_init.sql is a no-op against the
-        existing table, so without this guard an upgraded user would silently
-        keep the old shape and every chunk SQL would fail with "no such column"
-        deep in the request path.
+        ``CREATE TABLE IF NOT EXISTS`` in 001_init.sql is a no-op against an
+        existing chunks table, so a fresh checkout against a populated DB
+        would otherwise keep the old columns and break every chunk SQL.
+
+        ``ALTER TABLE RENAME COLUMN`` (SQLite ≥3.25, shipped with Python
+        3.12's bundled sqlite) leaves chunk_ids untouched, so embed_meta
+        FKs and chunks_vec rowid alignment survive — preserving the
+        ``wiki_log`` audit stream and other K/W state that a rebuild
+        would otherwise drop.
         """
         cols = {
             row["name"] for row in conn.execute("PRAGMA table_info('chunks')")
         }
-        if "start" in cols or "end" in cols:
-            raise StorageError(
-                "legacy chunks columns `start`/`\"end\"` detected from a "
-                "pre-rename schema. Delete the SQLite file "
-                "(`rm .dikw/dikw.sqlite`) and re-run `dikw ingest` to "
-                "rebuild on the new I-layer schema."
-            )
+        if "start" in cols:
+            conn.execute("ALTER TABLE chunks RENAME COLUMN start TO start_off")
+        if "end" in cols:
+            conn.execute('ALTER TABLE chunks RENAME COLUMN "end" TO end_off')
 
     def _ensure_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         if self._embedding_dim is None:

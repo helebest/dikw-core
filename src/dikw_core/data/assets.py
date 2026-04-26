@@ -12,7 +12,6 @@ with the original file name preserved for human/Obsidian readability.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import re
@@ -23,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..schemas import AssetKind, AssetRecord, AssetRef
+from .hashing import hash_bytes, hash_file
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +259,25 @@ def _resolve_local(
     return None
 
 
+async def _attach_or_return(
+    existing: AssetRecord,
+    ref: AssetRef,
+    upsert_asset: Callable[[AssetRecord], Awaitable[None]],
+) -> tuple[AssetRecord, bool]:
+    """Append ``ref.original_path`` to ``existing.original_paths`` if it
+    isn't already there, persist, and return ``(record, was_new=False)``.
+    """
+    if ref.original_path in existing.original_paths:
+        return existing, False
+    updated = existing.model_copy(
+        update={
+            "original_paths": [*existing.original_paths, ref.original_path],
+        }
+    )
+    await upsert_asset(updated)
+    return updated, False
+
+
 async def materialize_asset(
     ref: AssetRef,
     *,
@@ -311,28 +330,47 @@ async def materialize_asset(
         )
         return None
 
+    # Stream-hash first so cache hits never have to slurp the file.
+    try:
+        sha = hash_file(abs_path)
+    except OSError as e:
+        logger.warning("failed to hash %s: %s", abs_path, e)
+        return None
+
+    existing = await get_asset(sha)
+    if existing is not None:
+        # Revalidate against the current file before trusting the cache:
+        # a concurrent rewrite between the hash and the lookup would
+        # otherwise attach this path to a stale record. Re-streaming
+        # keeps the memory bound; if the bytes shifted, fall through to
+        # the slurp path which writes under the canonical hash.
+        try:
+            confirmed_sha = hash_file(abs_path)
+        except OSError as e:
+            logger.warning("failed to revalidate hash for %s: %s", abs_path, e)
+            return None
+        if confirmed_sha == sha:
+            return await _attach_or_return(existing, ref, upsert_asset)
+        sha = confirmed_sha
+        existing = await get_asset(sha)
+        if existing is not None:
+            return await _attach_or_return(existing, ref, upsert_asset)
+
     try:
         data = abs_path.read_bytes()
     except OSError as e:
         logger.warning("failed to read %s: %s", abs_path, e)
         return None
 
-    sha = hashlib.sha256(data).hexdigest()
-
-    existing = await get_asset(sha)
-    if existing is not None:
-        if ref.original_path not in existing.original_paths:
-            updated = existing.model_copy(
-                update={
-                    "original_paths": [
-                        *existing.original_paths,
-                        ref.original_path,
-                    ]
-                }
-            )
-            await upsert_asset(updated)
-            return updated, False
-        return existing, False
+    # Race window: the file may have changed between hash_file and the
+    # slurp. Persist under the canonical hash of the bytes we actually
+    # have, and re-check cache so a content-address dedup hit still wins.
+    canonical_sha = hash_bytes(data)
+    if canonical_sha != sha:
+        sha = canonical_sha
+        existing = await get_asset(sha)
+        if existing is not None:
+            return await _attach_or_return(existing, ref, upsert_asset)
 
     _, ext_hint = _split_basename_and_ext(ref.original_path)
     mime = _detect_image_mime(data, ext_hint=ext_hint)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dikw_core.info.tokenize import has_cjk, preprocess_for_fts
+from dikw_core.info.tokenize import count_tokens, has_cjk, preprocess_for_fts
 
 
 def test_has_cjk_detects_basic_ideographs() -> None:
@@ -89,3 +89,60 @@ def test_preprocess_jieba_idempotent_on_pre_segmented_text() -> None:
     # cut_for_search output for a whitespace-separated input is
     # equivalent to per-word cuts).
     assert set(once.split()) == set(twice.split())
+
+
+def test_count_tokens_ascii_matches_split() -> None:
+    """ASCII parity: ``count_tokens(s) == len(s.split())`` for any
+    all-ASCII string, so English chunk-budget tuning stays unchanged.
+    """
+    for s in ["lorem " * 40, "alpha beta gamma", "retrieval.rrf_k weight_a", ""]:
+        assert count_tokens(s) == len(s.split())
+
+
+def test_count_tokens_cjk_segments_at_word_level() -> None:
+    """A short Chinese phrase yields more than one token — necessary
+    condition for the chunk budget to ever trip on CJK content. Exact
+    count is jieba-dictionary-dependent; assert only a lower bound.
+    """
+    assert count_tokens("机器学习入门") >= 3
+
+
+def test_count_tokens_mixed_ascii_and_cjk_sums_runs() -> None:
+    """Mixed text totals ASCII whitespace tokens plus jieba CJK segments."""
+    # "hello" + "world" + >= 2 CJK tokens for "机器学习"
+    assert count_tokens("hello 机器学习 world") >= 4
+
+
+def test_count_tokens_none_passthrough_on_cjk() -> None:
+    """``tokenizer="none"`` returns ``len(text.split())`` on any input,
+    Chinese included — preserves the escape hatch for eval reproducibility.
+    """
+    assert count_tokens("机器学习入门", tokenizer="none") == 1
+    assert count_tokens("机器 学习 入门", tokenizer="none") == 3
+
+
+def test_count_tokens_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="cjk_tokenizer"):
+        count_tokens("anything", tokenizer="trigram")  # type: ignore[arg-type]
+
+
+def test_count_tokens_falls_back_when_jieba_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the ``[cjk]`` extra isn't installed, CJK runs use a char-based
+    estimate so the chunker still trips on long Chinese paragraphs.
+    Otherwise core install + Chinese content = ModuleNotFoundError on
+    every ingest. Simulate a missing jieba by clearing the cached module
+    and rejecting the import.
+    """
+    import sys
+
+    import dikw_core.info.tokenize as tk
+
+    monkeypatch.setattr(tk, "_JIEBA_MODULE", None)
+    monkeypatch.setattr(tk, "_JIEBA_TRIED", False)
+    monkeypatch.setitem(sys.modules, "jieba", None)
+
+    text = "机器学习" * 100  # 400 CJK chars; char fallback ≈ 200 tokens
+    n = count_tokens(text)
+    assert n >= 100, f"fallback should still surface many tokens, got {n}"

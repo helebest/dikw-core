@@ -17,6 +17,8 @@ import struct
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import pytest
+
 from dikw_core.data.assets import materialize_asset
 from dikw_core.schemas import AssetKind, AssetRecord, AssetRef
 
@@ -223,6 +225,164 @@ async def test_materialize_dedup_by_hash_appends_original_paths(
     assert rec2.original_paths == ["a.png", "b.png"]
     # Only one row.
     assert len(store) == 1
+
+
+async def test_materialize_cache_hit_does_not_slurp_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invariant: a cache hit must materialize without loading the full
+    file into memory. Verified by poisoning ``Path.read_bytes`` after the
+    first call so any slurp on the cache-hit path fails loudly.
+    """
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    notes = project_root / "notes"
+    notes.mkdir()
+
+    png_bytes = _png_with_dims(4, 4)
+    img = notes / "x.png"
+    img.write_bytes(png_bytes)
+    md = notes / "doc.md"
+    md.write_text("placeholder", encoding="utf-8")
+
+    _store, get, upsert = _make_fake_storage()
+    ref = AssetRef(original_path="x.png", alt="", start=0, end=10, syntax="markdown")
+
+    # First call: legitimate cache miss — slurp is permitted.
+    rec1 = await materialize_asset(
+        ref,
+        source_md_path=md,
+        project_root=project_root,
+        get_asset=get,
+        upsert_asset=upsert,
+    )
+    assert rec1 is not None
+
+    # Now poison read_bytes. If the cache-hit branch ever calls it the
+    # test fails with the explicit error below.
+    def _explode(_self: Path) -> bytes:
+        raise AssertionError("read_bytes() must not be called on cache hit")
+
+    monkeypatch.setattr(Path, "read_bytes", _explode)
+
+    rec2 = await materialize_asset(
+        ref,
+        source_md_path=md,
+        project_root=project_root,
+        get_asset=get,
+        upsert_asset=upsert,
+    )
+    assert rec2 is not None
+
+
+async def test_materialize_revalidates_cache_hit_against_current_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the file mutates between the initial streaming hash and the
+    cache lookup, the materializer must NOT silently attach the new path
+    to a stale record. It revalidates by streaming-hashing again before
+    trusting the cache hit; on disagreement, it falls through to the
+    slurp + canonical path so the persisted hash matches the bytes.
+    """
+    import hashlib
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    notes = project_root / "notes"
+    notes.mkdir()
+
+    png_bytes = _png_with_dims(5, 5)
+    img = notes / "x.png"
+    img.write_bytes(png_bytes)
+    md = notes / "doc.md"
+    md.write_text("placeholder", encoding="utf-8")
+
+    canonical = hashlib.sha256(png_bytes).hexdigest()
+    stale_sha = "1" * 64
+    # Pre-seed the store with a record at stale_sha so the first
+    # `get_asset(stale_sha)` finds it; revalidation hash returns the
+    # real canonical sha, exposing the disagreement.
+    store, get, upsert = _make_fake_storage()
+    store[stale_sha] = AssetRecord(
+        asset_id=stale_sha,
+        hash=stale_sha,
+        kind=AssetKind.IMAGE,
+        mime="image/png",
+        stored_path="assets/00/00000000-old.png",
+        original_paths=["a.png"],
+        bytes=10,
+        width=1,
+        height=1,
+        caption=None,
+        caption_model=None,
+        created_ts=0.0,
+    )
+
+    hashes = iter([stale_sha, canonical])
+    monkeypatch.setattr(
+        "dikw_core.data.assets.hash_file",
+        lambda _p: next(hashes),
+    )
+
+    rec = await materialize_asset(
+        AssetRef(original_path="x.png", alt="", start=0, end=10, syntax="markdown"),
+        source_md_path=md,
+        project_root=project_root,
+        get_asset=get,
+        upsert_asset=upsert,
+    )
+    assert rec is not None
+    record, was_new = rec
+    # The path must be attached to the canonical record, not the stale one.
+    assert record.hash == canonical
+    assert record.asset_id == canonical
+    assert "x.png" not in store[stale_sha].original_paths
+    assert was_new is True
+
+
+async def test_materialize_uses_canonical_hash_when_streaming_hash_disagrees(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the streaming hash disagrees with the slurped bytes' hash
+    (race: file mutated between the two reads), the persisted record
+    must use the canonical hash of the slurped bytes — otherwise we'd
+    save bytes under a stale SHA and dedup would silently break for
+    the *real* content forever after.
+    """
+    import hashlib
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    notes = project_root / "notes"
+    notes.mkdir()
+
+    png_bytes = _png_with_dims(3, 3)
+    img = notes / "x.png"
+    img.write_bytes(png_bytes)
+    md = notes / "doc.md"
+    md.write_text("placeholder", encoding="utf-8")
+
+    stale_sha = "0" * 64
+    monkeypatch.setattr("dikw_core.data.assets.hash_file", lambda _p: stale_sha)
+
+    _store, get, upsert = _make_fake_storage()
+    rec = await materialize_asset(
+        AssetRef(original_path="x.png", alt="", start=0, end=10, syntax="markdown"),
+        source_md_path=md,
+        project_root=project_root,
+        get_asset=get,
+        upsert_asset=upsert,
+    )
+    assert rec is not None
+    record, was_new = rec
+    canonical = hashlib.sha256(png_bytes).hexdigest()
+    assert record.hash == canonical
+    assert record.asset_id == canonical
+    assert record.hash != stale_sha
+    assert was_new is True
 
 
 async def test_materialize_dedup_idempotent_on_same_path(

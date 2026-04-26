@@ -14,17 +14,41 @@ the same reason ``embedding_dimensions`` is: flipping the knob
 post-ingest makes the query side produce tokens that don't match
 what's indexed.
 
-``cjk_tokenizer="none"`` (the default) returns the text unchanged —
-zero behavioural change for ASCII-only corpora. See
-``evals/BASELINES.md`` for measured impact on CMTEB / T2Retrieval.
+``cjk_tokenizer="jieba"`` is the default so Chinese ingest works
+out-of-the-box; ``has_cjk`` short-circuits ASCII text so all-ASCII
+corpora pay no segmentation cost. ``cjk_tokenizer="none"`` is the
+opt-out for users who want byte-identical legacy whitespace behaviour.
+See ``evals/BASELINES.md`` for measured impact on CMTEB / T2Retrieval.
 """
 
 from __future__ import annotations
 
 import re
+from types import ModuleType
 from typing import Literal
 
 CjkTokenizer = Literal["none", "jieba"]
+
+# Cached jieba lookup: ``None`` until first attempted, then either the
+# loaded module or stays ``None`` to mean "not installed". We track
+# ``_JIEBA_TRIED`` separately so subsequent calls don't pay the
+# import-failure path twice.
+_JIEBA_MODULE: ModuleType | None = None
+_JIEBA_TRIED: bool = False
+
+
+def _try_load_jieba() -> ModuleType | None:
+    """Return the ``jieba`` module if installed, else ``None`` once."""
+    global _JIEBA_MODULE, _JIEBA_TRIED
+    if _JIEBA_TRIED:
+        return _JIEBA_MODULE
+    _JIEBA_TRIED = True
+    try:
+        import jieba
+    except ImportError:
+        return None
+    _JIEBA_MODULE = jieba
+    return _JIEBA_MODULE
 
 # Basic CJK Unified Ideographs (U+4E00 - U+9FFF). Enough for Chinese
 # and Japanese Han. Kana, Hangul, and extension-B ideographs aren't
@@ -85,6 +109,42 @@ def _jieba_segment(text: str) -> str:
     if last < len(text):
         parts.append(text[last:])
     return "".join(parts)
+
+
+def count_tokens(text: str, *, tokenizer: CjkTokenizer = "jieba") -> int:
+    """Token count for chunk-budgeting.
+
+    ``tokenizer="jieba"`` segments CJK runs with ``jieba.cut_for_search``
+    and counts whitespace tokens elsewhere; an all-ASCII body returns
+    exactly ``len(text.split())``. ``tokenizer="none"`` is the
+    whitespace-only escape hatch for eval reproducibility.
+
+    When the ``[cjk]`` extra is not installed, the jieba mode falls back
+    to a char-based estimate (~2 CJK chars per token) so the chunker
+    still trips on long Chinese paragraphs without requiring the extra.
+    """
+    if tokenizer == "none":
+        return len(text.split())
+    if tokenizer != "jieba":
+        raise ValueError(f"unknown cjk_tokenizer: {tokenizer!r}")
+    if not has_cjk(text):
+        return len(text.split())
+
+    jieba = _try_load_jieba()
+    total = 0
+    last = 0
+    for m in _CJK_RUN.finditer(text):
+        if m.start() > last:
+            total += len(text[last : m.start()].split())
+        run = m.group(0)
+        if jieba is None:
+            total += max(1, len(run) // 2)
+        else:
+            total += sum(1 for t in jieba.cut_for_search(run) if t.strip())
+        last = m.end()
+    if last < len(text):
+        total += len(text[last:].split())
+    return total
 
 
 def initialize_jieba() -> None:

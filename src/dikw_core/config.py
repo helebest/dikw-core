@@ -101,13 +101,18 @@ class RetrievalConfig(BaseModel):
     # scales how much that leg's rank order influences the top-k.
     bm25_weight: float = 0.3
     vector_weight: float = 1.5
-    # Preprocesses CJK text with ``jieba`` before FTS5 indexing/querying.
-    # Required for Chinese corpora; ``unicode61`` otherwise splits per-
-    # character and collapses BM25 to single-char IDF. Install with
-    # ``uv sync --extra cjk``. **Locked at first ingest** — same shape
-    # as ``embedding_dimensions``; flip requires wiping the index.
-    # See ``docs/providers.md`` gotcha #7 and ``evals/BASELINES.md``.
-    cjk_tokenizer: CjkTokenizer = "none"
+    # Preprocesses CJK text with ``jieba`` before FTS5 indexing/querying
+    # AND drives the chunker's token budget so long Chinese paragraphs
+    # split. Required for Chinese corpora; ``unicode61`` otherwise splits
+    # per-character and collapses BM25 to single-char IDF. ``jieba`` is
+    # the default so ``dikw ingest`` does the right thing on Chinese
+    # input without configuration; install via ``uv sync --extra cjk``
+    # (or rely on the char-based fallback in ``count_tokens`` when the
+    # extra is absent). **Locked at first ingest** — same shape as
+    # ``embedding_dimensions``; flip requires wiping the index. Set to
+    # ``"none"`` to opt back into the legacy whitespace behaviour. See
+    # ``docs/providers.md`` gotcha #7 and ``evals/BASELINES.md``.
+    cjk_tokenizer: CjkTokenizer = "jieba"
     # Diminishing-returns demotion for repeat same-doc chunks after
     # chunk-level RRF fusion. The 1st chunk per doc is unpenalized; the
     # N-th chunk is scaled by ``1 / (1 + alpha * (N - 1))``. Lightweight

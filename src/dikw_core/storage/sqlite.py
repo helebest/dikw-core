@@ -1169,8 +1169,7 @@ class SQLiteStorage:
         ``CREATE TABLE IF NOT EXISTS`` in 001_init.sql is a no-op against the
         existing table, so without this guard an upgraded user would silently
         keep the old shape and every chunk SQL would fail with "no such column"
-        deep in the request path. Aligns SQLite with Postgres, which has used
-        ``start_off``/``end_off`` since Phase 5.
+        deep in the request path.
         """
         cols = {
             row["name"] for row in conn.execute("PRAGMA table_info('chunks')")

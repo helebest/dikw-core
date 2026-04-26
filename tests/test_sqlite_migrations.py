@@ -18,11 +18,7 @@ from dikw_core.storage.sqlite import SQLiteStorage
 
 
 async def test_legacy_chunks_offset_columns_rejected(tmp_path: Path) -> None:
-    """An on-disk SQLite file whose ``chunks`` table predates the
-    ``start_off``/``end_off`` rename must be rejected at ``migrate()`` with
-    a clear rebuild instruction.
-
-    ``CREATE TABLE IF NOT EXISTS`` in 001_init.sql is a no-op against the
+    """``CREATE TABLE IF NOT EXISTS`` in 001_init.sql is a no-op against the
     existing table, so without the guard an upgraded user would silently keep
     the old shape and break every chunk SQL with a "no such column" error
     deep in the request path.

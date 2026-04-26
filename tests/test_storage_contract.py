@@ -187,10 +187,8 @@ async def test_documents_hash_indexed(storage: Storage) -> None:
 
 
 async def test_chunks_offset_columns_renamed(storage: Storage) -> None:
-    """Both SQL backends must expose chunk offsets as ``start_off``/``end_off``,
-    not the legacy ``start``/``"end"`` (kept on SQLite from Phase 0). The DTO
-    field names ``ChunkRecord.start``/``.end`` are unaffected — adapters
-    translate at the SQL boundary.
+    """The DTO field names ``ChunkRecord.start``/``.end`` are unaffected —
+    adapters translate at the SQL boundary.
 
     Filesystem skips: no SQL columns.
     """

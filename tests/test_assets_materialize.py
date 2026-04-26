@@ -276,6 +276,72 @@ async def test_materialize_cache_hit_does_not_slurp_bytes(
     assert rec2 is not None
 
 
+async def test_materialize_revalidates_cache_hit_against_current_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the file mutates between the initial streaming hash and the
+    cache lookup, the materializer must NOT silently attach the new path
+    to a stale record. It revalidates by streaming-hashing again before
+    trusting the cache hit; on disagreement, it falls through to the
+    slurp + canonical path so the persisted hash matches the bytes.
+    """
+    import hashlib
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    notes = project_root / "notes"
+    notes.mkdir()
+
+    png_bytes = _png_with_dims(5, 5)
+    img = notes / "x.png"
+    img.write_bytes(png_bytes)
+    md = notes / "doc.md"
+    md.write_text("placeholder", encoding="utf-8")
+
+    canonical = hashlib.sha256(png_bytes).hexdigest()
+    stale_sha = "1" * 64
+    # Pre-seed the store with a record at stale_sha so the first
+    # `get_asset(stale_sha)` finds it; revalidation hash returns the
+    # real canonical sha, exposing the disagreement.
+    store, get, upsert = _make_fake_storage()
+    store[stale_sha] = AssetRecord(
+        asset_id=stale_sha,
+        hash=stale_sha,
+        kind=AssetKind.IMAGE,
+        mime="image/png",
+        stored_path="assets/00/00000000-old.png",
+        original_paths=["a.png"],
+        bytes=10,
+        width=1,
+        height=1,
+        caption=None,
+        caption_model=None,
+        created_ts=0.0,
+    )
+
+    hashes = iter([stale_sha, canonical])
+    monkeypatch.setattr(
+        "dikw_core.data.assets.hash_file",
+        lambda _p: next(hashes),
+    )
+
+    rec = await materialize_asset(
+        AssetRef(original_path="x.png", alt="", start=0, end=10, syntax="markdown"),
+        source_md_path=md,
+        project_root=project_root,
+        get_asset=get,
+        upsert_asset=upsert,
+    )
+    assert rec is not None
+    record, was_new = rec
+    # The path must be attached to the canonical record, not the stale one.
+    assert record.hash == canonical
+    assert record.asset_id == canonical
+    assert "x.png" not in store[stale_sha].original_paths
+    assert was_new is True
+
+
 async def test_materialize_uses_canonical_hash_when_streaming_hash_disagrees(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

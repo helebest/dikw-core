@@ -259,6 +259,25 @@ def _resolve_local(
     return None
 
 
+async def _attach_or_return(
+    existing: AssetRecord,
+    ref: AssetRef,
+    upsert_asset: Callable[[AssetRecord], Awaitable[None]],
+) -> tuple[AssetRecord, bool]:
+    """Append ``ref.original_path`` to ``existing.original_paths`` if it
+    isn't already there, persist, and return ``(record, was_new=False)``.
+    """
+    if ref.original_path in existing.original_paths:
+        return existing, False
+    updated = existing.model_copy(
+        update={
+            "original_paths": [*existing.original_paths, ref.original_path],
+        }
+    )
+    await upsert_asset(updated)
+    return updated, False
+
+
 async def materialize_asset(
     ref: AssetRef,
     *,
@@ -320,18 +339,22 @@ async def materialize_asset(
 
     existing = await get_asset(sha)
     if existing is not None:
-        if ref.original_path not in existing.original_paths:
-            updated = existing.model_copy(
-                update={
-                    "original_paths": [
-                        *existing.original_paths,
-                        ref.original_path,
-                    ]
-                }
-            )
-            await upsert_asset(updated)
-            return updated, False
-        return existing, False
+        # Revalidate against the current file before trusting the cache:
+        # a concurrent rewrite between the hash and the lookup would
+        # otherwise attach this path to a stale record. Re-streaming
+        # keeps the memory bound; if the bytes shifted, fall through to
+        # the slurp path which writes under the canonical hash.
+        try:
+            confirmed_sha = hash_file(abs_path)
+        except OSError as e:
+            logger.warning("failed to revalidate hash for %s: %s", abs_path, e)
+            return None
+        if confirmed_sha == sha:
+            return await _attach_or_return(existing, ref, upsert_asset)
+        sha = confirmed_sha
+        existing = await get_asset(sha)
+        if existing is not None:
+            return await _attach_or_return(existing, ref, upsert_asset)
 
     try:
         data = abs_path.read_bytes()
@@ -340,26 +363,14 @@ async def materialize_asset(
         return None
 
     # Race window: the file may have changed between hash_file and the
-    # slurp above. Persist under the canonical hash of the bytes we
-    # actually have, and re-check cache so a content-address dedup hit
-    # still wins. Cost: one extra in-memory sha256 on cache-miss only.
+    # slurp. Persist under the canonical hash of the bytes we actually
+    # have, and re-check cache so a content-address dedup hit still wins.
     canonical_sha = hash_bytes(data)
     if canonical_sha != sha:
         sha = canonical_sha
         existing = await get_asset(sha)
         if existing is not None:
-            if ref.original_path not in existing.original_paths:
-                updated = existing.model_copy(
-                    update={
-                        "original_paths": [
-                            *existing.original_paths,
-                            ref.original_path,
-                        ]
-                    }
-                )
-                await upsert_asset(updated)
-                return updated, False
-            return existing, False
+            return await _attach_or_return(existing, ref, upsert_asset)
 
     _, ext_hint = _split_basename_and_ext(ref.original_path)
     mime = _detect_image_mime(data, ext_hint=ext_hint)

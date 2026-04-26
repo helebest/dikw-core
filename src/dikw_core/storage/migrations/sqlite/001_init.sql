@@ -31,12 +31,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
-    chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    doc_id   TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
-    seq      INTEGER NOT NULL,
-    start    INTEGER NOT NULL,
-    "end"    INTEGER NOT NULL,
-    text     TEXT NOT NULL,
+    chunk_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id    TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    seq       INTEGER NOT NULL,
+    start_off INTEGER NOT NULL,
+    end_off   INTEGER NOT NULL,
+    text      TEXT NOT NULL,
     UNIQUE (doc_id, seq)
 );
 

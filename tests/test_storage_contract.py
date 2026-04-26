@@ -186,6 +186,37 @@ async def test_documents_hash_indexed(storage: Storage) -> None:
     )
 
 
+async def test_chunks_offset_columns_renamed(storage: Storage) -> None:
+    """The DTO field names ``ChunkRecord.start``/``.end`` are unaffected —
+    adapters translate at the SQL boundary.
+
+    Filesystem skips: no SQL columns.
+    """
+    if isinstance(storage, FilesystemStorage):
+        pytest.skip("filesystem adapter has no SQL columns")
+
+    if isinstance(storage, SQLiteStorage):
+        conn = storage._conn
+        assert conn is not None
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info('chunks')")}
+    else:  # PostgresStorage
+        async with storage._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'chunks' "
+                "AND table_schema = current_schema()"
+            )
+            rows = await cur.fetchall()
+        cols = {r[0] for r in rows}
+
+    assert "start_off" in cols and "end_off" in cols, (
+        f"expected start_off/end_off in chunks columns, got {sorted(cols)}"
+    )
+    assert "start" not in cols and "end" not in cols, (
+        f"legacy start/\"end\" columns must be gone, got {sorted(cols)}"
+    )
+
+
 async def test_get_documents_batch(storage: Storage) -> None:
     """Batch fetch is the N+1 fix used by chunk-level retrieval — every
     adapter must satisfy it (missing ids are dropped silently, not raised).

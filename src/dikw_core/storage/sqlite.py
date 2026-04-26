@@ -148,6 +148,7 @@ class SQLiteStorage:
                 self._embedding_dim = int(meta[0])
             self._verify_vec_tables_use_cosine(conn)
             self._verify_no_legacy_content_table(conn)
+            self._migrate_legacy_chunk_offset_columns(conn)
 
         await asyncio.to_thread(_run)
 
@@ -257,7 +258,7 @@ class SQLiteStorage:
                 conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
                 for c in chunks:
                     cur = conn.execute(
-                        'INSERT INTO chunks(doc_id, seq, start, "end", text) '
+                        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text) "
                         "VALUES (?, ?, ?, ?, ?)",
                         (c.doc_id, c.seq, c.start, c.end, c.text),
                     )
@@ -379,7 +380,7 @@ class SQLiteStorage:
         def _run() -> list[ChunkRecord]:
             conn = self._require_conn()
             rows = conn.execute(
-                'SELECT chunk_id, doc_id, seq, start, "end", text '
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
                 "FROM chunks "
                 "WHERE chunk_id NOT IN "
                 "(SELECT chunk_id FROM embed_meta WHERE model = ?) "
@@ -391,8 +392,8 @@ class SQLiteStorage:
                     chunk_id=r["chunk_id"],
                     doc_id=r["doc_id"],
                     seq=r["seq"],
-                    start=r["start"],
-                    end=r["end"],
+                    start=r["start_off"],
+                    end=r["end_off"],
                     text=r["text"],
                 )
                 for r in rows
@@ -404,7 +405,7 @@ class SQLiteStorage:
         def _run() -> ChunkRecord | None:
             conn = self._require_conn()
             row = conn.execute(
-                'SELECT chunk_id, doc_id, seq, start, "end", text '
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
                 "FROM chunks WHERE chunk_id = ?",
                 (chunk_id,),
             ).fetchone()
@@ -414,8 +415,8 @@ class SQLiteStorage:
                 chunk_id=row["chunk_id"],
                 doc_id=row["doc_id"],
                 seq=row["seq"],
-                start=row["start"],
-                end=row["end"],
+                start=row["start_off"],
+                end=row["end_off"],
                 text=row["text"],
             )
 
@@ -430,7 +431,7 @@ class SQLiteStorage:
             conn = self._require_conn()
             placeholders = ",".join("?" * len(ids))
             rows = conn.execute(
-                'SELECT chunk_id, doc_id, seq, start, "end", text '
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
                 f"FROM chunks WHERE chunk_id IN ({placeholders})",
                 ids,
             ).fetchall()
@@ -439,8 +440,8 @@ class SQLiteStorage:
                     chunk_id=row["chunk_id"],
                     doc_id=row["doc_id"],
                     seq=row["seq"],
-                    start=row["start"],
-                    end=row["end"],
+                    start=row["start_off"],
+                    end=row["end_off"],
                     text=row["text"],
                 )
                 for row in rows
@@ -1159,6 +1160,30 @@ class SQLiteStorage:
                 "Delete the SQLite file (`rm .dikw/dikw.sqlite`) and re-run "
                 "`dikw ingest` to rebuild on the new D-layer schema."
             )
+
+    def _migrate_legacy_chunk_offset_columns(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Rename pre-Phase-X chunks columns ``start``/``"end"`` to
+        ``start_off``/``end_off`` in place.
+
+        ``CREATE TABLE IF NOT EXISTS`` in 001_init.sql is a no-op against an
+        existing chunks table, so a fresh checkout against a populated DB
+        would otherwise keep the old columns and break every chunk SQL.
+
+        ``ALTER TABLE RENAME COLUMN`` (SQLite ≥3.25, shipped with Python
+        3.12's bundled sqlite) leaves chunk_ids untouched, so embed_meta
+        FKs and chunks_vec rowid alignment survive — preserving the
+        ``wiki_log`` audit stream and other K/W state that a rebuild
+        would otherwise drop.
+        """
+        cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info('chunks')")
+        }
+        if "start" in cols:
+            conn.execute("ALTER TABLE chunks RENAME COLUMN start TO start_off")
+        if "end" in cols:
+            conn.execute('ALTER TABLE chunks RENAME COLUMN "end" TO end_off')
 
     def _ensure_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
         if self._embedding_dim is None:

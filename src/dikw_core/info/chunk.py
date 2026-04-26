@@ -14,7 +14,10 @@ Strategy (inspired by ``qmd/src/store.ts:257-310`` and
   mid-sentence.
 
 Token counting uses whitespace-split — cheap, deterministic, and close enough
-for retrieval. Swap in a real tokenizer later if the Phase-1 eval shows drift.
+for English. **Known limitation: CJK long docs never get chunked** because
+``str.split()`` returns ~1 token for an entire Chinese paragraph, so the
+``max_tokens`` budget is never hit. Tracked as TODOS T7; reuse jieba from
+``info/tokenize.py`` when this becomes urgent (Phase 3 dogfood).
 """
 
 from __future__ import annotations

@@ -17,6 +17,8 @@ import struct
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import pytest
+
 from dikw_core.data.assets import materialize_asset
 from dikw_core.schemas import AssetKind, AssetRecord, AssetRef
 
@@ -223,6 +225,60 @@ async def test_materialize_dedup_by_hash_appends_original_paths(
     assert rec2.original_paths == ["a.png", "b.png"]
     # Only one row.
     assert len(store) == 1
+
+
+async def test_materialize_cache_hit_does_not_slurp_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming-hash refactor invariant: when ``get_asset`` returns an
+    existing record, the materializer must NOT load the full file into
+    memory. Hashing is now done via streaming reads, and slurping after a
+    confirmed cache hit would defeat the entire memory-bound rewrite.
+
+    We verify by patching ``Path.read_bytes`` to raise *after* the first
+    (legitimate) materialize call. The second call exercises the cache
+    hit path; if it succeeds, ``read_bytes`` was not invoked.
+    """
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    notes = project_root / "notes"
+    notes.mkdir()
+
+    png_bytes = _png_with_dims(4, 4)
+    img = notes / "x.png"
+    img.write_bytes(png_bytes)
+    md = notes / "doc.md"
+    md.write_text("placeholder", encoding="utf-8")
+
+    _store, get, upsert = _make_fake_storage()
+    ref = AssetRef(original_path="x.png", alt="", start=0, end=10, syntax="markdown")
+
+    # First call: legitimate cache miss — slurp is permitted.
+    rec1 = await materialize_asset(
+        ref,
+        source_md_path=md,
+        project_root=project_root,
+        get_asset=get,
+        upsert_asset=upsert,
+    )
+    assert rec1 is not None
+
+    # Now poison read_bytes. If the cache-hit branch ever calls it the
+    # test fails with the explicit error below.
+    def _explode(_self: Path) -> bytes:
+        raise AssertionError("read_bytes() must not be called on cache hit")
+
+    monkeypatch.setattr(Path, "read_bytes", _explode)
+
+    rec2 = await materialize_asset(
+        ref,
+        source_md_path=md,
+        project_root=project_root,
+        get_asset=get,
+        upsert_asset=upsert,
+    )
+    assert rec2 is not None
 
 
 async def test_materialize_dedup_idempotent_on_same_path(

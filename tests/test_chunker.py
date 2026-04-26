@@ -64,6 +64,19 @@ def test_cjk_long_doc_splits_on_token_budget() -> None:
     assert len(chunks) >= 2
 
 
+def test_cjk_tokenizer_none_preserves_legacy_chunking() -> None:
+    """Backward-compat: an existing wiki configured with
+    ``cjk_tokenizer="none"`` must keep its original whitespace-split
+    chunking even on CJK content. Otherwise upgrading the engine would
+    silently re-chunk Chinese corpora and re-bill embeddings.
+    """
+    para = "机器学习是一种实现人工智能的方法,深度学习是机器学习的一个分支." * 80
+    body = "\n\n".join([para] * 3)
+    chunks = chunk_markdown(body, max_tokens=900, cjk_tokenizer="none")
+    # whitespace-split sees ~3 tokens (one per paragraph); never trips 900
+    assert len(chunks) == 1
+
+
 def test_ascii_token_count_equals_whitespace_split() -> None:
     """Invariant: an all-ASCII body's chunk-budget count equals
     ``len(body.split())``. Locks budget tuning against drift if anyone

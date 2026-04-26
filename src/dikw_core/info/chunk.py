@@ -15,8 +15,10 @@ Strategy (inspired by ``qmd/src/store.ts:257-310`` and
 
 Token counting goes through ``info/tokenize.count_tokens`` so CJK
 paragraphs (which contain no whitespace) get jieba-segmented before the
-budget comparison. ASCII bodies fall through to ``len(text.split())``,
-preserving the cheap deterministic behaviour the chunker was tuned for.
+budget comparison. ASCII bodies fall through to ``len(text.split())``.
+``cjk_tokenizer`` plumbs through ``RetrievalConfig.cjk_tokenizer`` so
+existing wikis configured with ``"none"`` keep their original chunk
+boundaries (and cached embeddings) instead of silently re-chunking.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from typing import NamedTuple
 
 from pydantic import BaseModel
 
-from dikw_core.info.tokenize import count_tokens
+from dikw_core.info.tokenize import CjkTokenizer, count_tokens
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
 _PARA_SEP = re.compile(r"\n\s*\n")
@@ -48,7 +50,7 @@ class _Para(NamedTuple):
     tokens: int
 
 
-def _paragraph_spans(text: str) -> list[_Para]:
+def _paragraph_spans(text: str, *, cjk_tokenizer: CjkTokenizer) -> list[_Para]:
     """Return (start, end, tokens) for each paragraph, preserving char offsets."""
     spans: list[_Para] = []
     if not text.strip():
@@ -74,7 +76,7 @@ def _paragraph_spans(text: str) -> list[_Para]:
         stripped_end = end - (len(para_text) - len(para_text.rstrip()))
         if stripped_end <= start:
             continue
-        tokens = count_tokens(para_text)
+        tokens = count_tokens(para_text, tokenizer=cjk_tokenizer)
         if tokens == 0:
             continue
         spans.append(_Para(start, stripped_end, tokens))
@@ -87,6 +89,7 @@ def chunk_markdown(
     max_tokens: int = 900,
     overlap_ratio: float = 0.15,
     atomic_spans: Sequence[tuple[int, int]] = (),
+    cjk_tokenizer: CjkTokenizer = "jieba",
 ) -> list[MarkdownChunk]:
     """Chunk ``body`` into (mostly) ``max_tokens``-sized paragraph-aligned windows.
 
@@ -106,7 +109,7 @@ def chunk_markdown(
     if not 0.0 <= overlap_ratio < 1.0:
         raise ValueError("overlap_ratio must be in [0, 1)")
 
-    paras = _paragraph_spans(body)
+    paras = _paragraph_spans(body, cjk_tokenizer=cjk_tokenizer)
     if not paras:
         return []
 

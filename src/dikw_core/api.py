@@ -55,6 +55,7 @@ from .info.embed import (
     embed_chunks_multimodal,
 )
 from .info.search import Hit, HybridSearcher, MultimodalSearch
+from .info.tokenize import CjkTokenizer
 from .knowledge.indexgen import regenerate_index
 from .knowledge.links import parse_links, resolve_links
 from .knowledge.lint import LintReport, run_lint
@@ -709,7 +710,11 @@ async def ingest(
                             new_assets_by_id.setdefault(rec.asset_id, rec)
 
             atomic_spans = [(r.start, r.end) for r in parsed.asset_refs]
-            chunks = chunk_markdown(parsed.body, atomic_spans=atomic_spans)
+            chunks = chunk_markdown(
+                parsed.body,
+                atomic_spans=atomic_spans,
+                cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
+            )
             chunk_records = [
                 ChunkRecord(
                     doc_id=doc_id, seq=c.seq, start=c.start, end=c.end, text=c.text
@@ -1114,6 +1119,7 @@ async def synthesize(
                 page=page,
                 embedder=embedder,
                 embedding_model=cfg.provider.embedding_model,
+                cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
             )
             await storage.append_wiki_log(
                 WikiLogEntry(
@@ -1167,6 +1173,7 @@ async def _persist_wiki_page(
     page: WikiPage,
     embedder: EmbeddingProvider | None,
     embedding_model: str,
+    cjk_tokenizer: CjkTokenizer = "none",
 ) -> None:
     """Index ``page`` into the K layer: document, chunks, embeddings, links."""
     doc_id = _doc_id_for(Layer.WIKI, page.path)
@@ -1186,7 +1193,7 @@ async def _persist_wiki_page(
         )
     )
 
-    chunks = chunk_markdown(page.body)
+    chunks = chunk_markdown(page.body, cjk_tokenizer=cjk_tokenizer)
     records = [
         ChunkRecord(doc_id=doc_id, seq=c.seq, start=c.start, end=c.end, text=c.text)
         for c in chunks

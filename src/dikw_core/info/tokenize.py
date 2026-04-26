@@ -14,9 +14,11 @@ the same reason ``embedding_dimensions`` is: flipping the knob
 post-ingest makes the query side produce tokens that don't match
 what's indexed.
 
-``cjk_tokenizer="none"`` (the default) returns the text unchanged —
-zero behavioural change for ASCII-only corpora. See
-``evals/BASELINES.md`` for measured impact on CMTEB / T2Retrieval.
+``cjk_tokenizer="jieba"`` is the default so Chinese ingest works
+out-of-the-box; ``has_cjk`` short-circuits ASCII text so all-ASCII
+corpora pay no segmentation cost. ``cjk_tokenizer="none"`` is the
+opt-out for users who want byte-identical legacy whitespace behaviour.
+See ``evals/BASELINES.md`` for measured impact on CMTEB / T2Retrieval.
 """
 
 from __future__ import annotations

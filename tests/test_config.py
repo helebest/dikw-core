@@ -213,12 +213,15 @@ sources: []
     assert cfg2.retrieval.vector_weight == 1.5
 
 
-def test_retrieval_config_cjk_tokenizer_defaults_to_none() -> None:
-    """Defaulting to ``none`` keeps the pre-feature FTS behaviour for
-    every existing wiki. ASCII-only users pay no cost and see no diff.
+def test_retrieval_config_cjk_tokenizer_defaults_to_jieba() -> None:
+    """Defaulting to ``jieba`` makes ``dikw ingest`` correctly chunk and
+    index Chinese content out of the box; ``has_cjk`` short-circuits
+    ASCII inputs so all-ASCII corpora pay no segmentation cost. Users
+    who want the legacy whitespace behaviour set ``cjk_tokenizer: none``
+    explicitly.
     """
     cfg = RetrievalConfig()
-    assert cfg.cjk_tokenizer == "none"
+    assert cfg.cjk_tokenizer == "jieba"
 
 
 def test_retrieval_config_cjk_tokenizer_round_trips(tmp_path: Path) -> None:

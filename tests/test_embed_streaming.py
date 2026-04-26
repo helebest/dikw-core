@@ -25,7 +25,11 @@ from dikw_core.info.embed import (
 )
 from dikw_core.schemas import EmbeddingRow
 
-from .fakes import FakeMultimodalEmbedding
+from .fakes import CountingEmbedder, FakeMultimodalEmbedding
+
+# Backwards-compat alias used throughout this module before
+# CountingEmbedder was promoted to tests/fakes.
+_CountingEmbedder = CountingEmbedder
 
 
 def _chunks(n: int) -> list[ChunkToEmbed]:
@@ -152,29 +156,6 @@ async def test_embed_chunks_multimodal_empty_still_pings_provider() -> None:
 
 
 # ---- A3: api.ingest streams per-batch upserts ----------------------------
-
-
-class _CountingEmbedder:
-    """Wraps FakeEmbeddings; counts embed() calls (= batches).
-
-    A simpler counting wrapper than the perf-suite version (slice 8);
-    inlined here so streaming tests don't depend on the perf module.
-    """
-
-    def __init__(self, fail_after: int | None = None) -> None:
-        self._inner = FakeEmbeddings()
-        self.embed_calls = 0
-        self.total_texts = 0
-        self.fail_after = fail_after  # raise on (fail_after+1)-th call
-
-    async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
-        self.embed_calls += 1
-        self.total_texts += len(texts)
-        if self.fail_after is not None and self.embed_calls > self.fail_after:
-            raise RuntimeError(
-                f"_CountingEmbedder simulated failure on call {self.embed_calls}"
-            )
-        return await self._inner.embed(texts, model=model)
 
 
 async def test_api_ingest_streams_per_batch_upserts(tmp_path: Path) -> None:

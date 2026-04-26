@@ -17,10 +17,43 @@ from dikw_core.schemas import MultimodalInput
 
 __all__ = [
     "EMBED_DIM",
+    "CountingEmbedder",
     "FakeEmbeddings",
     "FakeLLM",
     "FakeMultimodalEmbedding",
 ]
+
+
+@dataclass
+class CountingEmbedder:
+    """Counts ``embed`` calls + total texts; delegates to ``FakeEmbeddings``.
+
+    Used by streaming + perf tests to assert "cache hit means zero
+    provider calls" (``embed_calls == 0``) or to enforce per-batch
+    streaming visibility (call count > 1).
+
+    ``fail_after`` lets a test simulate a mid-flight crash: the
+    ``(fail_after+1)``-th call raises ``RuntimeError``. Default
+    ``None`` = never fail.
+    """
+
+    inner: FakeEmbeddings = field(default_factory=FakeEmbeddings)
+    embed_calls: int = field(default=0, init=False)
+    total_texts: int = field(default=0, init=False)
+    fail_after: int | None = None
+
+    async def embed(self, texts: list[str], *, model: str) -> list[list[float]]:
+        self.embed_calls += 1
+        self.total_texts += len(texts)
+        if self.fail_after is not None and self.embed_calls > self.fail_after:
+            raise RuntimeError(
+                f"CountingEmbedder simulated failure on call {self.embed_calls}"
+            )
+        return await self.inner.embed(texts, model=model)
+
+    def reset(self) -> None:
+        self.embed_calls = 0
+        self.total_texts = 0
 
 
 @dataclass

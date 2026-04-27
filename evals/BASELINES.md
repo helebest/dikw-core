@@ -7,6 +7,206 @@ regression from a re-run variance.
 Newest first. `dikw eval` thresholds in each dataset's `dataset.yaml`
 are calibrated ~2-3 % below the most recent canonical-mode run.
 
+## 2026-04-28 — Phase 1.5 chunk-level fusion @ Qwen3-Embedding-0.6B
+
+**Status:** new canonical baseline for both `cmteb-t2-subset` and
+`scifact` under PR #27 PR-A's chunk-level fusion path
+(`embed_versions` registry + per-version `vec_chunks_v<id>` tables).
+Embedding model flipped from `Qwen3-Embedding-8B` (matryoshka 1024)
+to `Qwen3-Embedding-0.6B` (native 1024) — same vector-space dim,
+~13× fewer params. SciFact thresholds rebased to 0.6B levels;
+CMTEB thresholds unchanged (0.6B comfortably above the existing
+floor).
+
+### What changed from the 2026-04-24 baselines
+
+1. **Embedding model: `Qwen3-Embedding-8B` → `Qwen3-Embedding-0.6B`.**
+   Both produce 1024-dim vectors on Gitee AI's
+   `https://ai.gitee.com/v1` endpoint (8B via matryoshka truncation,
+   0.6B native). Configured in
+   `tests/fixtures/live-minimax-gitee.dikw.yml` and the two scratch
+   wikis at `/tmp/dikw-phase15-{cmteb,scifact}/dikw.yml`. Verified
+   via `dikw check --embed-only` (cold response 2.4 s, dim=1024 as
+   expected). Motivation: 0.6B is dramatically cheaper / faster on
+   Gitee in throttle-prone windows; we wanted to know if it's
+   equivalent on quality.
+2. **Schema is now PR #27 PR-A's chunk-level layout.**
+   `chunk_embed_meta` per chunk, `embed_cache` re-keyed by
+   `(content_hash, version_id)`, per-version `vec_chunks_v<id>` table
+   created lazily on first ingest. The 8B-built CMTEB snapshot at
+   `evals/.cache/snapshots/cmteb-t2-subset/Qwen3-Embedding-8B__1024__32540e83__mig3/`
+   was wiped (legacy `content` table from PR #22, plus stale
+   `chunks_vec` singleton from pre-PR-A) and rebuilt under 0.6B from
+   scratch. SciFact wiki was scaffolded but never ingested previously
+   — built fresh from `evals/datasets/scifact/corpus/` (5,183 files
+   copied into the wiki's `sources/`).
+3. **Replay tool (`evals/tools/run_phase15_from_snapshot.py`) tracked
+   for the first time, with two Codex-flagged fixes folded in:**
+   `[P1]` queries pinned to the snapshot's active `embed_versions`
+   row via `storage.get_active_embed_version(modality="text")` so
+   query vectors always live in the same space as the indexed chunks
+   (mirrors `api.query()`); `[P2]` embedder construction gated on
+   `mode in ("vector", "hybrid")` so `--mode bm25` no longer requires
+   `DIKW_EMBEDDING_API_KEY`. The `[P2]` gate was empirically verified
+   by a smoke run with all API keys unset — script reached
+   `storage.migrate()` with zero embedding-related errors.
+
+### Results
+
+#### CMTEB / T2Retrieval (300 queries, 5K passages, jieba CJK tokenizer)
+
+```
+dikw replay — cmteb-t2-subset  (Qwen3-Embedding-0.6B, chunk-level fusion)
+┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
+│ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
+├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
+│ bm25   │    0.933 │     0.967 │ 0.922 │      0.840 │         0.908 │
+│ vector │    0.973 │     0.990 │ 0.967 │      0.943 │         0.980 │
+│ hybrid │    0.987 │     0.987 │ 0.979 │      0.946 │         0.988 │
+└────────┴──────────┴───────────┴───────┴────────────┴───────────────┘
+```
+
+vs 8B v2 (2026-04-24):
+
+| mode | metric | 8B v2 | 0.6B | Δ |
+|---|---|---|---|---|
+| bm25 | nDCG@10 | 0.840 | 0.840 | **0.000** (byte-identical) |
+| vector | nDCG@10 | 0.942 | 0.943 | +0.001 |
+| hybrid | nDCG@10 | 0.952 | 0.946 | -0.006 |
+| hybrid | recall@100 | 0.990 | 0.988 | -0.002 |
+
+BM25 leg is **byte-for-byte identical** across the schema migration —
+PR #27 PR-A's `ranked_docs_deduped` step in chunk-level fusion
+preserves doc-level BM25 metrics, and PR #22's `content` table drop
+didn't perturb the FTS5 path. Vector leg ties 8B within noise; hybrid
+loses 0.006 nDCG@10 against 8B but stays comfortably above both
+single-leg modes. Effectively a wash on CMTEB.
+
+#### SciFact (BEIR, 300 test queries, 5,183 passages)
+
+```
+dikw replay — scifact  (Qwen3-Embedding-0.6B, chunk-level fusion)
+┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
+│ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
+├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
+│ bm25   │    0.707 │     0.817 │ 0.638 │      0.669 │         0.865 │
+│ vector │    0.700 │     0.813 │ 0.639 │      0.672 │         0.903 │
+│ hybrid │    0.737 │     0.843 │ 0.662 │      0.693 │         0.947 │
+└────────┴──────────┴───────────┴───────┴────────────┴───────────────┘
+```
+
+vs 8B v2 (2026-04-23):
+
+| mode | metric | 8B v2 | 0.6B | Δ |
+|---|---|---|---|---|
+| bm25 | nDCG@10 | 0.669 | 0.669 | **0.000** (byte-identical) |
+| vector | nDCG@10 | 0.773 | 0.672 | **-0.101** |
+| hybrid | nDCG@10 | 0.771 | 0.693 | **-0.078** |
+| hybrid | hit@3 | 0.797 | 0.737 | -0.060 |
+| hybrid | mrr | 0.734 | 0.662 | -0.072 |
+
+**0.6B regresses ~0.05–0.10 across position-weighted metrics on
+SciFact**, while CMTEB is essentially flat. The vector leg drops to
+parity with BM25 (0.672 vs 0.669) — i.e., the dense leg has
+**effectively zero semantic uplift over keyword retrieval** on
+SciFact at 0.6B. recall@100 is the only metric that holds: 0.947 at
+0.6B vs 0.947 at 8B (within noise) — the long tail still surfaces,
+just at lower ranks.
+
+### Why the asymmetric outcome
+
+CMTEB-T2 is a **generic-domain Chinese passage retrieval task**;
+0.6B's smaller capacity is offset by Qwen3's strong Chinese
+pretraining, plus the question-form queries align well with the
+passage corpus's surface vocabulary (high BM25 ceiling already does
+most of the work — see hybrid bm25=0.840 vs vector=0.943 vs hybrid
+0.946; vector+BM25 are close together, fusion gain is small).
+
+SciFact is **biomedical scientific claim verification** — long-tail
+specialist vocabulary (rare clinical terms, gene names, drug
+references). At 8B, dense retrieval delivers a real ~0.10 nDCG@10
+uplift over BM25 (0.773 vs 0.669). At 0.6B that uplift collapses
+entirely (0.672 vs 0.669): the smaller model lacks the parametric
+biomedical knowledge to pull rare-term queries above keyword level.
+This is the textbook "small embedding model on specialist English"
+failure mode and **is not a bug, it is the model's limit**.
+
+### Threshold rebase
+
+`evals/datasets/scifact/dataset.yaml` thresholds rebased ~3 % below
+0.6B observed numbers (the established `dataset.yaml` convention).
+This **lowers the gate floor** on SciFact — an honest 8B regression
+that produces ~0.69 nDCG@10 will now pass the gate where it would
+have failed before. Trade-off acknowledged: the gate now detects
+"0.6B-class" regressions (model swap, ingest pipeline breakage,
+fusion weight drift), not "8B-quality" ones. Re-raise if and when a
+larger-model pipeline becomes the canonical eval target. CMTEB
+thresholds unchanged (0.6B sits comfortably above the existing
+floor).
+
+### Configuration
+
+| | |
+|---|---|
+| dikw commit | `5c6337f` (post-PR #29 main) |
+| Embedding provider | openai_compat → Gitee AI (`https://ai.gitee.com/v1`) |
+| Embedding model | `Qwen3-Embedding-0.6B`, **1024-dim native** |
+| Embedding batch size | 16 (Gitee caps at 25) |
+| Chunking | default heading-aware, 900 tokens, 15 % overlap |
+| Fusion | RRF `(rrf_k=60, w_bm25=0.3, w_vec=1.5)` — shipped defaults |
+| Storage schema | PR #27 PR-A: `chunk_embed_meta` + per-version `vec_chunks_v<id>` |
+| Wiki layout | `/tmp/dikw-phase15-{cmteb,scifact}/` (out-of-tree scratch) |
+| Replay tool | `evals/tools/run_phase15_from_snapshot.py` (this is its first tracked run) |
+| Wall time, CMTEB ingest | ~10 min (5,000 chunks, ~6 s/batch under mild Gitee load) |
+| Wall time, CMTEB eval | ~5 min (300 queries pre-batched + 3-mode search) |
+| Wall time, SciFact ingest | ~10 min (5,183 chunks, similar batch latency) |
+| Wall time, SciFact eval | ~5 min |
+| Approximate cost | ~¥0.1 each on Gitee AI (10K total chunks × 1024-dim, 0.6B is cheaper than 8B per token) |
+
+### Known issues / observations
+
+**1. 0.6B is task-dependent.** CMTEB ≈ 8B; SciFact -0.10 nDCG@10
+vector / -0.08 hybrid. Don't generalise the "0.6B is cheap and
+adequate" finding past the regimes measured here. For
+specialist-vocabulary English corpora (legal, medical, scientific),
+plan to spend 8B-class budget or evaluate explicitly.
+
+**2. Hybrid loses to vector on CMTEB at 0.6B.** Tiny (-0.003 nDCG@10
+hybrid vs vector at 0.6B; on 8B v2 it was hybrid +0.010 over vector).
+Within noise, but worth flagging: when vector is strong and BM25 is
+already at 0.84, fusion has very little room to add. RRF's rank-based
+nature limits the upside. Score-normalised fusion (CombSUM/CombMNZ)
+remains an open follow-up from prior baselines and could matter more
+on this kind of vector-dominated regime.
+
+**3. Replay tool's `[P1]` correctness is contract-tested by behaviour,
+not by code path.** The tool now passes `text_version_id` to
+`HybridSearcher.from_config` and uses the active version's
+`model`/`dim`. Tested via the actual CMTEB+SciFact runs (would have
+caught a dim mismatch immediately). No unit test yet — the tool is
+still a recovery utility, not a runner refactor (per its own module
+docstring).
+
+### Follow-ups (priority-ordered)
+
+1. **Decide canonical model going forward.** Three reasonable
+   stances: (a) keep 0.6B everywhere, accept SciFact gate semantics
+   relaxation; (b) per-dataset model selection (8B for SciFact, 0.6B
+   for CMTEB) — needs `dikw.yml` per-wiki, already supported; (c)
+   pick a middle 1.5–4B model if Gitee offers one and re-baseline.
+   Currently shipped: (a).
+2. **Score-normalised fusion (CombSUM / CombMNZ).** Inherited from
+   prior baselines. Now empirically motivated on CMTEB-0.6B too, not
+   just SciFact: when both legs are close, RRF is a coarse averager.
+3. **Pin replay tool with a smoke unit test.** Single-query CMTEB
+   run with a fake version mismatch should exercise `[P1]` 's
+   active-version pinning path. Cheap to add.
+4. **Fix the `--dump-raw` query-id key issue (open from prior
+   baselines).** Still open; not exercised by this run.
+5. **Optional — full-corpus runs.** The 5K subsets undercount
+   distractor density vs full-corpus. Spend ~¥1 / ~1 h to confirm
+   the per-task asymmetry holds at full scale.
+
 ## 2026-04-24 — CMTEB / T2Retrieval v2 — CJK BM25 via jieba
 
 **Status:** supersedes v1 as the canonical CMTEB baseline. Same

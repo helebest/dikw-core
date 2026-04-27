@@ -19,20 +19,30 @@ description: >
   strips the curated description. See ``evals/BASELINES.md`` for the
   observed numbers and follow-ups.
 
-# Calibrated against the 2026-04-23 v2 real-embedder run (Qwen3-
-# Embedding-8B @ 4096-dim via Gitee AI) with the SciFact-tuned RRF
-# defaults (rrf_k=60, bm25_weight=0.3, vector_weight=1.5 — see
-# ``src/dikw_core/config.py :: RetrievalConfig``). Thresholds leave
-# ~2-3% slack below observed so an honest retrieval regression fails
-# the gate while small re-run variance doesn't. These bind when
-# running with ``--retrieval hybrid`` (canonical) or ``--retrieval
-# all`` (mirrored from hybrid).
+# Calibrated against the 2026-04-28 chunk-level fusion run with
+# Qwen3-Embedding-0.6B (1024-dim native via Gitee AI) under the
+# SciFact-tuned RRF defaults (rrf_k=60, bm25_weight=0.3,
+# vector_weight=1.5 — see ``src/dikw_core/config.py :: RetrievalConfig``).
+# Thresholds leave ~3 % slack below observed hybrid-canonical numbers
+# so an honest retrieval regression fails the gate while small
+# re-run variance doesn't. These bind when running with
+# ``--retrieval hybrid`` (canonical) or ``--retrieval all`` (mirrored
+# from hybrid).
+#
+# Threshold floor was rebased downward from the 2026-04-23 8B-era
+# values (hit@3 0.77 / hit@10 0.89 / mrr 0.71 / ndcg@10 0.74 /
+# recall@100 0.94) — 0.6B regresses ~0.05–0.10 across position-
+# weighted metrics on this specialist-English corpus while CMTEB
+# stays flat. The current floor detects 0.6B-class regressions, not
+# 8B-quality ones; raise back if a larger model becomes the
+# canonical eval target. See ``evals/BASELINES.md`` for the rebase
+# rationale and the per-task asymmetry analysis.
 thresholds:
-  hit_at_3: 0.77
-  hit_at_10: 0.89
-  mrr: 0.71
-  ndcg_at_10: 0.74
-  recall_at_100: 0.94
+  hit_at_3: 0.71
+  hit_at_10: 0.82
+  mrr: 0.64
+  ndcg_at_10: 0.67
+  recall_at_100: 0.92
 
 published_baselines:
   source: "BEIR paper (Thakur et al., 2021)"

@@ -224,13 +224,13 @@ storage:
   pool_size: 10
 ```
 
-DB-less, Obsidian-vault-native (zero extra deps, bounded to ≤ ~300 pages):
+DB-less, Obsidian-vault-native (zero extra deps, bounded to ≤ ~300 pages,
+FTS-only — switch to `sqlite` if you need dense retrieval):
 
 ```yaml
 storage:
   backend: filesystem
   root: .dikw/fs
-  embed: true      # enable pure-Python cosine vector search
 ```
 
 All three back ends implement the same `Storage` Protocol, so every

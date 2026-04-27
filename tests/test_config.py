@@ -77,14 +77,41 @@ provider:
 storage:
   backend: filesystem
   root: .dikw/fs
-  embed: false
 sources: []
 """,
         encoding="utf-8",
     )
     cfg = load_config(path)
     assert isinstance(cfg.storage, FilesystemStorageConfig)
-    assert cfg.storage.embed is False
+    assert cfg.storage.root == ".dikw/fs"
+
+
+def test_filesystem_config_rejects_embed_field(tmp_path: Path) -> None:
+    """Filesystem backend is FTS-only by design — ``embed`` was a stale
+    knob from the cancelled PR-B plan. Loading a config that still
+    carries ``embed: true`` must fail loudly and point users at the
+    sqlite backend (the documented path to dense retrieval), not
+    silently accept the field.
+    """
+    path = tmp_path / CONFIG_FILENAME
+    path.write_text(
+        """
+provider:
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
+storage:
+  backend: filesystem
+  root: .dikw/fs
+  embed: true
+sources: []
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="sqlite") as excinfo:
+        load_config(path)
+    assert "embed" in str(excinfo.value).lower()
 
 
 def test_find_config_walks_up(tmp_path: Path) -> None:

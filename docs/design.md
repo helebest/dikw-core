@@ -82,7 +82,7 @@ Module boundaries are chosen so each subpackage fits in a single reading pass an
 - **Packaging**: `uv` → `pyproject.toml` (PEP 621), `uv.lock` committed; single source layout under `src/dikw_core/`
 - **Storage (MVP, default)**: stdlib `sqlite3` + `sqlite-vec` (pip) for vectors; FTS5 built into SQLite. Behind a `Storage` Protocol.
 - **Storage (planned, enterprise)**: Postgres 15+ with `pgvector` ≥0.6 and `tsvector`/`pg_trgm` for full-text, via `psycopg[binary,pool]`. Optional extra: `uv pip install dikw-core[postgres]`.
-- **Storage (planned, vault-native)**: Filesystem backend — the vault IS the index. No DB. Chunks/links/wisdom-items live in `.dikw/` JSON sidecars; search falls back to LLM-driven navigation over `index.md` + link graph. Matches Karpathy's "scoping deterministic, reasoning probabilistic" claim at ≤~200 pages. No extra dep footprint.
+- **Storage (planned, vault-native)**: Filesystem backend — the vault IS the index. No DB. Chunks/links/wisdom-items live in `.dikw/` JSON sidecars; retrieval is FTS + LLM-driven navigation over `index.md` + link graph (no dense retrieval — users who outgrow lexical-only flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest). Matches Karpathy's "scoping deterministic, reasoning probabilistic" claim at ≤~200 pages. No extra dep footprint.
 - **Schemas**: Pydantic v2 for config, records, tool I/O
 - **Markdown**: `markdown-it-py` + `python-frontmatter`; wiki-link parsing via a small in-repo module (not a heavy dep)
 - **LLM SDKs**: `anthropic`, `openai` (the `openai` SDK covers all OpenAI-compatible endpoints), behind a thin provider interface
@@ -227,10 +227,11 @@ storage:
   # dsn: postgresql://user:pass@host:5432/dikw
   # schema: dikw            # isolates multi-tenant deployments
   # pool_size: 10
-  # --- filesystem-specific (Phase 5, Obsidian-native) ---
+  # --- filesystem-specific (Phase 5, Obsidian-native, FTS-only) ---
   # root: .dikw/fs          # JSON sidecar directory inside the vault
-  # embed: false            # skip embeddings; rely on LLM nav over index.md
   # max_pages_hint: 300     # warn + suggest switching to sqlite above this
+  # Dense retrieval is sqlite/postgres only — switch backends and
+  # re-ingest if you need vector search.
 schema:
   description: "Personal research wiki on AI safety"
   page_types: [entity, concept, note]
@@ -422,21 +423,21 @@ The Postgres adapter (Phase 5) is installed as an **optional extra** so SQLite u
 postgres = ["psycopg[binary,pool] >=3.2", "pgvector >=0.3"]
 ```
 
-### Filesystem / Vault backend (Phase 5, Obsidian-native)
+### Filesystem / Vault backend (Phase 5, Obsidian-native, FTS-only)
 
 Purpose: a DB-less mode where the Obsidian vault itself holds everything the engine needs, so the whole knowledge base is one portable, human-readable directory.
 
 How it maps to the Storage Protocol:
 - `upsert_document` — the files already exist on disk; this becomes a small JSON manifest in `.dikw/fs/documents.jsonl` keyed by content hash (path + title + mtime + layer).
 - `fts_search` — simple in-process scan (lunr-style inverted index built at startup from the manifest) or just substring + front-matter tag filtering. Good enough at ≤200 pages.
-- `vec_search` — **optional**. If `storage.embed: true`, embeddings are stored as per-chunk JSON sidecars under `.dikw/fs/vecs/<chunk_id>.json` and searched via in-process cosine (numpy). If `false`, `vec_search` raises `NotSupported` and `info/search.py` falls back to a **navigation mode**: pass `index.md` + relevant folders' file list to the LLM, let it pick pages to read, then answer.
+- `vec_search` — **always raises `NotSupported`**. The filesystem backend is FTS-only by design (rationale: at ≤300-page scale, BM25 + LLM-nav adds enough signal that a third version-registry implementation isn't worth the maintenance surface). `info/search.py` catches this and degrades to a **navigation mode**: pass `index.md` + relevant folders' file list to the LLM, let it pick pages to read, then answer. Users who need dense retrieval flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest.
 - `upsert_link` / `links_from` / `links_to` — maintained in `.dikw/fs/links.jsonl`, regenerated from parsing wiki MD on `ingest` / `synth`.
 - `put_wisdom` / `list_wisdom` / `set_wisdom_status` — wisdom items are already individual markdown files; their status is just the `status:` front-matter field. The adapter reads/writes that field rather than a separate table.
 
 Constraints and honesty:
-- Not a scale story — `max_pages_hint` defaults to 300; above that the engine emits a one-shot suggestion to `dikw migrate --to sqlite`.
+- Not a scale story — `max_pages_hint` defaults to 300; above that the engine emits a one-shot suggestion to switch `storage.backend` to `sqlite` in `dikw.yml` and re-ingest.
 - No cross-session locking — the filesystem backend assumes a single writer at a time. Enterprise deployments should use Postgres.
-- The same storage contract test suite runs against filesystem with `embed=false` (with vec_search tests marked xfail) and `embed=true` (all tests).
+- The storage contract suite parametrizes against filesystem with vec / version-registry methods asserting `NotSupported` (see `tests/test_storage_contract.py::test_filesystem_rejects_all_dense_methods`); FTS, link, and wisdom paths share the cross-backend contract tests.
 
 ## Provider Abstraction
 
@@ -486,7 +487,7 @@ Each tool validates input with Pydantic and returns structured JSON plus a markd
 - **Phase 4 — Polish:** OpenAI-compat provider completeness (Ollama and Azure verified), prompt-caching on Anthropic paths, packaging for PyPI (`pip install dikw-core`), docs site, GitHub Actions release automation, source-backend extension point exercised with one additional backend (likely `html` since it's trivial — keeps the seam real without committing to MinerU).
 - **Phase 5 — Alternate storage adapters:**
   - **Postgres (enterprise):** `storage/postgres.py` using `psycopg[binary,pool]` + `pgvector`, `migrations/postgres/001_init.sql` with `tsvector`+GIN for FTS and `vector(N)` for embeddings. Contract test suite runs green against a `postgres:16`+`pgvector` container in CI. Packaged as `dikw-core[postgres]` optional extra.
-  - **Filesystem / vault (Obsidian-native):** `storage/filesystem.py` — JSON sidecars under `.dikw/fs/`, in-process FTS, optional numpy-cosine vector search, and LLM-navigation fallback. No extra deps. `dikw init --vault` scaffolds a pure-vault layout. `dikw migrate --to sqlite` upgrades in place when the vault outgrows the filesystem backend.
+  - **Filesystem / vault (Obsidian-native):** `storage/filesystem.py` — JSON sidecars under `.dikw/fs/`, in-process FTS, and LLM-navigation fallback. No extra deps. **FTS-only by design** — no vector search; users who outgrow lexical-only flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest.
   - Acceptance: the Phase 1–3 verification script runs end-to-end against each adapter with only `storage.backend` flipped in `dikw.yml`.
 
 Each phase is a landable slice: CI green, tests added, docs updated.
@@ -519,7 +520,7 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 8. `uv run dikw mcp --stdio` launches; a round-trip from an MCP client calls `core.query` and receives the same answer as step 7.
 9. Swap provider in `dikw.yml` from Anthropic to OpenAI-compatible (pointed at Ollama locally or OpenAI) and repeat step 4 — works unchanged.
 10. (After Phase 5, Postgres) `docker compose up postgres` (with `pgvector` image), set `storage.backend: postgres` in `dikw.yml`, rerun steps 3–8 against the Postgres adapter — every assertion holds, no engine code changes. The storage contract test suite runs green under `DIKW_TEST_POSTGRES_DSN=...` in CI.
-11. (After Phase 5, Vault) `dikw init --vault examples/obsidian-vault`, open the folder in Obsidian, confirm wikilinks in `wiki/` render and files can be hand-edited; run `dikw synth` + `dikw distill` + `dikw query`; confirm that with `storage.embed: false` the engine falls back to LLM-navigation mode and still returns cited answers from `index.md`-driven retrieval; verify `.dikw/` is present in Obsidian's ignore list.
+11. (After Phase 5, Vault) Scaffold an Obsidian vault under `examples/obsidian-vault` with a hand-written `dikw.yml` (`storage.backend: filesystem`, `root: .dikw/fs`), open the folder in Obsidian, confirm wikilinks in `wiki/` render and files can be hand-edited; run `dikw synth` + `dikw distill` + `dikw query`; confirm the engine falls back to LLM-navigation mode (filesystem is FTS-only, `vec_search` raises `NotSupported`) and still returns cited answers from `index.md`-driven retrieval; verify `.dikw/` is present in Obsidian's ignore list.
 
 ## Open execution-time decisions (not blockers for plan approval)
 

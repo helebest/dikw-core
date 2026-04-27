@@ -1,9 +1,9 @@
-"""Filesystem storage adapter — DB-less, Obsidian-vault-native.
+"""Filesystem storage adapter — DB-less, Obsidian-vault-native, FTS-only.
 
 The entire index lives as JSONL sidecars under ``.dikw/fs/`` so a wiki is
 a single portable directory you can zip, `git clone`, or open in Obsidian.
-Scale is intentionally bounded (≤ a few hundred pages); beyond that the
-plan expects users to migrate to the SQLite backend.
+Scale is intentionally bounded (≤ a few hundred pages); users who outgrow
+that flip ``storage.backend`` to ``sqlite`` in ``dikw.yml`` and re-ingest.
 
 Design:
 
@@ -18,8 +18,8 @@ Design:
   writes flush the relevant sidecar to disk.
 * **FTS** = naive inverted index built on demand; scored by
   query-term-presence weighted by IDF. Good enough at small scale.
-* **Vectors** = per-chunk JSON sidecar under ``.dikw/fs/vecs/<chunk_id>.json``
-  written only when embeddings are enabled. Search is pure-Python cosine.
+* **No dense retrieval.** Embedding / vector methods raise
+  ``NotSupported`` by design — see ``docs/design.md``.
 """
 
 from __future__ import annotations
@@ -59,6 +59,11 @@ from .base import NotSupported
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9']+")
 
+_DENSE_NOT_SUPPORTED = (
+    "filesystem backend is FTS-only by design — switch to the sqlite "
+    "backend for dense retrieval"
+)
+
 
 def _tokenise(text: str) -> list[str]:
     return [w.lower() for w in _WORD.findall(text)]
@@ -69,27 +74,20 @@ class FilesystemStorage:
 
     DOC_FILE = "documents.jsonl"
     CHUNKS_FILE = "chunks.jsonl"
-    EMBED_META_FILE = "embed_meta.jsonl"
-    EMBED_DIM_FILE = "embed_dim.txt"
-    VECS_DIR = "vecs"
     LINKS_FILE = "links.jsonl"
     WIKI_LOG_FILE = "wiki_log.jsonl"
     WISDOM_ITEMS_FILE = "wisdom_items.jsonl"
     WISDOM_EVIDENCE_FILE = "wisdom_evidence.jsonl"
     CHUNK_COUNTER_FILE = "chunk_counter.txt"
 
-    def __init__(self, root: str | Path, *, embed: bool = False) -> None:
+    def __init__(self, root: str | Path) -> None:
         self._root = Path(root)
-        self._embed_enabled = embed
         self._lock = asyncio.Lock()
 
         # In-memory caches populated by ``connect()``.
         self._docs: dict[str, DocumentRecord] = {}
         self._chunks: dict[int, ChunkRecord] = {}
         self._by_doc_chunks: dict[str, list[int]] = defaultdict(list)
-        self._embed_meta: dict[int, str] = {}
-        self._embeddings: dict[int, list[float]] = {}
-        self._embedding_dim: int | None = None
         self._links: list[LinkRecord] = []
         self._wiki_log: list[WikiLogEntry] = []
         self._wisdom_items: dict[str, WisdomItem] = {}
@@ -106,7 +104,6 @@ class FilesystemStorage:
     async def connect(self) -> None:
         def _load() -> None:
             self._root.mkdir(parents=True, exist_ok=True)
-            (self._p(self.VECS_DIR)).mkdir(exist_ok=True)
 
             # documents
             for obj in _read_jsonl(self._p(self.DOC_FILE)):
@@ -120,21 +117,6 @@ class FilesystemStorage:
                     continue
                 self._chunks[cid] = chunk
                 self._by_doc_chunks[chunk.doc_id].append(cid)
-            # embed meta + vectors (only if on-disk)
-            for obj in _read_jsonl(self._p(self.EMBED_META_FILE)):
-                self._embed_meta[int(obj["chunk_id"])] = obj["model"]
-            dim_file = self._p(self.EMBED_DIM_FILE)
-            if dim_file.is_file():
-                try:
-                    self._embedding_dim = int(dim_file.read_text().strip())
-                except ValueError:
-                    self._embedding_dim = None
-            if self._embedding_dim is not None and self._embed_enabled:
-                for vec_file in (self._p(self.VECS_DIR)).iterdir():
-                    if vec_file.suffix == ".json":
-                        chunk_id = int(vec_file.stem)
-                        data = json.loads(vec_file.read_text())
-                        self._embeddings[chunk_id] = list(data["embedding"])
             # links
             for obj in _read_jsonl(self._p(self.LINKS_FILE)):
                 self._links.append(
@@ -175,10 +157,9 @@ class FilesystemStorage:
         return None
 
     async def migrate(self) -> None:
-        # No schema to apply; just ensure directories exist (idempotent).
+        # No schema to apply; just ensure the root directory exists (idempotent).
         def _run() -> None:
             self._root.mkdir(parents=True, exist_ok=True)
-            (self._p(self.VECS_DIR)).mkdir(exist_ok=True)
 
         await asyncio.to_thread(_run)
 
@@ -232,11 +213,6 @@ class FilesystemStorage:
             # Drop existing chunks for this doc.
             for cid in list(self._by_doc_chunks.get(doc_id, [])):
                 self._chunks.pop(cid, None)
-                self._embed_meta.pop(cid, None)
-                self._embeddings.pop(cid, None)
-                vec_path = self._p(self.VECS_DIR) / f"{cid}.json"
-                if vec_path.exists():
-                    await asyncio.to_thread(vec_path.unlink)
             self._by_doc_chunks[doc_id] = []
 
             # Insert new ones with freshly-minted ids.
@@ -251,40 +227,27 @@ class FilesystemStorage:
 
             await self._flush_chunks()
             await self._flush_counter()
-            # embed_meta must drop stale rows
-            await self._flush_embed_meta()
             return assigned
 
     async def upsert_embeddings(self, rows: Sequence[EmbeddingRow]) -> None:
-        # Filesystem backend lacks the embed_versions registry that the
-        # other adapters maintain — supporting versioned text embeddings
-        # is PR-B work. Until then this raises NotSupported so callers
-        # that route through ``upsert_embed_version`` (which already
-        # raises NotSupported on filesystem) degrade cleanly.
         del rows
-        raise NotSupported(
-            "filesystem backend doesn't implement versioned text embeddings yet"
-        )
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def get_cached_embeddings(
         self, content_hashes: Sequence[str], *, version_id: int
     ) -> dict[str, list[float]]:
-        # Pre-alpha: filesystem backend doesn't carry an embed cache;
-        # re-ingest re-pays the provider. Add when needed.
         del content_hashes, version_id
-        raise NotSupported("filesystem backend doesn't implement embed_cache")
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
         del rows
-        raise NotSupported("filesystem backend doesn't implement embed_cache")
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def list_chunks_missing_embedding(
         self, *, version_id: int
     ) -> list[ChunkRecord]:
         del version_id
-        raise NotSupported(
-            "filesystem backend doesn't implement versioned text embeddings yet"
-        )
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         return self._chunks.get(chunk_id)
@@ -351,13 +314,8 @@ class FilesystemStorage:
         limit: int = 20,
         layer: Layer | None = None,
     ) -> list[VecHit]:
-        # Symmetric with ``upsert_embeddings``: filesystem text path is
-        # not version-aware yet (PR-B will land the in-memory version
-        # registry + per-version vec dict).
         del embedding, version_id, limit, layer
-        raise NotSupported(
-            "filesystem backend doesn't implement versioned text embeddings yet"
-        )
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     # ---- K layer ---------------------------------------------------------
 
@@ -460,7 +418,7 @@ class FilesystemStorage:
         return StorageCounts(
             documents_by_layer=dict(by_layer),
             chunks=len(self._chunks),
-            embeddings=len(self._embed_meta),
+            embeddings=0,
             links=len(self._links),
             wisdom_by_status=dict(by_status),
             last_wiki_log_ts=last_ts,
@@ -497,7 +455,7 @@ class FilesystemStorage:
     async def upsert_asset_embeddings(
         self, rows: Sequence[AssetEmbeddingRow]
     ) -> None:
-        raise NotSupported("filesystem adapter: asset embeddings not implemented yet")
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def vec_search_assets(
         self,
@@ -507,21 +465,21 @@ class FilesystemStorage:
         limit: int = 20,
         layer: Layer | None = None,
     ) -> list[AssetVecHit]:
-        raise NotSupported("filesystem adapter: asset embeddings not implemented yet")
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def upsert_embed_version(self, v: EmbeddingVersion) -> int:
-        raise NotSupported("filesystem adapter: embed versioning not implemented yet")
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def get_active_embed_version(
         self, *, modality: Literal["text", "multimodal"]
     ) -> EmbeddingVersion | None:
-        raise NotSupported("filesystem adapter: embed versioning not implemented yet")
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def list_embed_versions(
         self, *, modality: Literal["text", "multimodal"] | None = None
     ) -> list[EmbeddingVersion]:
         del modality
-        raise NotSupported("filesystem adapter: embed versioning not implemented yet")
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     # ---- flushers --------------------------------------------------------
 
@@ -537,13 +495,6 @@ class FilesystemStorage:
         await asyncio.to_thread(
             self._p(self.CHUNK_COUNTER_FILE).write_text, str(self._chunk_counter), "utf-8"
         )
-
-    async def _flush_embed_meta(self) -> None:
-        payload = [
-            {"chunk_id": cid, "model": model}
-            for cid, model in self._embed_meta.items()
-        ]
-        await asyncio.to_thread(_write_jsonl, self._p(self.EMBED_META_FILE), payload)
 
     async def _flush_links(self) -> None:
         payload = [
@@ -609,7 +560,3 @@ def _append_jsonl(path: Path, row: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False))
         f.write("\n")
-
-
-def _norm(vec: Sequence[float]) -> float:
-    return math.sqrt(sum(x * x for x in vec))

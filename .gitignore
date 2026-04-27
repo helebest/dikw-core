@@ -19,6 +19,7 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+.claude/
 # engine-managed state in example/test wikis
 **/.dikw/
 # parallel-development worktrees

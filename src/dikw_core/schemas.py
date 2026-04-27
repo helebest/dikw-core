@@ -100,6 +100,25 @@ class VecHit(BaseModel):
     distance: float  # smaller = more similar (cosine distance)
 
 
+class Hit(BaseModel):
+    """One fused search result.
+
+    ``chunk_id`` is non-optional: chunk-level fusion produces one hit per
+    chunk, so every result is anchored to a concrete chunk. ``seq`` is
+    the chunk's ordinal within its document — useful for disambiguating
+    multiple hits from the same document in CLI / MCP output.
+    """
+
+    doc_id: str
+    chunk_id: int
+    seq: int | None = None
+    score: float
+    snippet: str | None = None
+    path: str | None = None
+    title: str | None = None
+    asset_refs: list[AssetRecord] = Field(default_factory=list)
+
+
 class LinkRecord(BaseModel):
     src_doc_id: str
     dst_path: str

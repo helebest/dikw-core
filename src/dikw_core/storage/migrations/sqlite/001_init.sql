@@ -42,15 +42,15 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 CREATE INDEX IF NOT EXISTS chunks_doc_seq ON chunks(doc_id, seq);
 
--- Note: the embedding virtual table is created in Python because sqlite-vec
--- needs the embedding dimension parameterized at table-creation time.
--- See storage/sqlite.py: SQLiteStorage._ensure_vec_table().
-
-CREATE TABLE IF NOT EXISTS embed_meta (
-    chunk_id INTEGER NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
-    model    TEXT NOT NULL,
-    PRIMARY KEY (chunk_id, model)
-);
+-- Note: the per-version chunk-vector tables (``vec_chunks_v<version_id>``)
+-- are created in Python at first ingest because sqlite-vec needs the
+-- embedding dimension parameterized at table-creation time. See
+-- storage/sqlite.py: SQLiteStorage._ensure_chunk_vec_table(). Each
+-- ``embed_versions`` row produces its own table; switching text models
+-- creates a new version + new table, leaving prior data intact.
+--
+-- ``chunk_embed_meta`` is defined in 002_assets.sql alongside the
+-- ``embed_versions`` registry it references.
 
 -- ---- K layer -------------------------------------------------------------
 

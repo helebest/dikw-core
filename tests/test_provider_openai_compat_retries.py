@@ -13,9 +13,10 @@ from typing import Any
 
 import pytest
 
-from dikw_core.config import ProviderConfig
 from dikw_core.providers import build_embedder, build_llm
 from dikw_core.providers.openai_compat import OpenAICompatEmbeddings, OpenAICompatLLM
+
+from .fakes import make_provider_cfg
 
 
 @pytest.fixture()
@@ -85,7 +86,7 @@ async def test_build_llm_wires_llm_max_retries_from_config(
     captured: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    cfg = ProviderConfig(llm="openai_compat", llm_max_retries=3)
+    cfg = make_provider_cfg(llm="openai_compat", llm_max_retries=3)
     provider = build_llm(cfg)
     assert isinstance(provider, OpenAICompatLLM)
     provider._get_client()
@@ -98,7 +99,7 @@ async def test_build_embedder_wires_embedding_max_retries_from_config(
     captured: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DIKW_EMBEDDING_API_KEY", "sk-test")
-    cfg = ProviderConfig(
+    cfg = make_provider_cfg(
         embedding_base_url="http://gitee.example/v1",
         embedding_max_retries=9,
     )
@@ -115,7 +116,7 @@ async def test_legs_carry_independent_retry_budgets(
     """LLM and embedding legs can target different retry budgets in the same config."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-llm")
     monkeypatch.setenv("DIKW_EMBEDDING_API_KEY", "sk-embed")
-    cfg = ProviderConfig(
+    cfg = make_provider_cfg(
         llm="openai_compat",
         llm_max_retries=2,
         embedding_max_retries=10,

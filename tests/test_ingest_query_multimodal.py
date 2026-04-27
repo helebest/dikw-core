@@ -23,7 +23,7 @@ from dikw_core.config import (
     SQLiteStorageConfig,
     dump_config_yaml,
 )
-from tests.fakes import FakeMultimodalEmbedding
+from tests.fakes import FakeEmbeddings, FakeMultimodalEmbedding, make_provider_cfg
 
 
 def _png_with_dims(w: int, h: int) -> bytes:
@@ -56,6 +56,7 @@ def project_with_image_doc(tmp_path: Path) -> Path:
     cfg = DikwConfig(
         storage=SQLiteStorageConfig(path=".dikw/index.sqlite"),
         sources=[SourceConfig(path="./sources", pattern="**/*.md")],
+        provider=make_provider_cfg(embedding_model="fake-text-v1"),
         assets=AssetsConfig(
             multimodal=MultimodalEmbedConfig(
                 provider="gitee_multimodal",
@@ -75,14 +76,20 @@ def project_with_image_doc(tmp_path: Path) -> Path:
 async def test_full_ingest_with_multimodal(project_with_image_doc: Path) -> None:
     """ingest() materializes the asset, embeds it via the mm provider,
     persists chunk_asset_refs, and bumps the asset counters in the
-    IngestReport."""
+    IngestReport. Chunk-text vectors flow through the text embedder
+    (separate channel from the mm asset channel)."""
+    text_embedder = FakeEmbeddings()
     mm = FakeMultimodalEmbedding(dim=4)
-    report = await api.ingest(project_with_image_doc, multimodal_embedder=mm)
+    report = await api.ingest(
+        project_with_image_doc,
+        embedder=text_embedder,
+        multimodal_embedder=mm,
+    )
 
     assert report.scanned == 1
     assert report.added == 1
     assert report.chunks >= 1
-    assert report.embedded >= 1, "chunk vectors should also flow through mm"
+    assert report.embedded >= 1, "chunk vectors flow through the text channel"
     assert report.assets == 1, "the one local PNG should materialize"
     assert report.asset_embedded == 1, "the asset should be vectorized via mm"
 

@@ -103,9 +103,9 @@ class Storage(Protocol):
     # doesn't lose API spend on byte-identical chunk text. Adapters that
     # don't implement the cache raise ``NotSupported``.
     async def get_cached_embeddings(
-        self, content_hashes: Sequence[str], *, model: str
+        self, content_hashes: Sequence[str], *, version_id: int
     ) -> dict[str, list[float]]:
-        """Batch lookup keyed by ``sha256(chunk.text)``.
+        """Batch lookup keyed by ``sha256(chunk.text)`` for a given version.
 
         Returns a dict mapping content_hash -> vector for HITS only;
         missing hashes are misses (absent from the dict). Empty input
@@ -116,16 +116,17 @@ class Storage(Protocol):
     async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
         """Idempotent batch insert.
 
-        ``(content_hash, model)`` is the primary key; collisions are
-        no-ops (do NOT overwrite — vectors for the same content + model
-        must be deterministic). Empty input is a no-op.
+        ``(content_hash, version_id)`` is the primary key; collisions are
+        no-ops (do NOT overwrite — vectors for the same content under
+        the same version identity must be deterministic). Empty input
+        is a no-op.
         """
         ...
 
     async def list_chunks_missing_embedding(
-        self, *, model: str
+        self, *, version_id: int
     ) -> list[ChunkRecord]:
-        """Chunks present in storage with no ``embed_meta`` row for ``model``.
+        """Chunks present in storage with no ``chunk_embed_meta`` row for ``version_id``.
 
         Used by the resume-scan path in ``api.ingest``: after a mid-flight
         crash the doc-level shortcut on retry skips docs whose hash already
@@ -156,9 +157,19 @@ class Storage(Protocol):
         self,
         embedding: list[float],
         *,
+        version_id: int | None = None,
         limit: int = 20,
         layer: Layer | None = None,
-    ) -> list[VecHit]: ...
+    ) -> list[VecHit]:
+        """ANN search over chunk embeddings for ``version_id``.
+
+        ``version_id=None`` means "the active text version" — adapters
+        resolve via ``get_active_embed_version(modality="text")`` and
+        raise ``NotSupported`` if no text embeddings have been indexed
+        yet. Pass an explicit ``version_id`` to search a non-active
+        version (e.g., during eval ablations or post-swap migrations).
+        """
+        ...
 
     # ---- K layer ---------------------------------------------------------
 
@@ -263,7 +274,7 @@ class Storage(Protocol):
     async def upsert_embed_version(self, v: EmbeddingVersion) -> int:
         """Idempotent upsert of an embedding version identity.
 
-        Match key is ``(provider, model, revision, dim, normalize, distance)``.
+        Match key is ``(provider, model, revision, dim, normalize, distance, modality)``.
         On a hit, returns the existing ``version_id`` and leaves
         ``is_active`` untouched. On a miss, inserts a fresh row and
         marks every other version of the same ``modality`` as
@@ -275,7 +286,13 @@ class Storage(Protocol):
         self, *, modality: Literal["text", "multimodal"]
     ) -> EmbeddingVersion | None: ...
 
-    async def list_embed_versions(self) -> list[EmbeddingVersion]: ...
+    async def list_embed_versions(
+        self, *, modality: Literal["text", "multimodal"] | None = None
+    ) -> list[EmbeddingVersion]:
+        """Return embedding versions in registration order. ``modality=None``
+        returns every version; pass ``"text"`` or ``"multimodal"`` to
+        filter."""
+        ...
 
     # ---- diagnostics -----------------------------------------------------
 

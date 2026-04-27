@@ -39,6 +39,8 @@ from dikw_core.storage.base import NotSupported, Storage
 from dikw_core.storage.filesystem import FilesystemStorage
 from dikw_core.storage.sqlite import SQLiteStorage
 
+from .fakes import register_text_version
+
 
 @pytest.fixture(
     params=[
@@ -286,8 +288,12 @@ async def test_embeddings_and_vec_search(storage: Storage) -> None:
     assert len(ids) == 1
     cid = ids[0]
 
+    try:
+        version_id = await register_text_version(storage, dim=4, model="test-embed")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
     await storage.upsert_embeddings(
-        [EmbeddingRow(chunk_id=cid, model="test-embed", embedding=[1.0, 0.0, 0.0, 0.0])]
+        [EmbeddingRow(chunk_id=cid, version_id=version_id, embedding=[1.0, 0.0, 0.0, 0.0])]
     )
     hits = await storage.vec_search([1.0, 0.0, 0.0, 0.0], limit=3)
     assert hits and hits[0].chunk_id == cid
@@ -312,13 +318,17 @@ async def test_vec_search_skips_zero_vector_embeddings(storage: Storage) -> None
     b_ids = await storage.replace_chunks(
         b.doc_id, [ChunkRecord(doc_id=b.doc_id, seq=0, start=0, end=5, text="zero")]
     )
+    try:
+        version_id = await register_text_version(storage, dim=4, model="test-embed")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
     await storage.upsert_embeddings(
         [
             EmbeddingRow(
-                chunk_id=a_ids[0], model="test-embed", embedding=[1.0, 0.0, 0.0, 0.0]
+                chunk_id=a_ids[0], version_id=version_id, embedding=[1.0, 0.0, 0.0, 0.0]
             ),
             EmbeddingRow(
-                chunk_id=b_ids[0], model="test-embed", embedding=[0.0, 0.0, 0.0, 0.0]
+                chunk_id=b_ids[0], version_id=version_id, embedding=[0.0, 0.0, 0.0, 0.0]
             ),
         ]
     )
@@ -348,7 +358,7 @@ async def test_get_cached_embeddings_empty_input_no_roundtrip(
 ) -> None:
     """Empty input list must short-circuit before touching the DB."""
     try:
-        result = await storage.get_cached_embeddings([], model="any-model")
+        result = await storage.get_cached_embeddings([], version_id=1)
     except NotSupported:
         pytest.skip("backend doesn't implement embed cache")
     assert result == {}
@@ -356,21 +366,28 @@ async def test_get_cached_embeddings_empty_input_no_roundtrip(
 
 async def test_cache_then_get_roundtrip(storage: Storage) -> None:
     """cache_embeddings → get_cached_embeddings returns the same vectors."""
+    try:
+        version_id = await register_text_version(storage, dim=4, model="test-embed")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
     rows = [
         CachedEmbeddingRow(
-            content_hash="a" * 64, model="m1", dim=4, embedding=[1.0, 0.0, 0.0, 0.0]
+            content_hash="a" * 64, version_id=version_id, dim=4,
+            embedding=[1.0, 0.0, 0.0, 0.0],
         ),
         CachedEmbeddingRow(
-            content_hash="b" * 64, model="m1", dim=4, embedding=[0.0, 1.0, 0.0, 0.0]
+            content_hash="b" * 64, version_id=version_id, dim=4,
+            embedding=[0.0, 1.0, 0.0, 0.0],
         ),
         CachedEmbeddingRow(
-            content_hash="c" * 64, model="m1", dim=4, embedding=[0.0, 0.0, 1.0, 0.0]
+            content_hash="c" * 64, version_id=version_id, dim=4,
+            embedding=[0.0, 0.0, 1.0, 0.0],
         ),
     ]
     try:
         await storage.cache_embeddings(rows)
         got = await storage.get_cached_embeddings(
-            ["a" * 64, "b" * 64, "c" * 64, "z" * 64], model="m1"
+            ["a" * 64, "b" * 64, "c" * 64, "z" * 64], version_id=version_id
         )
     except NotSupported:
         pytest.skip("backend doesn't implement embed cache")
@@ -381,56 +398,70 @@ async def test_cache_then_get_roundtrip(storage: Storage) -> None:
 
 
 async def test_cache_embeddings_idempotent(storage: Storage) -> None:
-    """Inserting the same (content_hash, model) twice is a no-op.
+    """Inserting the same (content_hash, version_id) twice is a no-op.
 
-    Vectors for the same content + model are deterministic by definition,
+    Vectors for the same content + version are deterministic by definition,
     so the second insert must NOT raise and MUST NOT clobber the first
     (the cache is a content-addressed lookup table, not a version log).
     """
+    try:
+        version_id = await register_text_version(storage, dim=4, model="test-embed")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
     row = CachedEmbeddingRow(
-        content_hash="d" * 64, model="m1", dim=4, embedding=[0.5, 0.5, 0.5, 0.5]
+        content_hash="d" * 64, version_id=version_id, dim=4,
+        embedding=[0.5, 0.5, 0.5, 0.5],
     )
     try:
         await storage.cache_embeddings([row])
         await storage.cache_embeddings([row])  # second call: no-op, no exception
-        got = await storage.get_cached_embeddings(["d" * 64], model="m1")
+        got = await storage.get_cached_embeddings(["d" * 64], version_id=version_id)
     except NotSupported:
         pytest.skip("backend doesn't implement embed cache")
     assert got["d" * 64] == pytest.approx([0.5, 0.5, 0.5, 0.5])
 
 
-async def test_cache_partitioned_by_model(storage: Storage) -> None:
-    """Same content_hash under two different models = two independent rows.
+async def test_cache_partitioned_by_version(storage: Storage) -> None:
+    """Same content_hash under two different versions = two independent rows.
 
-    Lookup must filter by model so a content-hash can carry vectors for
-    multiple embedding models in parallel without collision.
+    Lookup must filter by version_id so a content-hash can carry vectors
+    for multiple embedding versions in parallel without collision.
     """
     h = "e" * 64
+    try:
+        v1 = await register_text_version(storage, dim=4, model="m1")
+        v2 = await register_text_version(storage, dim=4, model="m2")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
     try:
         await storage.cache_embeddings(
             [
                 CachedEmbeddingRow(
-                    content_hash=h, model="m1", dim=4, embedding=[1.0, 0.0, 0.0, 0.0]
+                    content_hash=h, version_id=v1, dim=4,
+                    embedding=[1.0, 0.0, 0.0, 0.0],
                 ),
                 CachedEmbeddingRow(
-                    content_hash=h, model="m2", dim=4, embedding=[0.0, 1.0, 0.0, 0.0]
+                    content_hash=h, version_id=v2, dim=4,
+                    embedding=[0.0, 1.0, 0.0, 0.0],
                 ),
             ]
         )
-        got_m1 = await storage.get_cached_embeddings([h], model="m1")
-        got_m2 = await storage.get_cached_embeddings([h], model="m2")
+        got_v1 = await storage.get_cached_embeddings([h], version_id=v1)
+        got_v2 = await storage.get_cached_embeddings([h], version_id=v2)
     except NotSupported:
         pytest.skip("backend doesn't implement embed cache")
-    assert got_m1[h] == pytest.approx([1.0, 0.0, 0.0, 0.0])
-    assert got_m2[h] == pytest.approx([0.0, 1.0, 0.0, 0.0])
+    assert got_v1[h] == pytest.approx([1.0, 0.0, 0.0, 0.0])
+    assert got_v2[h] == pytest.approx([0.0, 1.0, 0.0, 0.0])
 
 
 async def test_list_chunks_missing_embedding(storage: Storage) -> None:
-    """Resume-scan: returns chunks without an embed_meta row for ``model``.
+    """Resume-scan: returns chunks without a ``chunk_embed_meta`` row for
+    ``version_id``.
 
-    A chunk that's been embedded under a DIFFERENT model still counts
-    as "missing for model X" — model is part of the dedup key, the same
-    chunk text could legitimately be re-embedded under a new model.
+    A chunk that's been embedded under a DIFFERENT version still counts
+    as "missing for version X" — version is part of the dedup key, the
+    same chunk text could legitimately be re-embedded under a new
+    version (model swap).
     """
     doc = _make_doc("sources/scan.md")
     await storage.upsert_document(doc)
@@ -442,23 +473,28 @@ async def test_list_chunks_missing_embedding(storage: Storage) -> None:
             ChunkRecord(doc_id=doc.doc_id, seq=2, start=20, end=30, text="ccc"),
         ],
     )
-    # Embed chunk 0 under model "m1", chunk 1 under "m2"; chunk 2 unembedded.
+    try:
+        v1 = await register_text_version(storage, dim=4, model="m1")
+        v2 = await register_text_version(storage, dim=4, model="m2")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
+    # Embed chunk 0 under version v1, chunk 1 under v2; chunk 2 unembedded.
     try:
         await storage.upsert_embeddings(
             [
                 EmbeddingRow(
-                    chunk_id=chunk_ids[0], model="m1", embedding=[1.0, 0.0, 0.0, 0.0]
+                    chunk_id=chunk_ids[0], version_id=v1, embedding=[1.0, 0.0, 0.0, 0.0]
                 ),
                 EmbeddingRow(
-                    chunk_id=chunk_ids[1], model="m2", embedding=[0.0, 1.0, 0.0, 0.0]
+                    chunk_id=chunk_ids[1], version_id=v2, embedding=[0.0, 1.0, 0.0, 0.0]
                 ),
             ]
         )
     except NotSupported:
         pytest.skip("backend doesn't implement embeddings")
-    missing = await storage.list_chunks_missing_embedding(model="m1")
+    missing = await storage.list_chunks_missing_embedding(version_id=v1)
     missing_ids = {c.chunk_id for c in missing}
-    # Under m1: chunk 0 has it; chunks 1 + 2 don't.
+    # Under v1: chunk 0 has it; chunks 1 + 2 don't.
     assert missing_ids == {chunk_ids[1], chunk_ids[2]}
     # Returned ChunkRecords carry the original text so the caller can
     # re-embed without a separate fetch.
@@ -480,13 +516,13 @@ async def test_filesystem_cache_methods_raise_notsupported(
     await fs.migrate()
     try:
         with pytest.raises(NotSupported):
-            await fs.get_cached_embeddings(["a" * 64], model="m1")
+            await fs.get_cached_embeddings(["a" * 64], version_id=1)
         with pytest.raises(NotSupported):
             await fs.cache_embeddings(
                 [
                     CachedEmbeddingRow(
                         content_hash="a" * 64,
-                        model="m1",
+                        version_id=1,
                         dim=4,
                         embedding=[1.0, 0.0, 0.0, 0.0],
                     )
@@ -519,9 +555,13 @@ async def test_vec_search_returns_in_distance_order(storage: Storage) -> None:
         for i in range(len(embeddings))
     ]
     chunk_ids = await storage.replace_chunks(doc.doc_id, chunks)
+    try:
+        version_id = await register_text_version(storage, dim=4, model="test-embed")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
     await storage.upsert_embeddings(
         [
-            EmbeddingRow(chunk_id=cid, model="test-embed", embedding=emb)
+            EmbeddingRow(chunk_id=cid, version_id=version_id, embedding=emb)
             for cid, emb in zip(chunk_ids, embeddings, strict=True)
         ]
     )
@@ -555,13 +595,17 @@ async def test_vec_search_layer_filter(storage: Storage) -> None:
         [ChunkRecord(doc_id=wiki_doc.doc_id, seq=0, start=0, end=5, text="wiki")],
     )
     # Source chunk is the closer match; wiki chunk is the farther one.
+    try:
+        version_id = await register_text_version(storage, dim=4, model="test-embed")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
     await storage.upsert_embeddings(
         [
             EmbeddingRow(
-                chunk_id=src_ids[0], model="test-embed", embedding=[1.0, 0.0, 0.0, 0.0]
+                chunk_id=src_ids[0], version_id=version_id, embedding=[1.0, 0.0, 0.0, 0.0]
             ),
             EmbeddingRow(
-                chunk_id=wiki_ids[0], model="test-embed", embedding=[0.0, 1.0, 0.0, 0.0]
+                chunk_id=wiki_ids[0], version_id=version_id, embedding=[0.0, 1.0, 0.0, 0.0]
             ),
         ]
     )
@@ -974,3 +1018,106 @@ async def test_asset_embeddings_dim_mismatch_raises(storage: Storage) -> None:
                 )
             ]
         )
+
+
+# ---- T6 + text-versioning regression tests ------------------------------
+
+
+async def test_embed_version_modality_in_unique_key(storage: Storage) -> None:
+    """T6: a CLIP-style provider that exposes the same model name as both
+    a text and a multimodal encoder must produce TWO distinct ``version_id``s.
+
+    Pre-fix the UNIQUE was ``(provider, model, revision, dim, normalize, distance)``
+    — modality was missing — so the second registration silently collapsed
+    onto the first row, overwriting modality semantically.
+    """
+    base = {
+        "provider": "clip-style",
+        "model": "bge-m3",
+        "revision": "",
+        "dim": 1024,
+        "normalize": True,
+        "distance": "cosine",
+    }
+    text = EmbeddingVersion(**base, modality="text")
+    mm = EmbeddingVersion(**base, modality="multimodal")
+    try:
+        vid_text = await storage.upsert_embed_version(text)
+        vid_mm = await storage.upsert_embed_version(mm)
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
+    assert vid_text != vid_mm, (
+        f"T6 regression: same model under different modalities collapsed "
+        f"to the same version_id={vid_text}"
+    )
+
+
+async def test_text_versioning_isolation(storage: Storage) -> None:
+    """Two text versions with different dims coexist — switching a text
+    embedding model creates a new ``vec_chunks_v<id>`` next to the old
+    one rather than crashing the index.
+    """
+    doc = _make_doc("sources/iso.md")
+    await storage.upsert_document(doc)
+    cids = await storage.replace_chunks(
+        doc.doc_id,
+        [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=5, text="alpha")],
+    )
+    try:
+        v1 = await register_text_version(storage, dim=4, model="m1")
+        v2 = await register_text_version(storage, dim=8, model="m2")
+        await storage.upsert_embeddings(
+            [EmbeddingRow(chunk_id=cids[0], version_id=v1, embedding=[1.0] * 4)]
+        )
+        await storage.upsert_embeddings(
+            [EmbeddingRow(chunk_id=cids[0], version_id=v2, embedding=[1.0] * 8)]
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
+    # Each version's vec_search uses its own table.
+    hits_v1 = await storage.vec_search([1.0] * 4, version_id=v1, limit=5)
+    hits_v2 = await storage.vec_search([1.0] * 8, version_id=v2, limit=5)
+    assert hits_v1 and hits_v1[0].chunk_id == cids[0]
+    assert hits_v2 and hits_v2[0].chunk_id == cids[0]
+
+
+async def test_vec_search_resolves_active_text_version_when_omitted(
+    storage: Storage,
+) -> None:
+    """``vec_search(version_id=None)`` resolves to the active text version.
+
+    Bumping to a new active version must redirect subsequent unqualified
+    queries to the new table — no caller threading required.
+    """
+    doc = _make_doc("sources/active.md")
+    await storage.upsert_document(doc)
+    cids = await storage.replace_chunks(
+        doc.doc_id,
+        [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=5, text="alpha")],
+    )
+    try:
+        v1 = await register_text_version(storage, dim=4, model="m1")
+        await storage.upsert_embeddings(
+            [EmbeddingRow(chunk_id=cids[0], version_id=v1, embedding=[1.0] * 4)]
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
+    hits_a = await storage.vec_search([1.0] * 4, limit=5)
+    assert hits_a and hits_a[0].chunk_id == cids[0]
+    # Bump to a new active version with a different dim. The unqualified
+    # vec_search must now route to v2 — i.e. fail dim check on the v1
+    # query vector.
+    v2 = await register_text_version(storage, dim=8, model="m2")
+    await storage.upsert_embeddings(
+        [EmbeddingRow(chunk_id=cids[0], version_id=v2, embedding=[1.0] * 8)]
+    )
+    from dikw_core.storage.base import StorageError as _SE
+
+    with pytest.raises(_SE):
+        await storage.vec_search([1.0] * 4, limit=5)
+    # Querying with the new dim against active version_id resolves cleanly.
+    hits_b = await storage.vec_search([1.0] * 8, limit=5)
+    assert hits_b and hits_b[0].chunk_id == cids[0]
+    # Sanity: get_active_embed_version reflects the latest registration.
+    active = await storage.get_active_embed_version(modality="text")
+    assert active is not None and active.version_id == v2

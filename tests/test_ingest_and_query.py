@@ -7,7 +7,7 @@ import pytest
 
 from dikw_core import api
 
-from .fakes import FakeEmbeddings, FakeLLM
+from .fakes import FakeEmbeddings, FakeLLM, init_test_wiki
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notes"
 
@@ -15,7 +15,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "notes"
 @pytest.fixture()
 def wiki_with_fixtures(tmp_path: Path) -> Path:
     wiki = tmp_path / "wiki"
-    api.init_wiki(wiki, description="ingest-query test wiki")
+    init_test_wiki(wiki, description="ingest-query test wiki")
     dest = wiki / "sources" / "notes"
     dest.mkdir(parents=True, exist_ok=True)
     for src in FIXTURES.glob("*.md"):
@@ -64,7 +64,7 @@ async def test_query_returns_answer_with_citations(wiki_with_fixtures: Path) -> 
 @pytest.mark.asyncio
 async def test_query_returns_no_citations_when_corpus_empty(tmp_path: Path) -> None:
     wiki = tmp_path / "empty"
-    api.init_wiki(wiki)
+    init_test_wiki(wiki)
     llm = FakeLLM()
     embedder = FakeEmbeddings()
     result = await api.query("anything", wiki, llm=llm, embedder=embedder)

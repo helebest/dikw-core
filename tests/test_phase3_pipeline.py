@@ -15,7 +15,7 @@ from dikw_core import api
 from dikw_core.schemas import WisdomKind, WisdomStatus
 from dikw_core.wisdom.io import aggregate_path, candidate_path
 
-from .fakes import FakeEmbeddings, FakeLLM
+from .fakes import FakeEmbeddings, FakeLLM, init_test_wiki
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notes"
 
@@ -103,7 +103,7 @@ class RoutedLLM:
 @pytest.fixture()
 def wiki(tmp_path: Path) -> Path:
     wiki = tmp_path / "wiki"
-    api.init_wiki(wiki)
+    init_test_wiki(wiki)
     dest = wiki / "sources" / "notes"
     dest.mkdir(parents=True, exist_ok=True)
     for src in FIXTURES.glob("*.md"):

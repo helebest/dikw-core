@@ -30,6 +30,7 @@ import zlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
@@ -37,6 +38,7 @@ from . import prompts
 from .config import (
     CONFIG_FILENAME,
     DikwConfig,
+    ProviderConfig,
     default_config,
     dump_config_yaml,
     find_config,
@@ -52,7 +54,6 @@ from .info.embed import (
     ChunkToEmbed,
     embed_assets,
     embed_chunks,
-    embed_chunks_multimodal,
 )
 from .info.search import HybridSearcher, MultimodalSearch
 from .info.tokenize import CjkTokenizer
@@ -88,7 +89,7 @@ from .schemas import (
     WisdomStatus,
 )
 from .storage import Storage, build_storage
-from .storage.base import NotSupported, StorageError
+from .storage.base import NotSupported
 from .wisdom.apply import ApplicableWisdom, pick_applicable
 from .wisdom.distill import WisdomCandidate, parse_distill_response
 from .wisdom.io import write_candidate_file
@@ -187,6 +188,62 @@ async def _consume_embedding_stream(
         await storage.upsert_embeddings(batch)
         embedded += len(batch)
     return embedded
+
+
+def _qualified_provider(protocol: str, base_url: str) -> str:
+    """Return ``"<protocol>@<host>"`` for embed_versions.provider.
+
+    The ``embedding`` config field only names the wire protocol
+    (``"openai_compat"``); the actual backend is whatever ``base_url``
+    points at. We fold the host into the version-identity provider so
+    e.g. OpenAI text-embedding-3-small and Gitee's namesake serve under
+    distinct version_ids — their vectors live in different spaces and
+    must not share a vec table.
+
+    Empty ``base_url`` falls through as bare protocol — the multimodal
+    config makes ``base_url`` optional ("use provider default") so we
+    avoid synthesising a bogus host placeholder there.
+    """
+    if not base_url:
+        return protocol
+    host = urlparse(base_url).hostname or base_url
+    return f"{protocol}@{host}"
+
+
+async def _register_text_version(
+    storage: Storage, cfg_provider: ProviderConfig
+) -> int | None:
+    """Register the text ``embed_versions`` row from the provider config.
+
+    Returns the version_id, or ``None`` if the storage backend doesn't
+    implement versioning (filesystem). Callers degrade gracefully on
+    None — text embedding is disabled for the run.
+    """
+    try:
+        return await storage.upsert_embed_version(
+            EmbeddingVersion(
+                # Encode the endpoint host into ``provider`` so two
+                # OpenAI-compatible vendors serving the same model name
+                # don't collide on a single version_id (their vectors
+                # live in different spaces and must not share a table).
+                provider=_qualified_provider(
+                    cfg_provider.embedding, cfg_provider.embedding_base_url
+                ),
+                model=cfg_provider.embedding_model,
+                revision=cfg_provider.embedding_revision,
+                dim=cfg_provider.embedding_dim,
+                normalize=cfg_provider.embedding_normalize,
+                distance=cfg_provider.embedding_distance,
+                modality="text",
+            )
+        )
+    except NotSupported as e:
+        logger.warning(
+            "storage backend doesn't support text versioning "
+            "(%s); skipping text embedding for this run",
+            e,
+        )
+        return None
 
 
 # ---- public result models ------------------------------------------------
@@ -405,7 +462,7 @@ _PROBE_PNG_1X1 = _build_probe_png_1x1()
 # silently degrades to text-only (api.py: ``except NotSupported``).
 # ``check_providers`` mirrors that fallback so the probe describes the
 # same behaviour operators will actually get.
-_MULTIMODAL_STORAGE_BACKENDS: frozenset[str] = frozenset({"sqlite"})
+_MULTIMODAL_STORAGE_BACKENDS: frozenset[str] = frozenset({"sqlite", "postgres"})
 
 
 async def _probe_multimodal(
@@ -579,18 +636,20 @@ async def ingest(
 ) -> IngestReport:
     """Ingest every markdown file listed in ``sources:`` into the D and I layers.
 
-    Two provider knobs:
+    Two provider knobs — strictly per-channel, since query() searches
+    text and multimodal vectors via separate version_ids:
 
-    * ``embedder`` — text-only ``EmbeddingProvider``; populates the legacy
-      ``chunks_vec`` table for the BM25-vec hybrid path. Injectable so
-      tests can pass a deterministic fake.
+    * ``embedder`` — text-only ``EmbeddingProvider``; populates the
+      ``vec_chunks_v<text_version_id>`` table.
     * ``multimodal_embedder`` — ``MultimodalEmbeddingProvider``; when
-      ``cfg.assets.multimodal`` is configured this routes both chunk-text
-      and image-asset bytes through one shared vector space. Asset
-      binaries referenced from markdown are materialized into
-      ``<root>/<assets.dir>/`` regardless of which embedder is set —
-      ``chunk_asset_refs`` always reflect the on-disk structure so
-      query-time consumers can render them.
+      ``cfg.assets.multimodal`` is configured this embeds image-asset
+      bytes into ``vec_assets_v<mm_version_id>``. It does NOT embed
+      chunk text — chunks always flow through the text channel.
+
+    Asset binaries referenced from markdown are materialized into
+    ``<root>/<assets.dir>/`` regardless of which embedder is set —
+    ``chunk_asset_refs`` always reflect the on-disk structure so
+    query-time consumers can render them.
     """
     cfg, root, storage = await _with_storage(path)
     owned_mm: MultimodalEmbeddingProvider | None = None
@@ -601,18 +660,29 @@ async def ingest(
         # the run for batch image embedding at the end.
         new_assets_by_id: dict[str, AssetRecord] = {}
 
-        # Resolve the active multimodal version once per run so chunks and
-        # assets land under the same version_id. Storage backends that
-        # don't yet implement the asset / versioning APIs (filesystem,
-        # postgres) raise NotSupported here — we degrade to the legacy
-        # text path with a warning rather than failing the run.
+        # Resolve text + multimodal versions once per run so every chunk
+        # and asset embedded below carries a stable version_id from the
+        # embed_versions registry. Storage backends that don't implement
+        # the version APIs raise NotSupported; we degrade per-modality
+        # rather than failing the run.
+        text_version_id: int | None = None
+        if embedder is not None:
+            text_version_id = await _register_text_version(storage, cfg.provider)
+            if text_version_id is None:
+                embedder = None  # disable text-vec pathway
+
         mm_version_id: int | None = None
         mm_cfg = cfg.assets.multimodal
         if mm_cfg is not None:
             try:
                 mm_version_id = await storage.upsert_embed_version(
                     EmbeddingVersion(
-                        provider=mm_cfg.provider,
+                        # Same endpoint-aware identity as the text leg —
+                        # mm_cfg.provider names the wire shape, base_url
+                        # selects the actual backend.
+                        provider=_qualified_provider(
+                            mm_cfg.provider, mm_cfg.base_url or ""
+                        ),
                         model=mm_cfg.model,
                         revision=mm_cfg.revision,
                         dim=mm_cfg.dim,
@@ -633,8 +703,8 @@ async def ingest(
         # injected — symmetric with query()'s behavior, so the typical
         # CLI / MCP / eval call site (which only passes `embedder`) still
         # produces chunk + asset vectors in the configured mm space
-        # rather than indexing chunks in legacy text space and querying
-        # in mm space.
+        # rather than indexing chunks in text space and querying in
+        # mm space.
         if mm_cfg is not None and multimodal_embedder is None:
             multimodal_embedder = build_multimodal_embedder(
                 mm_cfg.provider,
@@ -752,10 +822,11 @@ async def ingest(
                 if chunk_refs:
                     await storage.replace_chunk_asset_refs(chunk_id, chunk_refs)
 
-            # Queue chunks for embedding when ANY embedder is wired up —
-            # the multimodal path also needs them, even when no legacy
-            # text embedder is provided.
-            if (embedder is not None or multimodal_embedder is not None) and chunk_records:
+            # Queue chunks for embedding only when a text embedder + version
+            # is wired up. Chunk vectors live exclusively in the text
+            # channel (vec_chunks_v<text_id>); the multimodal channel
+            # owns assets, not chunks.
+            if embedder is not None and text_version_id is not None and chunk_records:
                 to_embed.extend(
                     ChunkToEmbed(chunk_id=cid, text=r.text)
                     for cid, r in zip(chunk_ids, chunk_records, strict=True)
@@ -780,14 +851,11 @@ async def ingest(
         # loop. The cache lookup in slice 5 makes this nearly free for
         # chunks whose text is already cached; for true misses (the
         # tail that crashed mid-flight) we re-pay the provider.
-        if embedder is not None or multimodal_embedder is not None:
-            active_model = (
-                mm_cfg.model
-                if multimodal_embedder is not None and mm_cfg is not None
-                else cfg.provider.embedding_model
-            )
+        if embedder is not None and text_version_id is not None:
             already_queued_ids = {c.chunk_id for c in to_embed}
-            missing = await storage.list_chunks_missing_embedding(model=active_model)
+            missing = await storage.list_chunks_missing_embedding(
+                version_id=text_version_id
+            )
             for chunk in missing:
                 if chunk.chunk_id is None or chunk.chunk_id in already_queued_ids:
                     continue
@@ -795,56 +863,23 @@ async def ingest(
                     ChunkToEmbed(chunk_id=chunk.chunk_id, text=chunk.text)
                 )
 
-        # Chunk-text embeddings: prefer the multimodal pathway when both an
-        # mm provider and a configured multimodal version are available.
-        # Streaming consume: each batch is upserted as soon as the provider
-        # returns it, so a mid-flight crash keeps the prior batches' vectors
-        # on disk instead of throwing away the entire run's API spend.
-        if to_embed:
-            if multimodal_embedder is not None and mm_cfg is not None:
-                # The legacy chunks_vec table is dim-locked at first
-                # write; if the user previously indexed with a different
-                # text-embedding dim, writing mm vectors here would
-                # raise StorageError. Asset retrieval still works (it
-                # uses a per-version vec_assets_v<id> table); skip the
-                # chunk-vec write with a clear warning so ingest doesn't
-                # die. v1 limitation: per-version chunk vec tables land
-                # in v1.5.
-                try:
-                    embedded = await _consume_embedding_stream(
-                        embed_chunks_multimodal(
-                            multimodal_embedder,
-                            to_embed,
-                            model=mm_cfg.model,
-                            storage=storage,
-                            batch_size=mm_cfg.batch,
-                        ),
-                        storage,
-                    )
-                    report = _replace(report, embedded=embedded)
-                except StorageError as e:
-                    if "dim mismatch" in str(e):
-                        logger.warning(
-                            "skipping chunk-vec write: %s. Asset-vec retrieval "
-                            "still active; chunk-text retrieval falls back to "
-                            "BM25 only. Run `rm .dikw/dikw.sqlite && dikw "
-                            "ingest` to reindex chunks under the new dim.",
-                            e,
-                        )
-                    else:
-                        raise
-            elif embedder is not None:
-                embedded = await _consume_embedding_stream(
-                    embed_chunks(
-                        embedder,
-                        to_embed,
-                        model=cfg.provider.embedding_model,
-                        storage=storage,
-                        batch_size=cfg.provider.embedding_batch_size,
-                    ),
-                    storage,
-                )
-                report = _replace(report, embedded=embedded)
+        # Chunk-text embeddings — text channel only. Streaming consume:
+        # each batch is upserted as soon as the provider returns it, so
+        # a mid-flight crash keeps the prior batches' vectors on disk
+        # instead of throwing away the entire run's API spend.
+        if to_embed and embedder is not None and text_version_id is not None:
+            embedded = await _consume_embedding_stream(
+                embed_chunks(
+                    embedder,
+                    to_embed,
+                    model=cfg.provider.embedding_model,
+                    version_id=text_version_id,
+                    storage=storage,
+                    batch_size=cfg.provider.embedding_batch_size,
+                ),
+                storage,
+            )
+            report = _replace(report, embedded=embedded)
 
         # Asset embeddings — only when multimodal is configured AND a real
         # mm provider is available. New-this-run assets only; previously
@@ -929,12 +964,36 @@ async def query(
     cfg, _root, storage = await _with_storage(path)
     owned_mm: MultimodalEmbeddingProvider | None = None
     try:
-        _embedder = embedder
         _llm = llm
-        if _embedder is None:
-            _embedder = build_embedder(cfg.provider)
         if _llm is None:
             _llm = build_llm(cfg.provider)
+
+        # Pin the text leg to the active text version's stored model AND
+        # dim so a mid-flight cfg edit (new embedding_model / embedding_dim
+        # in dikw.yml, no re-ingest) doesn't corrupt query rankings — same
+        # anti-drift guard the multimodal path applies below. We resolve
+        # the active version BEFORE building the embedder so the override
+        # can flow into ``default_dimensions``.
+        text_version_id: int | None = None
+        text_query_model = cfg.provider.embedding_model
+        text_query_dim: int | None = None
+        try:
+            active_text = await storage.get_active_embed_version(modality="text")
+        except NotSupported as e:
+            logger.warning(
+                "storage backend doesn't support text versioning (%s); "
+                "querying with the cfg embedding_model unchecked",
+                e,
+            )
+            active_text = None
+        if active_text is not None and active_text.version_id is not None:
+            text_version_id = active_text.version_id
+            text_query_model = active_text.model
+            text_query_dim = active_text.dim
+
+        _embedder = embedder
+        if _embedder is None:
+            _embedder = build_embedder(cfg.provider, dim_override=text_query_dim)
 
         mm_search: MultimodalSearch | None = None
         mm_cfg = cfg.assets.multimodal
@@ -975,7 +1034,8 @@ async def query(
             storage,
             _embedder,
             cfg.retrieval,
-            embedding_model=cfg.provider.embedding_model,
+            embedding_model=text_query_model,
+            text_version_id=text_version_id,
             multimodal=mm_search,
         )
         hits = await searcher.search(q, limit=limit)
@@ -1057,6 +1117,23 @@ async def synthesize(
     try:
         _llm = llm or build_llm(cfg.provider)
 
+        text_version_id: int | None = None
+        text_embed_model = cfg.provider.embedding_model
+        if embedder is not None:
+            # Synthesize must NOT register a new embed version: it only
+            # writes wiki-page chunks, so flipping active here would strand
+            # source-chunk vectors in the now-inactive table and gut dense
+            # retrieval. Re-embedding the full corpus belongs to ingest.
+            try:
+                active_text = await storage.get_active_embed_version(modality="text")
+            except NotSupported:
+                active_text = None
+            if active_text is not None and active_text.version_id is not None:
+                text_version_id = active_text.version_id
+                text_embed_model = active_text.model
+            else:
+                embedder = None  # no active text version → nothing to embed against
+
         sources = list(await storage.list_documents(layer=Layer.SOURCE, active=True))
         already: set[str] = set()
         if not force_all:
@@ -1119,7 +1196,8 @@ async def synthesize(
                 root=root,
                 page=page,
                 embedder=embedder,
-                embedding_model=cfg.provider.embedding_model,
+                embedding_model=text_embed_model,
+                text_version_id=text_version_id,
                 cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
             )
             await storage.append_wiki_log(
@@ -1174,6 +1252,7 @@ async def _persist_wiki_page(
     page: WikiPage,
     embedder: EmbeddingProvider | None,
     embedding_model: str,
+    text_version_id: int | None,
     cjk_tokenizer: CjkTokenizer = "none",
 ) -> None:
     """Index ``page`` into the K layer: document, chunks, embeddings, links."""
@@ -1201,14 +1280,18 @@ async def _persist_wiki_page(
     ]
     chunk_ids = await storage.replace_chunks(doc_id, records)
 
-    if embedder is not None and records:
+    if embedder is not None and records and text_version_id is not None:
         to_embed = [
             ChunkToEmbed(chunk_id=cid, text=r.text)
             for cid, r in zip(chunk_ids, records, strict=True)
         ]
         await _consume_embedding_stream(
             embed_chunks(
-                embedder, to_embed, model=embedding_model, storage=storage
+                embedder,
+                to_embed,
+                model=embedding_model,
+                version_id=text_version_id,
+                storage=storage,
             ),
             storage,
         )

@@ -1,9 +1,12 @@
--- dikw-core SQLite schema v2: multimedia assets + embedding versioning.
+-- dikw-core SQLite schema v2: embedding versioning + multimedia assets.
 --
--- Additive: leaves the v1 chunks_vec / embed_meta tables alone so installs
--- with legacy text-only embedding data keep working. The new multimodal
--- pathway (Phase I onward) writes to the per-version vec_chunks_v<id> /
--- vec_assets_v<id> virtual tables created at runtime by sqlite.py.
+-- The ``embed_versions`` table is the single registry of every embedding
+-- generation (text + multimodal alike). Each row produces its own per-
+-- version vector table (``vec_chunks_v<id>`` for text, ``vec_assets_v<id>``
+-- for multimodal), created at runtime in ``storage/sqlite.py`` because
+-- sqlite-vec needs the embedding dim parameterized into the CREATE.
+-- Switching a model = new ``embed_versions`` row = new vec table; prior
+-- vectors survive in-place.
 
 -- ---- Multimedia assets ---------------------------------------------------
 
@@ -35,8 +38,10 @@ CREATE INDEX IF NOT EXISTS chunk_asset_refs_asset
 -- ---- Embedding versioning ------------------------------------------------
 
 -- Composite identity: any field different = different version = different
--- vector table. The `revision` column lets users force a new version when
--- a provider silently refreshes weights behind a stable model name.
+-- vector table. ``revision`` lets users force a new version when a
+-- provider silently refreshes weights behind a stable model name.
+-- ``modality`` is part of the UNIQUE so a single CLIP-style model can
+-- register both a text and a multimodal version without collision.
 CREATE TABLE IF NOT EXISTS embed_versions (
     version_id  INTEGER PRIMARY KEY AUTOINCREMENT,
     provider    TEXT    NOT NULL,
@@ -48,16 +53,27 @@ CREATE TABLE IF NOT EXISTS embed_versions (
     modality    TEXT    NOT NULL CHECK (modality IN ('text','multimodal')),
     created_ts  REAL    NOT NULL,
     is_active   INTEGER NOT NULL DEFAULT 1,
-    UNIQUE (provider, model, revision, dim, normalize, distance)
+    UNIQUE (provider, model, revision, dim, normalize, distance, modality)
 );
 
 CREATE INDEX IF NOT EXISTS embed_versions_active
     ON embed_versions(modality, is_active);
 
--- Per-asset embedding metadata. The vector itself lives in the
--- vec_assets_v<version_id> virtual table created at runtime in Python
--- because sqlite-vec needs the embedding dimension parameterized at
--- table-creation time. See storage/sqlite.py: _ensure_asset_vec_table().
+-- Per-chunk embedding metadata. The vector itself lives in the
+-- vec_chunks_v<version_id> virtual table created at runtime in Python
+-- (sqlite-vec needs the embedding dimension parameterized at CREATE
+-- time). See storage/sqlite.py: _ensure_chunk_vec_table().
+CREATE TABLE IF NOT EXISTS chunk_embed_meta (
+    chunk_id   INTEGER NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+    version_id INTEGER NOT NULL REFERENCES embed_versions(version_id),
+    PRIMARY KEY (chunk_id, version_id)
+);
+
+CREATE INDEX IF NOT EXISTS chunk_embed_meta_version
+    ON chunk_embed_meta(version_id);
+
+-- Per-asset embedding metadata. Mirror of chunk_embed_meta. The vector
+-- lives in vec_assets_v<version_id> (also runtime-created).
 CREATE TABLE IF NOT EXISTS asset_embed_meta (
     asset_id   TEXT    NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
     version_id INTEGER NOT NULL REFERENCES embed_versions(version_id),

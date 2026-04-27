@@ -4,10 +4,10 @@ Uses ``psycopg[binary,pool]`` v3 asynchronously and the ``pgvector`` Python
 bindings to mirror the SQLite adapter's contract against a multi-writer
 database. Install via ``uv pip install dikw-core[postgres]``.
 
-Schema lives in ``storage/migrations/postgres/001_init.sql``; the
-``chunks_vec`` table is created lazily at first embedding insert so the
-vector dimension matches the active embedding model, exactly like the
-SQLite adapter.
+Schema lives in ``storage/migrations/postgres/``; the per-version
+``vec_chunks_v<id>`` / ``vec_assets_v<id>`` tables are created lazily at
+first embedding insert so the vector dimension is parameterised into
+the ``vector(<dim>)`` column type. Mirrors the SQLite adapter exactly.
 """
 
 from __future__ import annotations
@@ -69,7 +69,6 @@ class PostgresStorage:
         self._schema = schema
         self._pool_size = pool_size
         self._pool: AsyncConnectionPool | None = None
-        self._embedding_dim: int | None = None
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -126,8 +125,7 @@ class PostgresStorage:
                     await cur.execute(sql_text)
             await conn.commit()
             await self._verify_no_legacy_content_table(conn)
-        # Restore the vector dim (if we've indexed before).
-        await self._load_embedding_dim()
+            await self._verify_no_legacy_text_embed_tables(conn)
 
     # ---- D layer ---------------------------------------------------------
 
@@ -243,30 +241,45 @@ class PostgresStorage:
     async def upsert_embeddings(self, rows: Sequence[EmbeddingRow]) -> None:
         if not rows:
             return
-        dim = len(rows[0].embedding)
+        # Group by version so each per-version vec table is touched once.
+        by_version: dict[int, list[EmbeddingRow]] = {}
+        for r in rows:
+            by_version.setdefault(r.version_id, []).append(r)
         async with self._acquire() as conn:
-            await self._ensure_vec_table(conn, dim)
-            async with conn.cursor() as cur:
-                for row in rows:
-                    if len(row.embedding) != dim:
+            for version_id, batch in by_version.items():
+                version = await _fetch_version_pg(conn, version_id)
+                if version is None:
+                    raise StorageError(
+                        f"unknown embed version_id={version_id}; "
+                        "call upsert_embed_version first"
+                    )
+                for r in batch:
+                    if len(r.embedding) != version.dim:
                         raise StorageError(
-                            f"embedding dim mismatch: expected {dim}, got {len(row.embedding)}"
+                            f"embedding dim {len(r.embedding)} != "
+                            f"version {version_id} dim {version.dim}"
                         )
-                    await cur.execute(
-                        "INSERT INTO embed_meta(chunk_id, model) VALUES (%s, %s) "
-                        "ON CONFLICT (chunk_id, model) DO NOTHING",
-                        (row.chunk_id, row.model),
-                    )
-                    await cur.execute(
-                        "INSERT INTO chunks_vec(chunk_id, embedding) "
-                        "VALUES (%s, %s::vector) "
-                        "ON CONFLICT (chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding",
-                        (row.chunk_id, list(row.embedding)),
-                    )
+                await self._ensure_vec_table(conn, "chunks", version_id, version.dim)
+                vec_table = f"vec_chunks_v{version_id}"
+                async with conn.cursor() as cur:
+                    for r in batch:
+                        await cur.execute(
+                            "INSERT INTO chunk_embed_meta(chunk_id, version_id) "
+                            "VALUES (%s, %s) "
+                            "ON CONFLICT (chunk_id, version_id) DO NOTHING",
+                            (r.chunk_id, version_id),
+                        )
+                        await cur.execute(
+                            f"INSERT INTO {vec_table}(chunk_id, embedding) "
+                            "VALUES (%s, %s::vector) "
+                            "ON CONFLICT (chunk_id) DO UPDATE "
+                            "SET embedding = EXCLUDED.embedding",
+                            (r.chunk_id, list(r.embedding)),
+                        )
             await conn.commit()
 
     async def get_cached_embeddings(
-        self, content_hashes: Sequence[str], *, model: str
+        self, content_hashes: Sequence[str], *, version_id: int
     ) -> dict[str, list[float]]:
         hashes = list(content_hashes)
         if not hashes:
@@ -274,8 +287,8 @@ class PostgresStorage:
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
                 "SELECT content_hash, dim, embedding FROM embed_cache "
-                "WHERE model = %s AND content_hash = ANY(%s)",
-                (model, hashes),
+                "WHERE version_id = %s AND content_hash = ANY(%s)",
+                (version_id, hashes),
             )
             rows = await cur.fetchall()
         # Cross-backend byte-exact contract: see storage/_vec_codec.py.
@@ -286,34 +299,34 @@ class PostgresStorage:
             return
         now = time.time()
         params = [
-            (r.content_hash, r.model, r.dim, serialize_vec(list(r.embedding)), now)
+            (r.content_hash, r.version_id, r.dim, serialize_vec(list(r.embedding)), now)
             for r in rows
         ]
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
                 # ON CONFLICT DO NOTHING — idempotent contract; vectors
-                # for the same (content_hash, model) are deterministic
+                # for the same (content_hash, version_id) are deterministic
                 # so we never overwrite.
                 await cur.executemany(
                     "INSERT INTO embed_cache"
-                    "(content_hash, model, dim, embedding, created_ts) "
+                    "(content_hash, version_id, dim, embedding, created_ts) "
                     "VALUES (%s, %s, %s, %s, %s) "
-                    "ON CONFLICT (content_hash, model) DO NOTHING",
+                    "ON CONFLICT (content_hash, version_id) DO NOTHING",
                     params,
                 )
             await conn.commit()
 
     async def list_chunks_missing_embedding(
-        self, *, model: str
+        self, *, version_id: int
     ) -> list[ChunkRecord]:
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
                 "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
                 "FROM chunks "
                 "WHERE chunk_id NOT IN "
-                "(SELECT chunk_id FROM embed_meta WHERE model = %s) "
+                "(SELECT chunk_id FROM chunk_embed_meta WHERE version_id = %s) "
                 "ORDER BY chunk_id",
-                (model,),
+                (version_id,),
             )
             rows = await cur.fetchall()
         return [
@@ -406,39 +419,68 @@ class PostgresStorage:
         return list(best_by_doc.values())[:limit]
 
     async def vec_search(
-        self, embedding: list[float], *, limit: int = 20, layer: Layer | None = None
+        self,
+        embedding: list[float],
+        *,
+        version_id: int | None = None,
+        limit: int = 20,
+        layer: Layer | None = None,
     ) -> list[VecHit]:
-        if self._embedding_dim is None:
-            raise NotSupported("no embeddings indexed yet")
-        if len(embedding) != self._embedding_dim:
-            raise StorageError(
-                f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
+        async with self._acquire() as conn:
+            resolved = version_id
+            resolved_dim: int
+            if resolved is None:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT version_id, dim FROM embed_versions "
+                        "WHERE modality = 'text' AND is_active = TRUE "
+                        "ORDER BY version_id DESC LIMIT 1"
+                    )
+                    row = await cur.fetchone()
+                if row is None:
+                    raise NotSupported("no text embeddings indexed yet")
+                resolved = int(row[0])
+                resolved_dim = int(row[1])
+            else:
+                version = await _fetch_version_pg(conn, resolved)
+                if version is None:
+                    raise NotSupported(
+                        f"no text embeddings for version_id={resolved}"
+                    )
+                resolved_dim = version.dim
+            if len(embedding) != resolved_dim:
+                raise StorageError(
+                    f"query embedding dim {len(embedding)} != "
+                    f"version {resolved} dim {resolved_dim}"
+                )
+            vec_table = f"vec_chunks_v{resolved}"
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT to_regclass(%s)", (vec_table,))
+                exists_row = await cur.fetchone()
+            if exists_row is None or exists_row[0] is None:
+                raise NotSupported(
+                    f"no chunk vectors for version_id={resolved}"
+                )
+
+            # See storage/_vec_codec.py for the NaN/zero-vec guard rationale —
+            # pgvector returns NaN on zero vectors which slips past IS NOT NULL.
+            vec = list(embedding)
+            sql = (
+                f"SELECT cv.chunk_id, c.doc_id, (cv.embedding <=> %s::vector) AS dist "
+                f"FROM {vec_table} cv JOIN chunks c ON c.chunk_id = cv.chunk_id "
+                f"JOIN documents d ON d.doc_id = c.doc_id "
+                f"WHERE d.active = TRUE AND (cv.embedding <=> %s::vector) IS NOT NULL"
             )
+            params: list[Any] = [vec, vec]
+            if layer is not None:
+                sql += " AND d.layer = %s"
+                params.append(layer.value)
+            sql += " ORDER BY dist ASC LIMIT %s"
+            params.append(limit)
 
-        # Cosine distance is undefined for the zero vector. pgvector's
-        # ``<=>`` operator does NOT return NULL on zero vectors — it
-        # returns NaN (sqlite-vec returns NULL, hence the original guard
-        # below). NaN slips past ``IS NOT NULL`` and ``ORDER BY ASC``
-        # places NaN somewhere implementation-defined. Drop both at the
-        # Python layer with ``math.isnan`` so degenerate rows never
-        # surface as hits regardless of which backend produced them.
-        vec = list(embedding)
-        sql = (
-            "SELECT cv.chunk_id, c.doc_id, (cv.embedding <=> %s::vector) AS dist "
-            "FROM chunks_vec cv JOIN chunks c ON c.chunk_id = cv.chunk_id "
-            "JOIN documents d ON d.doc_id = c.doc_id "
-            "WHERE d.active = TRUE AND (cv.embedding <=> %s::vector) IS NOT NULL"
-        )
-        params: list[Any] = [vec, vec]
-        if layer is not None:
-            sql += " AND d.layer = %s"
-            params.append(layer.value)
-        sql += " ORDER BY dist ASC LIMIT %s"
-        params.append(limit)
-
-        async with self._acquire() as conn, conn.cursor() as cur:
-            await cur.execute(sql, params)
-            rows = await cur.fetchall()
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
+                rows = await cur.fetchall()
         return [
             VecHit(chunk_id=int(r[0]), doc_id=r[1], distance=float(r[2]))
             for r in rows
@@ -647,7 +689,7 @@ class PostgresStorage:
             by_layer = {row[0]: int(row[1]) for row in await cur.fetchall()}
             await cur.execute("SELECT COUNT(*) FROM chunks")
             chunks = int((await cur.fetchone())[0])
-            await cur.execute("SELECT COUNT(*) FROM embed_meta")
+            await cur.execute("SELECT COUNT(*) FROM chunk_embed_meta")
             embeddings = int((await cur.fetchone())[0])
             await cur.execute("SELECT COUNT(*) FROM links")
             links = int((await cur.fetchone())[0])
@@ -657,6 +699,10 @@ class PostgresStorage:
             by_status = {row[0]: int(row[1]) for row in await cur.fetchall()}
             await cur.execute("SELECT MAX(ts) FROM wiki_log")
             last = (await cur.fetchone())[0]
+            await cur.execute("SELECT COUNT(*) FROM assets")
+            assets_count = int((await cur.fetchone())[0])
+            await cur.execute("SELECT COUNT(*) FROM asset_embed_meta")
+            asset_emb_count = int((await cur.fetchone())[0])
 
         return StorageCounts(
             documents_by_layer=by_layer,
@@ -665,15 +711,11 @@ class PostgresStorage:
             links=links,
             wisdom_by_status=by_status,
             last_wiki_log_ts=float(last) if last is not None else None,
+            assets=assets_count,
+            asset_embeddings=asset_emb_count,
         )
 
     # ---- multimedia assets ------------------------------------------------
-    #
-    # ``upsert_asset`` / ``get_asset`` mirror the SQLite adapter against the
-    # ``assets`` table from migrations/postgres/003_assets.sql. The chunk↔
-    # asset bridge, embed-version table, and per-version pgvector tables
-    # are still Phase 5 work — those methods continue to raise
-    # ``NotSupported`` so contract tests skip them cleanly.
 
     async def upsert_asset(self, asset: AssetRecord) -> None:
         async with self._acquire() as conn:
@@ -722,22 +764,114 @@ class PostgresStorage:
     async def replace_chunk_asset_refs(
         self, chunk_id: int, refs: Sequence[ChunkAssetRef]
     ) -> None:
-        raise NotSupported("postgres adapter: chunk_asset_refs not implemented yet")
+        async with self._acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM chunk_asset_refs WHERE chunk_id = %s",
+                    (chunk_id,),
+                )
+                for ref in refs:
+                    await cur.execute(
+                        "INSERT INTO chunk_asset_refs"
+                        "(chunk_id, asset_id, ord, alt, start_in_chunk, end_in_chunk) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (
+                            ref.chunk_id,
+                            ref.asset_id,
+                            ref.ord,
+                            ref.alt,
+                            ref.start_in_chunk,
+                            ref.end_in_chunk,
+                        ),
+                    )
+            await conn.commit()
 
     async def chunk_asset_refs_for_chunks(
         self, chunk_ids: Sequence[int]
     ) -> dict[int, list[ChunkAssetRef]]:
-        raise NotSupported("postgres adapter: chunk_asset_refs not implemented yet")
+        ids = list(chunk_ids)
+        if not ids:
+            return {}
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chunk_id, asset_id, ord, alt, start_in_chunk, end_in_chunk "
+                "FROM chunk_asset_refs WHERE chunk_id = ANY(%s) "
+                "ORDER BY chunk_id, ord",
+                (ids,),
+            )
+            rows = await cur.fetchall()
+        out: dict[int, list[ChunkAssetRef]] = {cid: [] for cid in ids}
+        for r in rows:
+            out[int(r[0])].append(
+                ChunkAssetRef(
+                    chunk_id=int(r[0]),
+                    asset_id=r[1],
+                    ord=int(r[2]),
+                    alt=r[3],
+                    start_in_chunk=int(r[4]),
+                    end_in_chunk=int(r[5]),
+                )
+            )
+        return out
 
     async def chunks_referencing_assets(
         self, asset_ids: Sequence[str]
     ) -> dict[str, list[int]]:
-        raise NotSupported("postgres adapter: chunk_asset_refs not implemented yet")
+        ids = list(asset_ids)
+        if not ids:
+            return {}
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT asset_id, chunk_id FROM chunk_asset_refs "
+                "WHERE asset_id = ANY(%s) ORDER BY asset_id, chunk_id",
+                (ids,),
+            )
+            rows = await cur.fetchall()
+        out: dict[str, list[int]] = {aid: [] for aid in ids}
+        for r in rows:
+            out[r[0]].append(int(r[1]))
+        return out
 
     async def upsert_asset_embeddings(
         self, rows: Sequence[AssetEmbeddingRow]
     ) -> None:
-        raise NotSupported("postgres adapter: asset embeddings not implemented yet")
+        if not rows:
+            return
+        by_version: dict[int, list[AssetEmbeddingRow]] = {}
+        for r in rows:
+            by_version.setdefault(r.version_id, []).append(r)
+        async with self._acquire() as conn:
+            for version_id, batch in by_version.items():
+                version = await _fetch_version_pg(conn, version_id)
+                if version is None:
+                    raise StorageError(
+                        f"unknown embed version_id={version_id}; "
+                        "call upsert_embed_version first"
+                    )
+                for r in batch:
+                    if len(r.embedding) != version.dim:
+                        raise StorageError(
+                            f"embedding dim {len(r.embedding)} != "
+                            f"version {version_id} dim {version.dim}"
+                        )
+                await self._ensure_vec_table(conn, "assets", version_id, version.dim)
+                vec_table = f"vec_assets_v{version_id}"
+                async with conn.cursor() as cur:
+                    for r in batch:
+                        await cur.execute(
+                            "INSERT INTO asset_embed_meta(asset_id, version_id) "
+                            "VALUES (%s, %s) "
+                            "ON CONFLICT (asset_id, version_id) DO NOTHING",
+                            (r.asset_id, version_id),
+                        )
+                        await cur.execute(
+                            f"INSERT INTO {vec_table}(asset_id, embedding) "
+                            "VALUES (%s, %s::vector) "
+                            "ON CONFLICT (asset_id) DO UPDATE "
+                            "SET embedding = EXCLUDED.embedding",
+                            (r.asset_id, list(r.embedding)),
+                        )
+            await conn.commit()
 
     async def vec_search_assets(
         self,
@@ -747,18 +881,141 @@ class PostgresStorage:
         limit: int = 20,
         layer: Layer | None = None,
     ) -> list[AssetVecHit]:
-        raise NotSupported("postgres adapter: asset embeddings not implemented yet")
+        async with self._acquire() as conn:
+            version = await _fetch_version_pg(conn, version_id)
+            if version is None:
+                raise NotSupported(
+                    f"no asset embeddings for version_id={version_id}"
+                )
+            if len(embedding) != version.dim:
+                raise StorageError(
+                    f"query embedding dim {len(embedding)} != "
+                    f"version {version_id} dim {version.dim}"
+                )
+            vec_table = f"vec_assets_v{version_id}"
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT to_regclass(%s)", (vec_table,))
+                exists_row = await cur.fetchone()
+            if exists_row is None or exists_row[0] is None:
+                return []
+            vec = list(embedding)
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT av.asset_id, (av.embedding <=> %s::vector) AS dist "
+                    f"FROM {vec_table} av "
+                    f"WHERE (av.embedding <=> %s::vector) IS NOT NULL "
+                    f"ORDER BY dist ASC LIMIT %s",
+                    (vec, vec, limit),
+                )
+                rows = await cur.fetchall()
+        return [
+            AssetVecHit(asset_id=r[0], distance=float(r[1]))
+            for r in rows
+            if r[1] is not None and not math.isnan(r[1])
+        ]
 
     async def upsert_embed_version(self, v: EmbeddingVersion) -> int:
-        raise NotSupported("postgres adapter: embed versioning not implemented yet")
+        async with self._acquire() as conn:
+            async with conn.cursor() as cur:
+                # Match key includes modality so a CLIP-style model can
+                # register both text and multimodal versions side by side.
+                await cur.execute(
+                    """
+                    SELECT version_id FROM embed_versions
+                    WHERE provider = %s AND model = %s AND revision = %s
+                      AND dim = %s AND normalize = %s AND distance = %s
+                      AND modality = %s
+                    """,
+                    (
+                        v.provider,
+                        v.model,
+                        v.revision,
+                        v.dim,
+                        v.normalize,
+                        v.distance,
+                        v.modality,
+                    ),
+                )
+                row = await cur.fetchone()
+                if row is not None:
+                    found_id = int(row[0])
+                    # Reactivate the matched row + demote any other actives
+                    # of the same modality (see SQLite mirror).
+                    await cur.execute(
+                        "UPDATE embed_versions "
+                        "SET is_active = (version_id = %s) "
+                        "WHERE modality = %s",
+                        (found_id, v.modality),
+                    )
+                    await conn.commit()
+                    return found_id
+                # New version: insert and demote prior actives of the
+                # same modality.
+                await cur.execute(
+                    "UPDATE embed_versions SET is_active = FALSE WHERE modality = %s",
+                    (v.modality,),
+                )
+                created_ts = (
+                    v.created_ts if v.created_ts is not None else time.time()
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO embed_versions(
+                        provider, model, revision, dim, normalize, distance,
+                        modality, created_ts, is_active
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    RETURNING version_id
+                    """,
+                    (
+                        v.provider,
+                        v.model,
+                        v.revision,
+                        v.dim,
+                        v.normalize,
+                        v.distance,
+                        v.modality,
+                        created_ts,
+                    ),
+                )
+                inserted = await cur.fetchone()
+            await conn.commit()
+        if inserted is None:
+            raise StorageError("upsert_embed_version: insert returned no row")
+        return int(inserted[0])
 
     async def get_active_embed_version(
         self, *, modality: Literal["text", "multimodal"]
     ) -> EmbeddingVersion | None:
-        raise NotSupported("postgres adapter: embed versioning not implemented yet")
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT version_id, provider, model, revision, dim, normalize, "
+                "distance, modality, created_ts, is_active "
+                "FROM embed_versions "
+                "WHERE modality = %s AND is_active = TRUE "
+                "ORDER BY version_id DESC LIMIT 1",
+                (modality,),
+            )
+            row = await cur.fetchone()
+        return _row_to_embed_version_pg(row) if row else None
 
-    async def list_embed_versions(self) -> list[EmbeddingVersion]:
-        raise NotSupported("postgres adapter: embed versioning not implemented yet")
+    async def list_embed_versions(
+        self, *, modality: Literal["text", "multimodal"] | None = None
+    ) -> list[EmbeddingVersion]:
+        sql = (
+            "SELECT version_id, provider, model, revision, dim, normalize, "
+            "distance, modality, created_ts, is_active "
+            "FROM embed_versions"
+        )
+        params: list[Any] = []
+        if modality is not None:
+            sql += " WHERE modality = %s"
+            params.append(modality)
+        sql += " ORDER BY version_id"
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+        return [_row_to_embed_version_pg(r) for r in rows]
 
     # ---- internals -------------------------------------------------------
 
@@ -776,39 +1033,31 @@ class PostgresStorage:
         )
         return [pkg.joinpath(n).read_text(encoding="utf-8") for n in names]
 
-    async def _ensure_vec_table(self, conn: AsyncConnection, dim: int) -> None:
-        if self._embedding_dim is None:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    f"CREATE TABLE IF NOT EXISTS chunks_vec ("
-                    f"  chunk_id BIGINT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,"
-                    f"  embedding vector({dim}) NOT NULL"
-                    f")"
-                )
-                await cur.execute(
-                    "INSERT INTO meta_kv(key, value) VALUES ('embedding_dim', %s) "
-                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                    (str(dim),),
-                )
-            await conn.commit()
-            self._embedding_dim = dim
-            return
-        if self._embedding_dim != dim:
-            raise StorageError(
-                f"embedding dim mismatch: index uses {self._embedding_dim}, got {dim}"
-            )
-
-    async def _load_embedding_dim(self) -> None:
-        async with self._acquire() as conn, conn.cursor() as cur:
+    async def _ensure_vec_table(
+        self,
+        conn: AsyncConnection,
+        kind: Literal["chunks", "assets"],
+        version_id: int,
+        dim: int,
+    ) -> None:
+        """Create ``vec_{kind}_v<version_id>`` lazily. pgvector needs the
+        embedding dim parameterised into the column type, so each version
+        gets its own dim-locked table — switching model creates a new
+        version + new table, leaving prior data intact.
+        """
+        if kind == "chunks":
+            pk_col, fk_table = "chunk_id BIGINT", "chunks(chunk_id)"
+        else:
+            pk_col, fk_table = "asset_id TEXT", "assets(asset_id)"
+        async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT value FROM meta_kv WHERE key = 'embedding_dim'"
+                f"CREATE TABLE IF NOT EXISTS vec_{kind}_v{version_id} ("
+                f"  {pk_col} PRIMARY KEY "
+                f"  REFERENCES {fk_table} ON DELETE CASCADE,"
+                f"  embedding vector({dim}) NOT NULL"
+                f")"
             )
-            row = await cur.fetchone()
-        if row is not None:
-            try:
-                self._embedding_dim = int(row[0])
-            except (ValueError, TypeError):
-                self._embedding_dim = None
+        await conn.commit()
 
     async def _verify_no_legacy_content_table(self, conn: AsyncConnection) -> None:
         """Bail if a pre-refactor ``content`` table is still present.
@@ -824,6 +1073,25 @@ class PostgresStorage:
                 "Drop the schema (`DROP SCHEMA <schema> CASCADE`) and re-run "
                 "`dikw ingest` to rebuild on the new D-layer schema."
             )
+
+    async def _verify_no_legacy_text_embed_tables(
+        self, conn: AsyncConnection
+    ) -> None:
+        """Bail if pre-versioning text embedding tables are still present.
+
+        Mirror of ``SQLiteStorage._verify_no_legacy_text_embed_tables``.
+        """
+        async with conn.cursor() as cur:
+            for legacy in ("chunks_vec", "embed_meta"):
+                await cur.execute("SELECT to_regclass(%s)", (legacy,))
+                row = await cur.fetchone()
+                if row is not None and row[0] is not None:
+                    raise StorageError(
+                        f"legacy `{legacy}` table detected from a pre-versioning "
+                        "schema. Drop the schema (`DROP SCHEMA <schema> CASCADE`) "
+                        "and re-run `dikw ingest` to rebuild on the version-aware "
+                        "embedding schema."
+                    )
 
 
 class _ConnectionContext:
@@ -882,6 +1150,35 @@ def _row_to_link(row: Any) -> LinkRecord:
         anchor=row[3],
         line=int(row[4]),
     )
+
+
+def _row_to_embed_version_pg(row: Any) -> EmbeddingVersion:
+    return EmbeddingVersion(
+        version_id=int(row[0]),
+        provider=row[1],
+        model=row[2],
+        revision=row[3],
+        dim=int(row[4]),
+        normalize=bool(row[5]),
+        distance=row[6],
+        modality=row[7],
+        created_ts=float(row[8]),
+        is_active=bool(row[9]),
+    )
+
+
+async def _fetch_version_pg(
+    conn: AsyncConnection, version_id: int
+) -> EmbeddingVersion | None:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT version_id, provider, model, revision, dim, normalize, "
+            "distance, modality, created_ts, is_active "
+            "FROM embed_versions WHERE version_id = %s",
+            (version_id,),
+        )
+        row = await cur.fetchone()
+    return _row_to_embed_version_pg(row) if row else None
 
 
 def _row_to_wisdom(row: Any) -> WisdomItem:

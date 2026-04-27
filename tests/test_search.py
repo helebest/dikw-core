@@ -4,13 +4,14 @@ import pytest
 
 from dikw_core.info.search import (
     HybridSearcher,
+    MultimodalSearch,
     _sanitize_fts,
     apply_source_diversity_penalty,
     reciprocal_rank_fusion,
 )
 from dikw_core.storage.sqlite import SQLiteStorage
 
-from .fakes import FakeEmbeddings
+from .fakes import FakeEmbeddings, FakeMultimodalEmbedding, register_text_version
 
 
 def test_rrf_favors_consensus() -> None:
@@ -254,10 +255,15 @@ async def test_hybrid_search_returns_hits(tmp_path) -> None:
         to_embed.extend(ChunkToEmbed(chunk_id=cid, text=r.text) for cid, r in zip(ids, records, strict=True))
 
     embedder = FakeEmbeddings()
-    async for batch in embed_chunks(embedder, to_embed, model="fake"):
+    version_id = await register_text_version(storage)
+    async for batch in embed_chunks(
+        embedder, to_embed, model="fake", version_id=version_id
+    ):
         await storage.upsert_embeddings(batch)
 
-    searcher = HybridSearcher(storage, embedder, embedding_model="fake")
+    searcher = HybridSearcher(
+        storage, embedder, embedding_model="fake", text_version_id=version_id
+    )
     hits = await searcher.search("reciprocal rank fusion", limit=3)
     assert hits, "no hits returned"
     assert any("retrieval.md" in (h.path or "") for h in hits)
@@ -273,7 +279,11 @@ async def test_hybrid_search_returns_hits(tmp_path) -> None:
 
 
 async def _populate_fixture_corpus(storage):
-    """Helper: load tests/fixtures/notes/ into ``storage`` (FakeEmbeddings)."""
+    """Helper: load tests/fixtures/notes/ into ``storage`` (FakeEmbeddings).
+
+    Returns ``(embedder, text_version_id)`` so callers can pass the
+    version_id to ``HybridSearcher``.
+    """
     import time
     from pathlib import Path
 
@@ -310,9 +320,12 @@ async def _populate_fixture_corpus(storage):
         )
 
     embedder = FakeEmbeddings()
-    async for batch in embed_chunks(embedder, to_embed, model="fake"):
+    version_id = await register_text_version(storage)
+    async for batch in embed_chunks(
+        embedder, to_embed, model="fake", version_id=version_id
+    ):
         await storage.upsert_embeddings(batch)
-    return embedder
+    return embedder, version_id
 
 
 @pytest.mark.asyncio
@@ -320,7 +333,7 @@ async def test_mode_bm25_skips_vector_leg(tmp_path) -> None:
     storage = SQLiteStorage(tmp_path / "idx.sqlite")
     await storage.connect()
     await storage.migrate()
-    embedder = await _populate_fixture_corpus(storage)
+    embedder, version_id = await _populate_fixture_corpus(storage)
 
     # Spy on vec_search to verify it never fires in bm25 mode.
     real_vec = storage.vec_search
@@ -332,7 +345,9 @@ async def test_mode_bm25_skips_vector_leg(tmp_path) -> None:
 
     storage.vec_search = spy_vec  # type: ignore[method-assign]
 
-    searcher = HybridSearcher(storage, embedder, embedding_model="fake")
+    searcher = HybridSearcher(
+        storage, embedder, embedding_model="fake", text_version_id=version_id
+    )
     hits = await searcher.search("DIKW pyramid", limit=3, mode="bm25")
     assert hits, "bm25 mode returned no hits"
     assert calls["vec"] == 0, "vec_search must not run in bm25 mode"
@@ -345,7 +360,7 @@ async def test_mode_vector_skips_fts_leg(tmp_path) -> None:
     storage = SQLiteStorage(tmp_path / "idx.sqlite")
     await storage.connect()
     await storage.migrate()
-    embedder = await _populate_fixture_corpus(storage)
+    embedder, version_id = await _populate_fixture_corpus(storage)
 
     real_fts = storage.fts_search
     calls = {"fts": 0}
@@ -356,7 +371,9 @@ async def test_mode_vector_skips_fts_leg(tmp_path) -> None:
 
     storage.fts_search = spy_fts  # type: ignore[method-assign]
 
-    searcher = HybridSearcher(storage, embedder, embedding_model="fake")
+    searcher = HybridSearcher(
+        storage, embedder, embedding_model="fake", text_version_id=version_id
+    )
     hits = await searcher.search("DIKW pyramid", limit=3, mode="vector")
     assert hits, "vector mode returned no hits"
     assert calls["fts"] == 0, "fts_search must not run in vector mode"
@@ -369,7 +386,7 @@ async def test_mode_hybrid_runs_both_legs(tmp_path) -> None:
     storage = SQLiteStorage(tmp_path / "idx.sqlite")
     await storage.connect()
     await storage.migrate()
-    embedder = await _populate_fixture_corpus(storage)
+    embedder, version_id = await _populate_fixture_corpus(storage)
 
     real_fts = storage.fts_search
     real_vec = storage.vec_search
@@ -386,7 +403,9 @@ async def test_mode_hybrid_runs_both_legs(tmp_path) -> None:
     storage.fts_search = spy_fts  # type: ignore[method-assign]
     storage.vec_search = spy_vec  # type: ignore[method-assign]
 
-    searcher = HybridSearcher(storage, embedder, embedding_model="fake")
+    searcher = HybridSearcher(
+        storage, embedder, embedding_model="fake", text_version_id=version_id
+    )
     hits = await searcher.search("DIKW pyramid", limit=3, mode="hybrid")
     assert hits
     assert calls["fts"] == 1 and calls["vec"] == 1
@@ -489,9 +508,12 @@ async def _populate_multi_chunk_corpus(storage: SQLiteStorage) -> FakeEmbeddings
         )
 
     embedder = FakeEmbeddings()
-    async for batch in embed_chunks(embedder, to_embed, model="fake"):
+    version_id = await register_text_version(storage)
+    async for batch in embed_chunks(
+        embedder, to_embed, model="fake", version_id=version_id
+    ):
         await storage.upsert_embeddings(batch)
-    return embedder
+    return embedder, version_id
 
 
 @pytest.mark.asyncio
@@ -502,12 +524,13 @@ async def test_chunk_level_fusion_returns_multiple_chunks_per_doc(tmp_path) -> N
     storage = SQLiteStorage(tmp_path / "idx.sqlite")
     await storage.connect()
     await storage.migrate()
-    embedder = await _populate_multi_chunk_corpus(storage)
+    embedder, version_id = await _populate_multi_chunk_corpus(storage)
 
     searcher = HybridSearcher(
         storage,
         embedder,
         embedding_model="fake",
+        text_version_id=version_id,
         same_doc_penalty_alpha=0.0,
     )
     hits = await searcher.search("alpha foo bar", limit=5)
@@ -532,10 +555,14 @@ async def test_chunk_level_fusion_distinct_chunks_have_distinct_ids(tmp_path) ->
     storage = SQLiteStorage(tmp_path / "idx.sqlite")
     await storage.connect()
     await storage.migrate()
-    embedder = await _populate_multi_chunk_corpus(storage)
+    embedder, version_id = await _populate_multi_chunk_corpus(storage)
 
     searcher = HybridSearcher(
-        storage, embedder, embedding_model="fake", same_doc_penalty_alpha=0.0
+        storage,
+        embedder,
+        embedding_model="fake",
+        text_version_id=version_id,
+        same_doc_penalty_alpha=0.0,
     )
     hits = await searcher.search("alpha foo bar", limit=5)
     await storage.close()
@@ -552,13 +579,21 @@ async def test_same_doc_penalty_zero_vs_default_changes_ranking(tmp_path) -> Non
     storage = SQLiteStorage(tmp_path / "idx.sqlite")
     await storage.connect()
     await storage.migrate()
-    embedder = await _populate_multi_chunk_corpus(storage)
+    embedder, version_id = await _populate_multi_chunk_corpus(storage)
 
     pure = HybridSearcher(
-        storage, embedder, embedding_model="fake", same_doc_penalty_alpha=0.0
+        storage,
+        embedder,
+        embedding_model="fake",
+        text_version_id=version_id,
+        same_doc_penalty_alpha=0.0,
     )
     diversified = HybridSearcher(
-        storage, embedder, embedding_model="fake", same_doc_penalty_alpha=0.3
+        storage,
+        embedder,
+        embedding_model="fake",
+        text_version_id=version_id,
+        same_doc_penalty_alpha=0.3,
     )
 
     pure_hits = await pure.search("alpha foo bar", limit=5)
@@ -586,11 +621,11 @@ async def test_hybrid_searcher_from_config_threads_alpha(tmp_path) -> None:
     storage = SQLiteStorage(tmp_path / "idx.sqlite")
     await storage.connect()
     await storage.migrate()
-    embedder = await _populate_multi_chunk_corpus(storage)
+    embedder, version_id = await _populate_multi_chunk_corpus(storage)
 
     cfg = RetrievalConfig(same_doc_penalty_alpha=0.0)
     searcher = HybridSearcher.from_config(
-        storage, embedder, cfg, embedding_model="fake"
+        storage, embedder, cfg, embedding_model="fake", text_version_id=version_id
     )
     assert searcher._same_doc_penalty_alpha == 0.0
     hits = await searcher.search("alpha foo bar", limit=5)
@@ -753,3 +788,113 @@ async def test_cjk_tokenizer_none_leaves_body_verbatim(tmp_path) -> None:
 
     assert _read_body() == body_text
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_multimodal_q_vec_does_not_leak_into_text_vec_search(tmp_path) -> None:
+    """T5 regression: text and multimodal legs use independent q_vecs.
+
+    When both a text embedder (dim=64) and a multimodal embedder (dim=4)
+    are configured, the multimodal q_vec must NOT be passed to
+    ``vec_search`` (the text leg) — pre-fix that caused either dim
+    mismatch (StorageError caught and silently dropped the leg) or
+    semantic drift (when dims happened to match).
+    """
+    import time
+
+    from dikw_core.schemas import (
+        ChunkRecord,
+        DocumentRecord,
+        EmbeddingRow,
+        EmbeddingVersion,
+        Layer,
+    )
+
+    storage = SQLiteStorage(tmp_path / "t5.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    try:
+        # Register both modalities; intentionally different dims so a
+        # cross-leg q_vec leak would dim-mismatch loudly.
+        text_v = await register_text_version(storage, dim=64, model="text-fake")
+        mm_v = await storage.upsert_embed_version(
+            EmbeddingVersion(
+                provider="fake_mm",
+                model="mm-fake",
+                dim=4,
+                normalize=True,
+                distance="cosine",
+                modality="multimodal",
+            )
+        )
+
+        # Seed one doc + one chunk; populate text-vec table only (asset
+        # leg has no asset registered, so vec_search_assets returns []).
+        doc = DocumentRecord(
+            doc_id="d1",
+            path="sources/d.md",
+            title="d",
+            hash="h",
+            mtime=time.time(),
+            layer=Layer.SOURCE,
+        )
+        await storage.upsert_document(doc)
+        cids = await storage.replace_chunks(
+            "d1",
+            [ChunkRecord(doc_id="d1", seq=0, start=0, end=5, text="alpha")],
+        )
+        text_emb = [1.0] + [0.0] * 63  # 64-dim
+        await storage.upsert_embeddings(
+            [EmbeddingRow(chunk_id=cids[0], version_id=text_v, embedding=text_emb)]
+        )
+
+        # Stub the vec legs so the spies just record the q_vec routed
+        # to each leg — the test's invariant is "each modality gets its
+        # own dim", not "the legs return real hits". Avoiding the real
+        # SQL also dodges a known concurrent-access race on sqlite3
+        # connections when both legs hit `to_thread` simultaneously.
+        captured: dict[str, list[float]] = {}
+
+        async def stub_vec_search(emb, **kwargs):
+            captured["text"] = list(emb)
+            return []
+
+        async def stub_vec_search_assets(emb, **kwargs):
+            captured["mm"] = list(emb)
+            return []
+
+        storage.vec_search = stub_vec_search  # type: ignore[method-assign]
+        storage.vec_search_assets = stub_vec_search_assets  # type: ignore[method-assign]
+
+        text_embedder = FakeEmbeddings()
+        mm_embedder = FakeMultimodalEmbedding(dim=4)
+        searcher = HybridSearcher(
+            storage,
+            text_embedder,
+            embedding_model="text-fake",
+            text_version_id=text_v,
+            multimodal=MultimodalSearch(
+                embedder=mm_embedder,
+                model="mm-fake",
+                asset_version_id=mm_v,
+            ),
+        )
+
+        # Run a hybrid search — both vec legs should fire.
+        await searcher.search("hello world", limit=3)
+
+        # Independent q_vecs: each leg got a vector in its own dim.
+        assert "text" in captured, "vec_search must run on text leg"
+        assert "mm" in captured, "vec_search_assets must run on mm leg"
+        assert len(captured["text"]) == 64, (
+            f"text vec_search got dim {len(captured['text'])}, expected 64 — "
+            f"multimodal q_vec leaked into the text leg (T5 regression)"
+        )
+        assert len(captured["mm"]) == 4, (
+            f"mm vec_search_assets got dim {len(captured['mm'])}, expected 4"
+        )
+        assert captured["text"] != captured["mm"], (
+            "text and mm q_vecs must be distinct objects from distinct embedders"
+        )
+    finally:
+        await storage.close()

@@ -32,13 +32,19 @@ def build_llm(config: ProviderConfig) -> LLMProvider:
     raise ProviderError(f"unknown LLM provider: {config.llm!r}")
 
 
-def build_embedder(config: ProviderConfig) -> EmbeddingProvider:
+def build_embedder(
+    config: ProviderConfig, *, dim_override: int | None = None
+) -> EmbeddingProvider:
     # Anthropic has no embeddings API; both paths route through OpenAI-compat
     # using ``embedding_base_url`` so users configure one endpoint explicitly.
+    # ``dim_override`` lets query() pin to the active embed_versions row's
+    # dim when cfg has drifted (yml edited but no re-ingest yet) — without
+    # it the request would ship the new dim and get rejected by the old
+    # vec_chunks_v<id> table.
     if config.embedding == "openai_compat":
         return OpenAICompatEmbeddings(
             base_url=config.embedding_base_url,
-            default_dimensions=config.embedding_dimensions,
+            default_dimensions=dim_override or config.embedding_dim,
             max_retries=config.embedding_max_retries,
             timeout_seconds=config.embedding_timeout_seconds,
         )

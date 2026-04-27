@@ -24,11 +24,16 @@ class ProviderConfig(BaseModel):
     # The OpenAI-compat base URL is used for BOTH `openai_compat` LLM calls and
     # for embeddings when the LLM provider is Anthropic (which has no embeddings API).
     embedding_base_url: str = "https://api.openai.com/v1"
-    # Optional embedding output dimension (matryoshka truncation). ``None`` keeps
-    # the provider's native default (e.g., 1536 for text-embedding-3-small);
-    # set it explicitly for models that support trimming (e.g.,
-    # Qwen3-Embedding-8B on Gitee AI).
-    embedding_dimensions: int | None = None
+    # The four fields below form the version identity registered into
+    # ``embed_versions``. All required so dim/normalize/distance drift
+    # is impossible to introduce silently (the version row is the
+    # invariant the storage layer's per-version vec table relies on);
+    # bump ``embedding_revision`` to force a new version when a vendor
+    # silently refreshes weights behind a stable model name.
+    embedding_dim: int
+    embedding_revision: str
+    embedding_normalize: bool
+    embedding_distance: Literal["cosine", "l2", "dot"]
     # Max texts per ``/v1/embeddings`` request. OpenAI accepts ~2048;
     # Gitee AI caps at ~25. Keep the default safe for OpenAI and drop it
     # via config when hitting a stricter backend.
@@ -109,7 +114,7 @@ class RetrievalConfig(BaseModel):
     # input without configuration; install via ``uv sync --extra cjk``
     # (or rely on the char-based fallback in ``count_tokens`` when the
     # extra is absent). **Locked at first ingest** — same shape as
-    # ``embedding_dimensions``; flip requires wiping the index. Set to
+    # ``embedding_dim``; flip requires wiping the index. Set to
     # ``"none"`` to opt back into the legacy whitespace behaviour. See
     # ``docs/providers.md`` gotcha #7 and ``evals/BASELINES.md``.
     cjk_tokenizer: CjkTokenizer = "jieba"
@@ -191,8 +196,22 @@ class AssetsConfig(BaseModel):
     multimodal: MultimodalEmbedConfig | None = None
 
 
+def _default_provider_config() -> ProviderConfig:
+    """``DikwConfig.provider`` factory — defaults to a text-embedding-3-small
+    profile. ``ProviderConfig`` itself still requires the 4 embedding-identity
+    fields explicitly so user-provided yml stays unambiguous; this factory
+    exists so test fixtures and ``api.init_wiki`` can build a default
+    ``DikwConfig`` without restating those values."""
+    return ProviderConfig(
+        embedding_dim=1536,
+        embedding_revision="",
+        embedding_normalize=True,
+        embedding_distance="cosine",
+    )
+
+
 class DikwConfig(BaseModel):
-    provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    provider: ProviderConfig = Field(default_factory=_default_provider_config)
     storage: StorageConfig = Field(default_factory=SQLiteStorageConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     schema_: SchemaConfig = Field(default_factory=SchemaConfig, alias="schema")
@@ -243,7 +262,12 @@ def default_config(description: str = "A dikw-core knowledge base") -> DikwConfi
     fresh wiki picks up both markdown and HTML sources without extra config.
     """
     return DikwConfig(
-        provider=ProviderConfig(),
+        provider=ProviderConfig(
+            embedding_dim=1536,  # text-embedding-3-small native
+            embedding_revision="",
+            embedding_normalize=True,
+            embedding_distance="cosine",
+        ),
         storage=SQLiteStorageConfig(),
         schema=SchemaConfig(description=description),
         sources=[

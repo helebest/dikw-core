@@ -7,7 +7,7 @@ import pytest
 
 from dikw_core import api
 
-from .fakes import FakeEmbeddings, FakeLLM
+from .fakes import FakeEmbeddings, FakeLLM, init_test_wiki
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notes"
 
@@ -68,7 +68,7 @@ class ScriptedLLM:
 @pytest.fixture()
 def wiki_with_fixtures(tmp_path: Path) -> Path:
     wiki = tmp_path / "wiki"
-    api.init_wiki(wiki)
+    init_test_wiki(wiki)
     dest = wiki / "sources" / "notes"
     dest.mkdir(parents=True, exist_ok=True)
     for src in FIXTURES.glob("*.md"):

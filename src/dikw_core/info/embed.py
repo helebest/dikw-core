@@ -2,18 +2,18 @@
 
 Two pathways:
 
-* **Legacy text** — ``embed_chunks(provider: EmbeddingProvider, ...)`` —
-  the original v1 path used by installations that haven't enabled
-  multimodal yet. Returns ``EmbeddingRow(chunk_id, model, embedding)``
-  for ``Storage.upsert_embeddings`` against the legacy ``chunks_vec``
-  table.
+* **Text** — ``embed_chunks(provider: EmbeddingProvider, ...)`` — the
+  unimodal path. Returns ``EmbeddingRow(chunk_id, version_id, embedding)``
+  for ``Storage.upsert_embeddings`` which routes into the per-version
+  ``vec_chunks_v<id>`` table.
 
 * **Multimodal** — ``embed_chunks_multimodal`` and ``embed_assets`` route
   through ``MultimodalEmbeddingProvider`` so chunks (text-only inputs)
   and asset binaries (image-only inputs) land in the *same* shared
-  vector space. Asset embeddings are version-tagged and persist via
-  ``Storage.upsert_asset_embeddings`` into the per-version
-  ``vec_assets_v<id>`` virtual table.
+  vector space, identified by their own multimodal ``version_id``.
+
+Every embedding row carries a ``version_id`` from ``embed_versions``
+so storage can isolate per-version vectors and the cache by identity.
 
 Both pathways batch to keep HTTP round-trips low without overwhelming
 providers' per-request input caps.
@@ -42,11 +42,11 @@ logger = logging.getLogger(__name__)
 
 
 async def _safe_cache_lookup(
-    storage: Storage, hashes: Sequence[str], model: str
+    storage: Storage, hashes: Sequence[str], version_id: int
 ) -> dict[str, list[float]]:
     """Cache lookup that degrades to empty on NotSupported / transient faults."""
     try:
-        return await storage.get_cached_embeddings(hashes, model=model)
+        return await storage.get_cached_embeddings(hashes, version_id=version_id)
     except NotSupported:
         return {}
     except Exception as exc:
@@ -77,6 +77,7 @@ async def embed_chunks(
     chunks: Sequence[ChunkToEmbed],
     *,
     model: str,
+    version_id: int,
     storage: Storage | None = None,
     batch_size: int = 64,
 ) -> AsyncIterator[list[EmbeddingRow]]:
@@ -116,6 +117,7 @@ async def embed_chunks(
         yield await _embed_one_batch(
             batch,
             model=model,
+            version_id=version_id,
             storage=storage,
             embed_misses=_call,
             error_template="embedding provider returned {got} vectors for {want} texts",
@@ -127,6 +129,7 @@ async def embed_chunks_multimodal(
     chunks: Sequence[ChunkToEmbed],
     *,
     model: str,
+    version_id: int,
     storage: Storage | None = None,
     batch_size: int = 16,
 ) -> AsyncIterator[list[EmbeddingRow]]:
@@ -158,6 +161,7 @@ async def embed_chunks_multimodal(
         yield await _embed_one_batch(
             batch,
             model=model,
+            version_id=version_id,
             storage=storage,
             embed_misses=_call,
             error_template="multimodal provider returned {got} vectors for {want} chunk inputs",
@@ -168,6 +172,7 @@ async def _embed_one_batch(
     batch: Sequence[ChunkToEmbed],
     *,
     model: str,
+    version_id: int,
     storage: Storage | None,
     embed_misses: Callable[[list[ChunkToEmbed]], Awaitable[list[list[float]]]],
     error_template: str,
@@ -176,13 +181,14 @@ async def _embed_one_batch(
 
     Returns rows in input order regardless of how hits/misses interleave.
     Within-batch duplicate hashes are sent to the provider once — vectors
-    for the same content+model are deterministic by cache contract, so
-    deduping saves a round-trip without changing semantics.
+    for the same content under the same version_id are deterministic
+    by cache contract, so deduping saves a round-trip without changing
+    semantics.
     """
     hashes = [content_hash(c.text) for c in batch]
     cached: dict[str, list[float]] = {}
     if storage is not None:
-        cached = await _safe_cache_lookup(storage, hashes, model)
+        cached = await _safe_cache_lookup(storage, hashes, version_id)
 
     miss_chunks: list[ChunkToEmbed] = []
     miss_hashes: list[str] = []
@@ -204,12 +210,14 @@ async def _embed_one_batch(
 
     cached.update(zip(miss_hashes, new_vectors, strict=True))
     new_cache_rows = [
-        CachedEmbeddingRow(content_hash=h, model=model, dim=len(v), embedding=v)
+        CachedEmbeddingRow(
+            content_hash=h, version_id=version_id, dim=len(v), embedding=v
+        )
         for h, v in zip(miss_hashes, new_vectors, strict=True)
     ]
 
     rows = [
-        EmbeddingRow(chunk_id=c.chunk_id, model=model, embedding=cached[h])
+        EmbeddingRow(chunk_id=c.chunk_id, version_id=version_id, embedding=cached[h])
         for c, h in zip(batch, hashes, strict=True)
     ]
 

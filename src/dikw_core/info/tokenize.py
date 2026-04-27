@@ -10,7 +10,7 @@ no schema migration.
 
 The same preprocessor must run on both sides of the FTS query.
 ``RetrievalConfig.cjk_tokenizer`` is locked at first ingest for
-the same reason ``embedding_dimensions`` is: flipping the knob
+the same reason ``embedding_dim`` is: flipping the knob
 post-ingest makes the query side produce tokens that don't match
 what's indexed.
 

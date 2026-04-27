@@ -260,7 +260,7 @@ async def run_eval(
     * Both set → real-vector eval: the caller built an embedder from a
       wiki's ``ProviderConfig`` and hands both in. The runner serialises
       that config into the temp wiki's ``dikw.yml`` so ``api.ingest`` picks
-      up vendor-specific ``embedding_batch_size`` / ``embedding_dimensions``
+      up vendor-specific ``embedding_batch_size`` / ``embedding_dim``
       exactly as the source wiki has them. Without this, a Gitee-configured
       provider would ingest at ``batch_size=64`` and get HTTP 400.
 
@@ -285,7 +285,13 @@ async def run_eval(
         raise EvalError(f"corpus directory not found: {spec.corpus_dir}")
 
     effective_embedder: EmbeddingProvider = embedder or FakeEmbeddings()
-    effective_provider_cfg = provider_config or ProviderConfig(embedding_model="fake")
+    effective_provider_cfg = provider_config or ProviderConfig(
+        embedding_model="fake",
+        embedding_dim=64,  # matches dikw_core.eval.fake_embedder.EMBED_DIM
+        embedding_revision="",
+        embedding_normalize=True,
+        embedding_distance="cosine",
+    )
     effective_retrieval_cfg = retrieval_config or RetrievalConfig()
     modes = _resolve_modes(mode)
 
@@ -317,7 +323,7 @@ async def run_eval(
         key = _corpus_cache_key(
             spec,
             effective_provider_cfg.embedding_model,
-            effective_provider_cfg.embedding_dimensions,
+            effective_provider_cfg.embedding_dim,
         )
         cache_dir = root / key
         partial_dir = cache_dir.parent / (cache_dir.name + ".partial")

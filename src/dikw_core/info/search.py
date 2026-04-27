@@ -27,14 +27,13 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, Field
-
 from ..providers import EmbeddingProvider, MultimodalEmbeddingProvider
 from ..schemas import (
     AssetRecord,
     AssetVecHit,
     ChunkRecord,
     FTSHit,
+    Hit,
     Layer,
     MultimodalInput,
     VecHit,
@@ -79,25 +78,6 @@ _FTS_RESERVED = frozenset({"AND", "OR", "NOT", "NEAR"})
 # what `dikw query` uses; ``bm25`` and ``vector`` exist so eval can
 # ablate the contribution of each leg against public benchmarks.
 RetrievalMode = Literal["bm25", "vector", "hybrid"]
-
-
-class Hit(BaseModel):
-    """One fused search result.
-
-    ``chunk_id`` is non-optional: chunk-level fusion produces one hit per
-    chunk, so every result is anchored to a concrete chunk. ``seq`` is
-    the chunk's ordinal within its document — useful for disambiguating
-    multiple hits from the same document in CLI / MCP output.
-    """
-
-    doc_id: str
-    chunk_id: int
-    seq: int | None = None
-    score: float
-    snippet: str | None = None
-    path: str | None = None
-    title: str | None = None
-    asset_refs: list[AssetRecord] = Field(default_factory=list)
 
 
 def apply_source_diversity_penalty(

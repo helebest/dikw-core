@@ -54,7 +54,7 @@ from .info.embed import (
     embed_chunks,
     embed_chunks_multimodal,
 )
-from .info.search import Hit, HybridSearcher, MultimodalSearch
+from .info.search import HybridSearcher, MultimodalSearch
 from .info.tokenize import CjkTokenizer
 from .knowledge.indexgen import regenerate_index
 from .knowledge.links import parse_links, resolve_links
@@ -77,6 +77,7 @@ from .schemas import (
     DocumentRecord,
     EmbeddingRow,
     EmbeddingVersion,
+    Hit,
     ImageContent,
     Layer,
     MultimodalInput,

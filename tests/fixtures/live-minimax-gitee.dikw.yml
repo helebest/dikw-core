@@ -10,7 +10,7 @@ provider:
   llm_model: MiniMax-M2.7
   llm_base_url: https://api.minimaxi.com/anthropic
   embedding: openai_compat
-  embedding_model: Qwen3-Embedding-8B
+  embedding_model: Qwen3-Embedding-0.6B
   embedding_base_url: https://ai.gitee.com/v1
   embedding_dim: 1024
   embedding_revision: ""

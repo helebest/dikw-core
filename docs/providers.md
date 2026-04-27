@@ -48,7 +48,7 @@ Add more fixtures over time as you verify combinations; PRs welcome.
 
 1. **Edit `dikw.yml`** — replace the `provider:` block with the target
    vendor's values from the cookbook above. Don't forget
-   `embedding_dimensions` and `embedding_batch_size` if the new embedder
+   `embedding_dim` and `embedding_batch_size` if the new embedder
    differs from the old (see gotchas).
 2. **Update `.env`** with the new key values. Variable *names* don't
    change — only their *values*:
@@ -75,7 +75,7 @@ knowing before committing to a vendor on a real corpus.
 ### 1. Embedding dimensions are locked at first write
 
 SQLite `vec0` locks vector dimension on the first `upsert_embeddings`
-call. Changing `embedding_dimensions` or `embedding_model` to a
+call. Changing `embedding_dim` or `embedding_model` to a
 different dim afterwards produces a dimension-mismatch error on the
 next insert.
 
@@ -166,7 +166,7 @@ ASCII identifiers (``retrieval.rrf_k``, code snippets, …) are passed
 verbatim, so mixed English/Chinese dev docs don't get their English
 halves shredded.
 
-**Locked at first ingest** — same shape as `embedding_dimensions`
+**Locked at first ingest** — same shape as `embedding_dim`
 (gotcha #1). The `documents_fts` rows store whatever segmentation was
 in effect when they were written; flipping the config afterwards
 produces a mismatch between indexed and queried tokens, silently
@@ -190,8 +190,11 @@ cd scratch-bench-wiki
 #   embedding: openai_compat
 #   embedding_base_url: https://ai.gitee.com/v1
 #   embedding_model: Qwen3-Embedding-8B
+#   embedding_dim: 1024               # required: matryoshka truncation
+#   embedding_revision: ""
+#   embedding_normalize: true
+#   embedding_distance: cosine
 #   embedding_batch_size: 16          # gotcha #2 — Gitee caps at 25
-#   embedding_dimensions: 1024        # matryoshka truncation; cost/quality balance
 # Then in .env: DIKW_EMBEDDING_API_KEY=<your gitee-ai key>
 uv run --env-file .env dikw check --path . --embed-only
 ```
@@ -265,7 +268,7 @@ default tokenizer doesn't segment Chinese.
 Before running `dikw ingest` against a real corpus with a new vendor
 config:
 
-- [ ] `embedding_dimensions` matches what the model actually returns.
+- [ ] `embedding_dim` matches what the model actually returns.
       Run `dikw check --embed-only` and read `dim=…` from the output.
 - [ ] `embedding_batch_size` is ≤ the vendor's observed cap.
 - [ ] `dikw check --llm-only` and `dikw check --embed-only` each exit 0.
@@ -337,7 +340,7 @@ provider:
   embedding: openai_compat             # text leg — single-string input shape
   embedding_base_url: https://ai.gitee.com/v1
   embedding_model: Qwen3-Embedding-8B
-  embedding_dimensions: 1024           # match Qwen3-VL dim so both legs of
+  embedding_dim: 1024                  # match Qwen3-VL dim so both legs of
                                        # hybrid retrieval live in equally-
                                        # priced spaces. Set to 4096 if you
                                        # want native quality on the text
@@ -345,6 +348,11 @@ provider:
                                        # (vec tables are independent).
                                        # WARNING: dim locks at first ingest
                                        # (gotcha #1), don't change later.
+  embedding_revision: ""               # bump to force re-embed when Qwen
+                                       # weights drift silently behind the
+                                       # stable model name
+  embedding_normalize: true
+  embedding_distance: cosine
   embedding_batch_size: 16             # Gitee caps at 25 (gotcha #2)
   embedding_provider_label: gitee-ai
 
@@ -374,7 +382,7 @@ and embedding target different vendors, set them as distinct env vars.
 **Note on chunk routing**: when `assets.multimodal` is configured, the
 ingest pipeline routes both chunks AND assets through the multimodal
 embedder (so they share one vector space for cross-modal retrieval).
-The `embedding_model` / `embedding_dimensions` keys above only matter
+The `embedding_model` / `embedding_dim` keys above only matter
 for legacy text-only mode (no `assets.multimodal` block) — they're
 inert when the multimodal block is present.
 

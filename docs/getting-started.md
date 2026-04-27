@@ -134,7 +134,10 @@ provider:
   embedding: openai_compat
   embedding_model: text-embedding-3-small
   embedding_base_url: https://api.openai.com/v1
-  embedding_dimensions: null   # set to truncate (e.g., 1024 for Qwen3-Embedding-8B)
+  embedding_dim: 1536          # required: must match what the endpoint returns
+  embedding_revision: ""       # bump to force re-embed when vendor refreshes weights silently
+  embedding_normalize: true
+  embedding_distance: cosine
 ```
 
 `llm_base_url` works for both `anthropic` and `openai_compat`. With
@@ -162,7 +165,10 @@ provider:
   embedding: openai_compat
   embedding_model: Qwen3-Embedding-8B
   embedding_base_url: https://ai.gitee.com/v1
-  embedding_dimensions: 1024        # optional; matryoshka truncation
+  embedding_dim: 1024               # required: matryoshka truncation; locked at first ingest
+  embedding_revision: ""            # bump to force re-embed when Qwen weights drift silently
+  embedding_normalize: true
+  embedding_distance: cosine
   embedding_batch_size: 16          # required: Gitee rejects batches >25
   embedding_provider_label: gitee-ai  # optional; shows up in `dikw check`
 ```

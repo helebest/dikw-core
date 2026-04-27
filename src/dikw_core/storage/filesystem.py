@@ -55,7 +55,7 @@ from ..schemas import (
     WisdomKind,
     WisdomStatus,
 )
-from .base import NotSupported, StorageError
+from .base import NotSupported
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9']+")
 
@@ -256,42 +256,22 @@ class FilesystemStorage:
             return assigned
 
     async def upsert_embeddings(self, rows: Sequence[EmbeddingRow]) -> None:
-        if not rows:
-            return
-        if not self._embed_enabled:
-            raise NotSupported(
-                "embedding disabled — set storage.embed=true to enable vector search"
-            )
-        async with self._lock:
-            dim = len(rows[0].embedding)
-            if self._embedding_dim is None:
-                self._embedding_dim = dim
-                await asyncio.to_thread(
-                    self._p(self.EMBED_DIM_FILE).write_text, str(dim), "utf-8"
-                )
-            elif self._embedding_dim != dim:
-                raise StorageError(
-                    f"embedding dim mismatch: index uses {self._embedding_dim}, got {dim}"
-                )
-            for row in rows:
-                if len(row.embedding) != dim:
-                    raise StorageError("inconsistent embedding dimensions in batch")
-                self._embed_meta[row.chunk_id] = row.model
-                self._embeddings[row.chunk_id] = list(row.embedding)
-                vec_path = self._p(self.VECS_DIR) / f"{row.chunk_id}.json"
-                await asyncio.to_thread(
-                    vec_path.write_text,
-                    json.dumps({"model": row.model, "embedding": row.embedding}),
-                    "utf-8",
-                )
-            await self._flush_embed_meta()
+        # Filesystem backend lacks the embed_versions registry that the
+        # other adapters maintain — supporting versioned text embeddings
+        # is PR-B work. Until then this raises NotSupported so callers
+        # that route through ``upsert_embed_version`` (which already
+        # raises NotSupported on filesystem) degrade cleanly.
+        del rows
+        raise NotSupported(
+            "filesystem backend doesn't implement versioned text embeddings yet"
+        )
 
     async def get_cached_embeddings(
-        self, content_hashes: Sequence[str], *, model: str
+        self, content_hashes: Sequence[str], *, version_id: int
     ) -> dict[str, list[float]]:
         # Pre-alpha: filesystem backend doesn't carry an embed cache;
         # re-ingest re-pays the provider. Add when needed.
-        del content_hashes, model
+        del content_hashes, version_id
         raise NotSupported("filesystem backend doesn't implement embed_cache")
 
     async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
@@ -299,15 +279,12 @@ class FilesystemStorage:
         raise NotSupported("filesystem backend doesn't implement embed_cache")
 
     async def list_chunks_missing_embedding(
-        self, *, model: str
+        self, *, version_id: int
     ) -> list[ChunkRecord]:
-        # In-memory scan: chunks present without an embed_meta row
-        # tagged for this model.
-        return [
-            chunk
-            for cid, chunk in sorted(self._chunks.items())
-            if self._embed_meta.get(cid) != model
-        ]
+        del version_id
+        raise NotSupported(
+            "filesystem backend doesn't implement versioned text embeddings yet"
+        )
 
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         return self._chunks.get(chunk_id)
@@ -367,40 +344,20 @@ class FilesystemStorage:
         return out
 
     async def vec_search(
-        self, embedding: list[float], *, limit: int = 20, layer: Layer | None = None
+        self,
+        embedding: list[float],
+        *,
+        version_id: int | None = None,
+        limit: int = 20,
+        layer: Layer | None = None,
     ) -> list[VecHit]:
-        if not self._embed_enabled or not self._embeddings:
-            raise NotSupported(
-                "no embeddings available — enable storage.embed and re-ingest"
-            )
-        if self._embedding_dim is not None and len(embedding) != self._embedding_dim:
-            raise StorageError(
-                f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
-            )
-
-        q_norm = _norm(embedding)
-        if q_norm == 0.0:
-            return []
-
-        hits: list[VecHit] = []
-        for cid, vec in self._embeddings.items():
-            chunk = self._chunks.get(cid)
-            if chunk is None:
-                continue
-            doc = self._docs.get(chunk.doc_id)
-            if doc is None or not doc.active:
-                continue
-            if layer is not None and doc.layer != layer:
-                continue
-            d_norm = _norm(vec)
-            if d_norm == 0.0:
-                continue
-            dot = sum(a * b for a, b in zip(embedding, vec, strict=True))
-            cos = dot / (q_norm * d_norm)
-            hits.append(VecHit(doc_id=chunk.doc_id, chunk_id=cid, distance=max(0.0, 1 - cos)))
-
-        hits.sort(key=lambda h: h.distance)
-        return hits[:limit]
+        # Symmetric with ``upsert_embeddings``: filesystem text path is
+        # not version-aware yet (PR-B will land the in-memory version
+        # registry + per-version vec dict).
+        del embedding, version_id, limit, layer
+        raise NotSupported(
+            "filesystem backend doesn't implement versioned text embeddings yet"
+        )
 
     # ---- K layer ---------------------------------------------------------
 
@@ -560,7 +517,10 @@ class FilesystemStorage:
     ) -> EmbeddingVersion | None:
         raise NotSupported("filesystem adapter: embed versioning not implemented yet")
 
-    async def list_embed_versions(self) -> list[EmbeddingVersion]:
+    async def list_embed_versions(
+        self, *, modality: Literal["text", "multimodal"] | None = None
+    ) -> list[EmbeddingVersion]:
+        del modality
         raise NotSupported("filesystem adapter: embed versioning not implemented yet")
 
     # ---- flushers --------------------------------------------------------

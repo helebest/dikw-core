@@ -66,7 +66,7 @@ class ChunkRecord(BaseModel):
 
 class EmbeddingRow(BaseModel):
     chunk_id: int
-    model: str
+    version_id: int
     embedding: list[float]
 
 
@@ -74,15 +74,16 @@ class CachedEmbeddingRow(BaseModel):
     """Content-addressed embedding cache row.
 
     The chunk-level embed cache (``embed_cache`` table) stores vectors
-    keyed by ``sha256(chunk.text)`` + ``model``, decoupled from
+    keyed by ``sha256(chunk.text)`` + ``version_id``, decoupled from
     ``chunks.chunk_id`` so re-ingest under ``replace_chunks``'s
     delete-and-reinsert semantics doesn't lose the API spend on
-    byte-identical text. Lookups happen inside ``info/embed.py``
-    before each batch is sent to the provider.
+    byte-identical text. Keying on ``version_id`` (rather than ``model``)
+    isolates the cache against silent corruption when normalize/distance
+    flip without a model name change.
     """
 
     content_hash: str  # sha256 hex of chunk.text
-    model: str
+    version_id: int
     dim: int  # implied by len(embedding) but stored for fast filtering
     embedding: list[float]
 

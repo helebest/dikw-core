@@ -73,7 +73,10 @@ provider:
   llm_model: stub-model
   embedding: openai_compat
   embedding_model: stub-embed
-  embedding_dimensions: 64
+  embedding_dim: 64
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
   llm_max_tokens_query: {llm_max_tokens_query}
   llm_max_tokens_synth: {llm_max_tokens_synth}
   llm_max_tokens_distill: {llm_max_tokens_distill}

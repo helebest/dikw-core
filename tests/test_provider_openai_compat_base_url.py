@@ -14,10 +14,11 @@ from typing import Any
 
 import pytest
 
-from dikw_core.config import ProviderConfig
 from dikw_core.providers import build_embedder
 from dikw_core.providers.base import ProviderError
 from dikw_core.providers.openai_compat import OpenAICompatEmbeddings
+
+from .fakes import make_provider_cfg
 
 
 @pytest.fixture()
@@ -129,16 +130,16 @@ async def test_embeddings_explicit_api_key_wins(
     assert init["api_key"] == "sk-explicit"
 
 
-# ---- Step 3: build_embedder wires config.embedding_dimensions ----------
+# ---- Step 3: build_embedder wires config.embedding_dim ----------
 
 
 async def test_build_embedder_passes_dimensions_from_config(
     captured: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DIKW_EMBEDDING_API_KEY", "sk-test")
-    cfg = ProviderConfig(
+    cfg = make_provider_cfg(
         embedding_base_url="http://gitee.example/v1",
-        embedding_dimensions=512,
+        embedding_dim=512,
     )
     provider = build_embedder(cfg)
     assert isinstance(provider, OpenAICompatEmbeddings)
@@ -148,28 +149,15 @@ async def test_build_embedder_passes_dimensions_from_config(
     assert call.get("dimensions") == 512
 
 
-async def test_build_embedder_omits_dimensions_when_config_none(
-    captured: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("DIKW_EMBEDDING_API_KEY", "sk-test")
-    cfg = ProviderConfig(embedding_base_url="http://gitee.example/v1")
-    provider = build_embedder(cfg)
-    await provider.embed(["ping"], model="Qwen3-Embedding-8B")
-    call = captured["embed_kwargs"]
-    assert call is not None
-    assert "dimensions" not in call
-
-
-def test_provider_config_round_trips_embedding_dimensions() -> None:
+def test_provider_config_round_trips_embedding_dim() -> None:
     import yaml
 
     from dikw_core.config import DikwConfig, dump_config_yaml
 
-    cfg = DikwConfig()
-    cfg.provider.embedding_dimensions = 1024
+    cfg = DikwConfig(provider=make_provider_cfg(embedding_dim=1024))
     yaml_text = dump_config_yaml(cfg)
     reparsed = DikwConfig.model_validate(yaml.safe_load(yaml_text))
-    assert reparsed.provider.embedding_dimensions == 1024
+    assert reparsed.provider.embedding_dim == 1024
 
 
 def test_provider_config_round_trips_embedding_provider_label() -> None:
@@ -184,9 +172,7 @@ def test_provider_config_round_trips_embedding_provider_label() -> None:
 
     from dikw_core.config import DikwConfig, dump_config_yaml
 
-    cfg = DikwConfig()
-    assert cfg.provider.embedding_provider_label is None
-    cfg.provider.embedding_provider_label = "gitee-ai"
+    cfg = DikwConfig(provider=make_provider_cfg(embedding_provider_label="gitee-ai"))
     yaml_text = dump_config_yaml(cfg)
     reparsed = DikwConfig.model_validate(yaml.safe_load(yaml_text))
     assert reparsed.provider.embedding_provider_label == "gitee-ai"
@@ -203,10 +189,7 @@ def test_provider_config_round_trips_embedding_batch_size() -> None:
 
     from dikw_core.config import DikwConfig, dump_config_yaml
 
-    cfg = DikwConfig()
-    # default is a safe OpenAI-friendly value
-    assert cfg.provider.embedding_batch_size == 64
-    cfg.provider.embedding_batch_size = 16
+    cfg = DikwConfig(provider=make_provider_cfg(embedding_batch_size=16))
     yaml_text = dump_config_yaml(cfg)
     reparsed = DikwConfig.model_validate(yaml.safe_load(yaml_text))
     assert reparsed.provider.embedding_batch_size == 16
@@ -232,6 +215,10 @@ async def test_api_ingest_honours_embedding_batch_size(
         "  embedding: openai_compat\n"
         "  embedding_model: test-embed\n"
         "  embedding_base_url: https://fake.example/v1\n"
+        "  embedding_dim: 2\n"
+        "  embedding_revision: ''\n"
+        "  embedding_normalize: true\n"
+        "  embedding_distance: cosine\n"
         "  embedding_batch_size: 7\n"
         "storage:\n"
         "  backend: sqlite\n"

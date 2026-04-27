@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from typing import Any
 
+from dikw_core.config import ProviderConfig
 from dikw_core.eval.fake_embedder import EMBED_DIM, FakeEmbeddings
 from dikw_core.providers import LLMResponse, ToolSpec
-from dikw_core.schemas import MultimodalInput
+from dikw_core.schemas import EmbeddingVersion, MultimodalInput
 
 __all__ = [
     "EMBED_DIM",
@@ -21,7 +23,95 @@ __all__ = [
     "FakeEmbeddings",
     "FakeLLM",
     "FakeMultimodalEmbedding",
+    "init_test_wiki",
+    "make_provider_cfg",
+    "register_text_version",
+    "register_text_version_or_skip",
 ]
+
+
+def init_test_wiki(path: Any, *, description: str = "test wiki", dim: int = EMBED_DIM) -> None:
+    """``api.init_wiki`` + patch the dikw.yml so ``embedding_dim`` matches
+    the test embedder. ``FakeEmbeddings`` produces ``EMBED_DIM`` (64) by
+    default; tests using a different embedder pass ``dim``.
+    """
+    from dikw_core import api
+    from dikw_core.config import dump_config_yaml, load_config
+
+    api.init_wiki(path, description=description)
+    cfg_path = path / "dikw.yml"
+    cfg = load_config(cfg_path)
+    cfg.provider.embedding_dim = dim
+    cfg_path.write_text(dump_config_yaml(cfg), encoding="utf-8")
+
+
+async def register_text_version(
+    storage: Any,
+    *,
+    dim: int = EMBED_DIM,
+    provider: str = "test",
+    model: str = "fake",
+    revision: str = "",
+) -> int:
+    """Register a text ``embed_versions`` row in ``storage`` and return its id.
+
+    Cross-test helper; production code resolves the version from
+    ``ProviderConfig`` via ``api.ingest`` / ``api.query``. Tests that
+    exercise ``upsert_embeddings`` / ``embed_chunks`` directly call
+    this first.
+    """
+    return await storage.upsert_embed_version(
+        EmbeddingVersion(
+            provider=provider,
+            model=model,
+            revision=revision,
+            dim=dim,
+            normalize=True,
+            distance="cosine",
+            modality="text",
+        )
+    )
+
+
+async def register_text_version_or_skip(
+    storage: Any,
+    *,
+    dim: int = EMBED_DIM,
+    provider: str = "test",
+    model: str = "fake",
+    revision: str = "",
+) -> int:
+    """``register_text_version`` that ``pytest.skip``s on backends that
+    don't implement embed versioning. Saves a 4-line try/except in every
+    contract test that just needs a version_id to exercise."""
+    import pytest
+
+    from dikw_core.storage.base import NotSupported
+
+    try:
+        return await register_text_version(
+            storage, dim=dim, provider=provider, model=model, revision=revision
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning yet")
+
+
+def make_provider_cfg(**overrides: Any) -> ProviderConfig:
+    """Build a ``ProviderConfig`` with sensible test defaults filled in.
+
+    The 4 embedding identity fields (dim/revision/normalize/distance) are
+    required in production so config files have to be explicit; tests
+    don't care, so this helper supplies test-friendly defaults that
+    callers can override per-case.
+    """
+    base: dict[str, Any] = {
+        "embedding_dim": EMBED_DIM,
+        "embedding_revision": "",
+        "embedding_normalize": True,
+        "embedding_distance": "cosine",
+    }
+    base.update(overrides)
+    return ProviderConfig(**base)
 
 
 @dataclass

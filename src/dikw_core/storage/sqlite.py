@@ -79,10 +79,11 @@ _LAYER_FILTER_OVER_FETCH = 10
 class SQLiteStorage:
     """SQLite-backed Storage implementation.
 
-    The embedding dimension is set on first ``upsert_embeddings`` call (or can
-    be pre-set explicitly) so that the ``chunks_vec`` virtual table can be
-    created lazily. This matches how ``qmd`` and ``mineru-doc-explorer`` handle
-    variable embedding sizes across providers.
+    Each ``embed_versions`` row produces its own per-version vector table
+    (``vec_chunks_v<id>`` for text, ``vec_assets_v<id>`` for multimodal),
+    created lazily because sqlite-vec needs the dim baked into the
+    CREATE statement. Switching a model = new version row = new table;
+    prior vectors survive in place.
     """
 
     def __init__(
@@ -93,7 +94,6 @@ class SQLiteStorage:
     ) -> None:
         self._path = Path(path)
         self._conn: sqlite3.Connection | None = None
-        self._embedding_dim: int | None = None
         # Must match `_sanitize_fts` on the query side — locked at first
         # ingest via `RetrievalConfig.cjk_tokenizer`.
         self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
@@ -143,14 +143,9 @@ class SQLiteStorage:
                         .read_text(encoding="utf-8")
                     )
                     conn.executescript(sql)
-            # Restore embedding dimension from a previous run, if any.
-            meta = conn.execute(
-                "SELECT value FROM meta_kv WHERE key = 'embedding_dim'"
-            ).fetchone()
-            if meta is not None:
-                self._embedding_dim = int(meta[0])
             self._verify_vec_tables_use_cosine(conn)
             self._verify_no_legacy_content_table(conn)
+            self._verify_no_legacy_text_embed_tables(conn)
             self._migrate_legacy_chunk_offset_columns(conn)
             self._migrate_legacy_assets_columns(conn)
 
@@ -310,27 +305,44 @@ class SQLiteStorage:
 
         def _run() -> None:
             conn = self._require_conn()
-            dim = len(rows[0].embedding)
-            self._ensure_vec_table(conn, dim)
+            # Group by version so each per-version vec table is touched
+            # once; a single ingest run usually has one version_id but
+            # mixed batches stay correct.
+            by_version: dict[int, list[EmbeddingRow]] = {}
+            for r in rows:
+                by_version.setdefault(r.version_id, []).append(r)
             with conn:
-                for r in rows:
-                    if len(r.embedding) != dim:
+                for version_id, batch in by_version.items():
+                    version = _fetch_version(conn, version_id)
+                    if version is None:
                         raise StorageError(
-                            f"embedding dim mismatch: expected {dim}, got {len(r.embedding)}"
+                            f"unknown embed version_id={version_id}; "
+                            "call upsert_embed_version first"
                         )
-                    conn.execute(
-                        "INSERT OR REPLACE INTO embed_meta(chunk_id, model) VALUES (?, ?)",
-                        (r.chunk_id, r.model),
-                    )
-                    conn.execute(
-                        "INSERT OR REPLACE INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
-                        (r.chunk_id, _serialize_vec(r.embedding)),
-                    )
+                    for r in batch:
+                        if len(r.embedding) != version.dim:
+                            raise StorageError(
+                                f"embedding dim {len(r.embedding)} != "
+                                f"version {version_id} dim {version.dim}"
+                            )
+                    self._ensure_vec_table(conn, "chunks", version_id, version.dim)
+                    vec_table = f"vec_chunks_v{version_id}"
+                    for r in batch:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO chunk_embed_meta"
+                            "(chunk_id, version_id) VALUES (?, ?)",
+                            (r.chunk_id, version_id),
+                        )
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO {vec_table}"
+                            "(rowid, embedding) VALUES (?, ?)",
+                            (r.chunk_id, _serialize_vec(r.embedding)),
+                        )
 
         await asyncio.to_thread(_run)
 
     async def get_cached_embeddings(
-        self, content_hashes: Sequence[str], *, model: str
+        self, content_hashes: Sequence[str], *, version_id: int
     ) -> dict[str, list[float]]:
         hashes = list(content_hashes)
         if not hashes:
@@ -341,8 +353,8 @@ class SQLiteStorage:
             placeholders = ",".join("?" * len(hashes))
             rows = conn.execute(
                 f"SELECT content_hash, dim, embedding FROM embed_cache "
-                f"WHERE model = ? AND content_hash IN ({placeholders})",
-                [model, *hashes],
+                f"WHERE version_id = ? AND content_hash IN ({placeholders})",
+                [version_id, *hashes],
             ).fetchall()
             return {
                 str(r["content_hash"]): _deserialize_vec(r["embedding"], int(r["dim"]))
@@ -360,16 +372,16 @@ class SQLiteStorage:
             now = time.time()
             with conn:
                 for r in rows:
-                    # INSERT OR IGNORE: idempotent on (content_hash, model);
-                    # the cache contract is "vectors for the same content+model
-                    # are deterministic", so we never overwrite.
+                    # INSERT OR IGNORE: idempotent on (content_hash, version_id);
+                    # vectors for the same content under the same version
+                    # identity must be deterministic, so we never overwrite.
                     conn.execute(
                         "INSERT OR IGNORE INTO embed_cache"
-                        "(content_hash, model, dim, embedding, created_ts) "
+                        "(content_hash, version_id, dim, embedding, created_ts) "
                         "VALUES (?, ?, ?, ?, ?)",
                         (
                             r.content_hash,
-                            r.model,
+                            r.version_id,
                             r.dim,
                             _serialize_vec(list(r.embedding)),
                             now,
@@ -379,7 +391,7 @@ class SQLiteStorage:
         await asyncio.to_thread(_run)
 
     async def list_chunks_missing_embedding(
-        self, *, model: str
+        self, *, version_id: int
     ) -> list[ChunkRecord]:
         def _run() -> list[ChunkRecord]:
             conn = self._require_conn()
@@ -387,9 +399,9 @@ class SQLiteStorage:
                 "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
                 "FROM chunks "
                 "WHERE chunk_id NOT IN "
-                "(SELECT chunk_id FROM embed_meta WHERE model = ?) "
+                "(SELECT chunk_id FROM chunk_embed_meta WHERE version_id = ?) "
                 "ORDER BY chunk_id",
-                (model,),
+                (version_id,),
             ).fetchall()
             return [
                 ChunkRecord(
@@ -491,18 +503,53 @@ class SQLiteStorage:
         return await asyncio.to_thread(_run)
 
     async def vec_search(
-        self, embedding: list[float], *, limit: int = 20, layer: Layer | None = None
+        self,
+        embedding: list[float],
+        *,
+        version_id: int | None = None,
+        limit: int = 20,
+        layer: Layer | None = None,
     ) -> list[VecHit]:
         def _run() -> list[VecHit]:
             conn = self._require_conn()
-            if self._embedding_dim is None:
-                raise NotSupported("no embeddings indexed yet")
-            if len(embedding) != self._embedding_dim:
+            resolved = version_id
+            if resolved is None:
+                row = conn.execute(
+                    "SELECT version_id, dim FROM embed_versions "
+                    "WHERE modality = 'text' AND is_active = 1 "
+                    "ORDER BY version_id DESC LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    raise NotSupported("no text embeddings indexed yet")
+                resolved = int(row["version_id"])
+                resolved_dim = int(row["dim"])
+            else:
+                version = _fetch_version(conn, resolved)
+                if version is None:
+                    raise NotSupported(
+                        f"no text embeddings for version_id={resolved}"
+                    )
+                resolved_dim = version.dim
+            if len(embedding) != resolved_dim:
                 raise StorageError(
-                    f"query embedding dim {len(embedding)} != index dim {self._embedding_dim}"
+                    f"query embedding dim {len(embedding)} != "
+                    f"version {resolved} dim {resolved_dim}"
+                )
+            vec_table = f"vec_chunks_v{resolved}"
+            # If the per-version vec table doesn't exist yet (version
+            # registered but no chunk embeddings written), surface as
+            # NotSupported so the caller can degrade gracefully.
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = ?",
+                (vec_table,),
+            ).fetchone()
+            if exists is None:
+                raise NotSupported(
+                    f"no chunk vectors for version_id={resolved}"
                 )
             fetch_k = limit * _LAYER_FILTER_OVER_FETCH if layer is not None else limit
-            ranked = _knn(conn, "chunks_vec", embedding, fetch_k)
+            ranked = _knn(conn, vec_table, embedding, fetch_k)
             if not ranked:
                 return []
             chunk_ids = [cid for cid, _ in ranked]
@@ -893,7 +940,7 @@ class SQLiteStorage:
                             f"asset embedding dim {len(r.embedding)} != "
                             f"version {version_id} dim {version.dim}"
                         )
-                self._ensure_asset_vec_table(conn, version_id, version.dim)
+                self._ensure_vec_table(conn, "assets", version_id, version.dim)
                 rowid_table = f"asset_vec_rowid_v{version_id}"
                 conn.execute(
                     f"CREATE TABLE IF NOT EXISTS {rowid_table}("
@@ -998,12 +1045,14 @@ class SQLiteStorage:
         def _run() -> int:
             conn = self._require_conn()
             with conn:
-                # Match key: (provider, model, revision, dim, normalize, distance).
+                # Match key includes modality so a CLIP-style model can
+                # register both text and multimodal versions side by side.
                 row = conn.execute(
                     """
                     SELECT version_id FROM embed_versions
                     WHERE provider = ? AND model = ? AND revision = ?
                       AND dim = ? AND normalize = ? AND distance = ?
+                      AND modality = ?
                     """,
                     (
                         v.provider,
@@ -1012,10 +1061,21 @@ class SQLiteStorage:
                         v.dim,
                         int(v.normalize),
                         v.distance,
+                        v.modality,
                     ),
                 ).fetchone()
                 if row is not None:
-                    return int(row["version_id"])
+                    found_id = int(row["version_id"])
+                    # Reactivate the matched row + demote any other actives
+                    # of the same modality. Otherwise A→B→A flips leave B
+                    # active forever, and writes routed to A's vec table
+                    # become invisible to query()'s active-version resolve.
+                    conn.execute(
+                        "UPDATE embed_versions SET is_active = (version_id = ?) "
+                        "WHERE modality = ?",
+                        (found_id, v.modality),
+                    )
+                    return found_id
                 # New version: insert and demote prior active versions of
                 # the same modality.
                 conn.execute(
@@ -1065,12 +1125,21 @@ class SQLiteStorage:
 
         return await asyncio.to_thread(_run)
 
-    async def list_embed_versions(self) -> list[EmbeddingVersion]:
+    async def list_embed_versions(
+        self, *, modality: Literal["text", "multimodal"] | None = None
+    ) -> list[EmbeddingVersion]:
         def _run() -> list[EmbeddingVersion]:
             conn = self._require_conn()
-            rows = conn.execute(
-                "SELECT * FROM embed_versions ORDER BY version_id"
-            ).fetchall()
+            if modality is None:
+                rows = conn.execute(
+                    "SELECT * FROM embed_versions ORDER BY version_id"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM embed_versions WHERE modality = ? "
+                    "ORDER BY version_id",
+                    (modality,),
+                ).fetchall()
             return [_row_to_embed_version(r) for r in rows]
 
         return await asyncio.to_thread(_run)
@@ -1086,7 +1155,7 @@ class SQLiteStorage:
             ).fetchall():
                 by_layer[row["layer"]] = int(row["n"])
             chunks = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
-            embeddings = int(conn.execute("SELECT COUNT(*) FROM embed_meta").fetchone()[0])
+            embeddings = int(conn.execute("SELECT COUNT(*) FROM chunk_embed_meta").fetchone()[0])
             links = int(conn.execute("SELECT COUNT(*) FROM links").fetchone()[0])
             by_status: dict[str, int] = {}
             for row in conn.execute(
@@ -1141,6 +1210,29 @@ class SQLiteStorage:
                     "by sqlite-vec's L2 default. Delete the SQLite file "
                     "(`rm .dikw/dikw.sqlite`) and re-run `dikw ingest` to "
                     "rebuild the index."
+                )
+
+    def _verify_no_legacy_text_embed_tables(self, conn: sqlite3.Connection) -> None:
+        """Bail if pre-versioning text embedding tables are still present.
+
+        The unversioned ``chunks_vec`` singleton + ``embed_meta(chunk_id, model)``
+        table predate ``embed_versions``. ``CREATE TABLE IF NOT EXISTS``
+        won't drop them, and silently leaving them around would mean
+        ``upsert_embeddings`` writes to the new ``vec_chunks_v<id>``
+        tables while the old singleton + meta rows linger as dead state.
+        Fail loudly with rebuild instructions — pre-alpha policy.
+        """
+        for legacy in ("chunks_vec", "embed_meta"):
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = ?",
+                (legacy,),
+            ).fetchone()
+            if row is not None:
+                raise StorageError(
+                    f"legacy `{legacy}` table detected from a pre-versioning "
+                    "schema. Delete the SQLite file (`rm .dikw/index.sqlite`) "
+                    "and re-run `dikw ingest` to rebuild on the version-aware "
+                    "embedding schema."
                 )
 
     def _verify_no_legacy_content_table(self, conn: sqlite3.Connection) -> None:
@@ -1231,35 +1323,20 @@ class SQLiteStorage:
             if legacy in cols:
                 conn.execute(f"ALTER TABLE assets DROP COLUMN {legacy}")
 
-    def _ensure_vec_table(self, conn: sqlite3.Connection, dim: int) -> None:
-        if self._embedding_dim is None:
-            conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec "
-                f"USING vec0(embedding float[{dim}] "
-                f"distance_metric={_VEC_DISTANCE_METRIC})"
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO meta_kv(key, value) VALUES ('embedding_dim', ?)",
-                (str(dim),),
-            )
-            self._embedding_dim = dim
-            return
-        if self._embedding_dim != dim:
-            raise StorageError(
-                f"embedding dim mismatch: index uses {self._embedding_dim}, got {dim}; "
-                "rebuild the vector index to change dimensions"
-            )
-
-    def _ensure_asset_vec_table(
-        self, conn: sqlite3.Connection, version_id: int, dim: int
+    def _ensure_vec_table(
+        self,
+        conn: sqlite3.Connection,
+        kind: Literal["chunks", "assets"],
+        version_id: int,
+        dim: int,
     ) -> None:
-        """Create ``vec_assets_v<version_id>`` lazily. sqlite-vec needs the
-        embedding dim baked into the table at CREATE time, so each version
-        gets its own dim-locked virtual table — switching multimodal model
+        """Create ``vec_{kind}_v<version_id>`` lazily. sqlite-vec needs
+        the embedding dim baked into the table at CREATE time, so each
+        version gets its own dim-locked virtual table — switching model
         creates a new version + new table, leaving prior data intact.
         """
         conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_assets_v{version_id} "
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_{kind}_v{version_id} "
             f"USING vec0(embedding float[{dim}] "
             f"distance_metric={_VEC_DISTANCE_METRIC})"
         )

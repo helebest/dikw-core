@@ -27,7 +27,7 @@ from dikw_core.eval import runner as eval_runner
 from dikw_core.eval.dataset import load_dataset
 from dikw_core.eval.runner import run_eval
 
-from .fakes import CountingEmbedder
+from .fakes import CountingEmbedder, init_test_wiki
 
 pytestmark = pytest.mark.perf
 
@@ -43,7 +43,7 @@ SNAPSHOT_HIT_BUDGET_S = 1.0
 def _build_synthetic_wiki(tmp_path: Path) -> Path:
     """Create a wiki + ``NUM_DOCS`` deterministic markdown docs."""
     wiki = tmp_path / "wiki"
-    api.init_wiki(wiki, description="perf-budget wiki")
+    init_test_wiki(wiki, description="perf-budget wiki")
     sources = wiki / "sources" / "perf"
     sources.mkdir(parents=True, exist_ok=True)
     for i in range(NUM_DOCS):
@@ -84,7 +84,7 @@ async def test_warm_reingest_zero_provider_calls_under_budget(
     """P2: re-ingest of unchanged corpus is fast + zero provider calls.
 
     Doc-level shortcut (existing.hash == parsed.hash) skips every doc
-    on the second run; the resume scan finds embed_meta already filled,
+    on the second run; the resume scan finds chunk_embed_meta already filled,
     so to_embed is empty. No provider invocations, no SQL writes
     beyond the per-doc scan.
     """

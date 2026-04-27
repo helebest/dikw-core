@@ -27,7 +27,12 @@ from dikw_core.info.embed import (
 from dikw_core.schemas import CachedEmbeddingRow, EmbeddingRow
 from dikw_core.storage.sqlite import SQLiteStorage
 
-from .fakes import CountingEmbedder, FakeMultimodalEmbedding
+from .fakes import (
+    CountingEmbedder,
+    FakeMultimodalEmbedding,
+    init_test_wiki,
+    register_text_version,
+)
 
 
 def _chunks(n: int) -> list[ChunkToEmbed]:
@@ -41,7 +46,7 @@ def _setup_multibatch_wiki(tmp_path: Path, num_docs: int = 6) -> Path:
     (default batch_size=64 only ever produces one batch on this corpus).
     """
     wiki = tmp_path / "wiki"
-    api.init_wiki(wiki, description="streaming-test wiki")
+    init_test_wiki(wiki, description="streaming-test wiki")
     sources = wiki / "sources" / "docs"
     sources.mkdir(parents=True, exist_ok=True)
     for i in range(num_docs):
@@ -61,11 +66,11 @@ def _setup_multibatch_wiki(tmp_path: Path, num_docs: int = 6) -> Path:
     return wiki
 
 
-def _count_embed_meta_rows(wiki: Path) -> int:
+def _count_chunk_embed_meta_rows(wiki: Path) -> int:
     db = wiki / ".dikw" / "index.sqlite"
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
-        return conn.execute("SELECT COUNT(*) FROM embed_meta").fetchone()[0]
+        return conn.execute("SELECT COUNT(*) FROM chunk_embed_meta").fetchone()[0]
     finally:
         conn.close()
 
@@ -78,7 +83,7 @@ async def test_embed_chunks_yields_per_batch() -> None:
     provider = FakeEmbeddings()
     chunks = _chunks(5)
 
-    gen = embed_chunks(provider, chunks, model="fake", batch_size=2)
+    gen = embed_chunks(provider, chunks, model="fake", version_id=42, batch_size=2)
     # Confirm it's an async generator, not an awaitable returning a list.
     assert isinstance(gen, AsyncIterator)
     assert not hasattr(gen, "__await__")
@@ -91,14 +96,14 @@ async def test_embed_chunks_yields_per_batch() -> None:
     # Order preserved across yielded batches.
     flat_ids = [row.chunk_id for batch in batches for row in batch]
     assert flat_ids == [1, 2, 3, 4, 5]
-    # Every row stamped with the requested model.
-    assert all(r.model == "fake" for batch in batches for r in batch)
+    # Every row stamped with the supplied version_id.
+    assert all(r.version_id == 42 for batch in batches for r in batch)
 
 
 async def test_embed_chunks_empty_input_yields_nothing() -> None:
     """Empty corpus = zero yields, no provider call."""
     provider = FakeEmbeddings()
-    batches = [b async for b in embed_chunks(provider, [], model="fake", batch_size=8)]
+    batches = [b async for b in embed_chunks(provider, [], model="fake", version_id=1, batch_size=8)]
     assert batches == []
 
 
@@ -111,7 +116,7 @@ async def test_embed_chunks_rejects_non_positive_batch_size() -> None:
     """
     with pytest.raises(ValueError, match="batch_size"):
         async for _ in embed_chunks(
-            FakeEmbeddings(), _chunks(3), model="fake", batch_size=0
+            FakeEmbeddings(), _chunks(3), model="fake", version_id=1, batch_size=0
         ):
             pass
 
@@ -124,7 +129,9 @@ async def test_embed_chunks_multimodal_yields_per_batch() -> None:
     provider = FakeMultimodalEmbedding(dim=4)
     chunks = _chunks(5)
 
-    gen = embed_chunks_multimodal(provider, chunks, model="fake-mm", batch_size=2)
+    gen = embed_chunks_multimodal(
+        provider, chunks, model="fake-mm", version_id=7, batch_size=2
+    )
     assert isinstance(gen, AsyncIterator)
 
     batches: list[list[EmbeddingRow]] = []
@@ -134,7 +141,7 @@ async def test_embed_chunks_multimodal_yields_per_batch() -> None:
     assert [len(b) for b in batches] == [2, 2, 1]
     flat_ids = [row.chunk_id for batch in batches for row in batch]
     assert flat_ids == [1, 2, 3, 4, 5]
-    assert all(r.model == "fake-mm" for batch in batches for r in batch)
+    assert all(r.version_id == 7 for batch in batches for r in batch)
 
 
 async def test_embed_chunks_multimodal_empty_still_pings_provider() -> None:
@@ -145,7 +152,7 @@ async def test_embed_chunks_multimodal_empty_still_pings_provider() -> None:
     batches = [
         b
         async for b in embed_chunks_multimodal(
-            provider, [], model="fake-mm", batch_size=2
+            provider, [], model="fake-mm", version_id=1, batch_size=2
         )
     ]
     assert batches == []
@@ -157,10 +164,10 @@ async def test_embed_chunks_multimodal_empty_still_pings_provider() -> None:
 
 
 async def test_api_ingest_streams_per_batch_upserts(tmp_path: Path) -> None:
-    """``embedded`` count + embed_meta row count match across multiple batches.
+    """``embedded`` count + chunk_embed_meta row count match across multiple batches.
 
     With 6 docs at batch_size=2 the streaming consumer must invoke the
-    provider at least 3 times. The post-ingest embed_meta row count
+    provider at least 3 times. The post-ingest chunk_embed_meta row count
     confirms each batch was upserted (not buffered until the end).
     """
     wiki = _setup_multibatch_wiki(tmp_path, num_docs=6)
@@ -170,9 +177,9 @@ async def test_api_ingest_streams_per_batch_upserts(tmp_path: Path) -> None:
     assert embedder.embed_calls >= 3, (
         f"expected >=3 batches at batch_size=2, got {embedder.embed_calls}"
     )
-    # Each successful batch upserts immediately — total embed_meta rows
+    # Each successful batch upserts immediately — total chunk_embed_meta rows
     # should equal report.embedded (no buffering = no leftover state).
-    assert _count_embed_meta_rows(wiki) == 6
+    assert _count_chunk_embed_meta_rows(wiki) == 6
 
 
 # ---- A4: mid-flight failure persists prior batches -----------------------
@@ -191,7 +198,7 @@ async def test_api_ingest_persists_prior_batches_on_failure(tmp_path: Path) -> N
         await api.ingest(wiki, embedder=embedder)
     # Exactly batch_size (2) rows must be on disk — not 0 (bulk-write
     # would have lost them) and not 6 (the failure cut it short).
-    assert _count_embed_meta_rows(wiki) == 2
+    assert _count_chunk_embed_meta_rows(wiki) == 2
 
 
 # ---- A5: resume scan picks up the missing tail ---------------------------
@@ -209,18 +216,18 @@ async def test_api_ingest_resume_scan_picks_up_missing_embeds(
     streaming loop.
     """
     wiki = _setup_multibatch_wiki(tmp_path, num_docs=6)
-    # Cold attempt: dies after 1 successful batch. embed_meta = 2.
+    # Cold attempt: dies after 1 successful batch. chunk_embed_meta = 2.
     failing = CountingEmbedder(fail_after=1)
     with pytest.raises(RuntimeError):
         await api.ingest(wiki, embedder=failing)
-    assert _count_embed_meta_rows(wiki) == 2
+    assert _count_chunk_embed_meta_rows(wiki) == 2
 
     # Retry with a non-failing embedder. The doc-level shortcut would
     # skip every doc on its own; the resume scan is what surfaces the
     # 4 missing chunks. Verify exactly 4 are embedded on the retry.
     fresh = CountingEmbedder()
     report = await api.ingest(wiki, embedder=fresh)
-    assert _count_embed_meta_rows(wiki) == 6
+    assert _count_chunk_embed_meta_rows(wiki) == 6
     assert fresh.total_texts == 4, (
         f"resume scan should have re-embedded only the missing tail "
         f"(4), got {fresh.total_texts}"
@@ -269,6 +276,7 @@ async def test_embed_chunks_warm_reuses_cache_zero_provider_calls(
     await storage.migrate()
     try:
         chunks = _chunks(4)
+        version_id = await register_text_version(storage)
         # Pre-populate cache: compute the same hash embed_chunks will
         # query, store FakeEmbeddings's deterministic vectors under it.
         seed = FakeEmbeddings()
@@ -279,7 +287,7 @@ async def test_embed_chunks_warm_reuses_cache_zero_provider_calls(
             [
                 CachedEmbeddingRow(
                     content_hash=content_hash(c.text),
-                    model="fake",
+                    version_id=version_id,
                     dim=len(v),
                     embedding=v,
                 )
@@ -292,7 +300,12 @@ async def test_embed_chunks_warm_reuses_cache_zero_provider_calls(
         warm = CountingEmbedder()
         rows: list[EmbeddingRow] = []
         async for batch in embed_chunks(
-            warm, chunks, model="fake", storage=storage, batch_size=2
+            warm,
+            chunks,
+            model="fake",
+            version_id=version_id,
+            storage=storage,
+            batch_size=2,
         ):
             rows.extend(batch)
         assert warm.embed_calls == 0, (
@@ -315,6 +328,7 @@ async def test_embed_chunks_partial_cache_only_embeds_misses(
     await storage.migrate()
     try:
         chunks = _chunks(6)
+        version_id = await register_text_version(storage)
         # Pre-populate cache for the FIRST 3 chunks only.
         seed = FakeEmbeddings()
         prep_vectors = await seed.embed(
@@ -324,7 +338,7 @@ async def test_embed_chunks_partial_cache_only_embeds_misses(
             [
                 CachedEmbeddingRow(
                     content_hash=content_hash(c.text),
-                    model="fake",
+                    version_id=version_id,
                     dim=len(v),
                     embedding=v,
                 )
@@ -335,7 +349,12 @@ async def test_embed_chunks_partial_cache_only_embeds_misses(
         embedder = CountingEmbedder()
         rows: list[EmbeddingRow] = []
         async for batch in embed_chunks(
-            embedder, chunks, model="fake", storage=storage, batch_size=2
+            embedder,
+            chunks,
+            model="fake",
+            version_id=version_id,
+            storage=storage,
+            batch_size=2,
         ):
             rows.extend(batch)
         # Provider only saw the 3 cache misses. Order preserved.
@@ -345,7 +364,9 @@ async def test_embed_chunks_partial_cache_only_embeds_misses(
         assert [r.chunk_id for r in rows] == [c.chunk_id for c in chunks]
         # The 3 misses are now in cache too (write-back on success).
         all_hashes = [content_hash(c.text) for c in chunks]
-        cached_after = await storage.get_cached_embeddings(all_hashes, model="fake")
+        cached_after = await storage.get_cached_embeddings(
+            all_hashes, version_id=version_id
+        )
         assert set(cached_after.keys()) == set(all_hashes)
     finally:
         await storage.close()

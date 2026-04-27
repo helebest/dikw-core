@@ -12,7 +12,10 @@ provider:
   embedding: openai_compat
   embedding_model: Qwen3-Embedding-8B
   embedding_base_url: https://ai.gitee.com/v1
-  embedding_dimensions: 1024
+  embedding_dim: 1024
+  embedding_revision: ""
+  embedding_normalize: true
+  embedding_distance: cosine
   # Gitee AI rejects batches >25 (HTTP 400 "No schema matches").
   embedding_batch_size: 16
   embedding_provider_label: gitee-ai

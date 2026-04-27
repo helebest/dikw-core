@@ -52,7 +52,7 @@ async def test_embed_chunks_multimodal_returns_one_row_per_chunk() -> None:
         ChunkToEmbed(chunk_id=20, text="beta"),
     ]
     rows = await _collect(
-        embed_chunks_multimodal(fake, chunks, model="fake-mm-v1")
+        embed_chunks_multimodal(fake, chunks, model="fake-mm-v1", version_id=1)
     )
     assert len(rows) == 2
     assert rows[0].chunk_id == 10
@@ -65,7 +65,7 @@ async def test_embed_chunks_multimodal_returns_one_row_per_chunk() -> None:
 
 async def test_embed_chunks_multimodal_empty_returns_empty() -> None:
     fake = FakeMultimodalEmbedding(dim=4)
-    rows = await _collect(embed_chunks_multimodal(fake, [], model="any"))
+    rows = await _collect(embed_chunks_multimodal(fake, [], model="any", version_id=1))
     assert rows == []
     assert fake.last_inputs == []
 
@@ -77,7 +77,7 @@ async def test_embed_chunks_multimodal_preserves_order() -> None:
         ChunkToEmbed(chunk_id=2, text="y"),
         ChunkToEmbed(chunk_id=3, text="z"),
     ]
-    rows = await _collect(embed_chunks_multimodal(fake, chunks, model="m"))
+    rows = await _collect(embed_chunks_multimodal(fake, chunks, model="m", version_id=1))
     assert [r.chunk_id for r in rows] == [1, 2, 3]
 
 
@@ -87,7 +87,7 @@ async def test_embed_chunks_multimodal_batches() -> None:
     fake = FakeMultimodalEmbedding(dim=4)
     chunks = [ChunkToEmbed(chunk_id=i, text=str(i)) for i in range(5)]
     rows = await _collect(
-        embed_chunks_multimodal(fake, chunks, model="m", batch_size=2)
+        embed_chunks_multimodal(fake, chunks, model="m", version_id=1, batch_size=2)
     )
     assert [r.chunk_id for r in rows] == [0, 1, 2, 3, 4]
 

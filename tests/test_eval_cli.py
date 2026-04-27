@@ -205,6 +205,10 @@ def test_cli_eval_provider_mode_threads_retrieval_config(
   embedding: openai_compat
   embedding_model: fake-model
   embedding_base_url: https://example.invalid
+  embedding_dim: 64
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
 storage:
   backend: sqlite
   path: .dikw/index.sqlite

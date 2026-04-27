@@ -1,8 +1,9 @@
 -- dikw-core Postgres schema v1
 -- The pg_trgm and vector extensions are enabled at connect-time in Python
 -- (not here) so the pool can register pgvector types on first connection.
--- The chunks_vec table is created lazily in Python so the engine can
--- parameterise the embedding dimension at first insert.
+-- Per-version vec_chunks_v<id> / vec_assets_v<id> tables are created
+-- lazily in Python so the engine can parameterise the embedding
+-- dimension at first insert. See storage/postgres.py.
 
 CREATE TABLE IF NOT EXISTS meta_kv (
     key   TEXT PRIMARY KEY,
@@ -43,11 +44,8 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS chunks_doc_seq ON chunks(doc_id, seq);
 CREATE INDEX IF NOT EXISTS chunks_fts ON chunks USING GIN (fts);
 
-CREATE TABLE IF NOT EXISTS embed_meta (
-    chunk_id BIGINT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
-    model    TEXT NOT NULL,
-    PRIMARY KEY (chunk_id, model)
-);
+-- ``chunk_embed_meta`` is defined in 003_assets.sql alongside the
+-- ``embed_versions`` registry it references.
 
 -- ---- K layer -------------------------------------------------------------
 

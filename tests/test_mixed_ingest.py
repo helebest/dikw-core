@@ -8,7 +8,7 @@ import pytest
 from dikw_core import api
 from dikw_core.config import SourceConfig, dump_config_yaml, load_config
 
-from .fakes import FakeEmbeddings
+from .fakes import FakeEmbeddings, init_test_wiki
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mixed"
 
@@ -16,7 +16,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "mixed"
 @pytest.fixture()
 def wiki_mixed(tmp_path: Path) -> Path:
     wiki = tmp_path / "wiki"
-    api.init_wiki(wiki)
+    init_test_wiki(wiki)
     # Two source entries — one glob per extension — because fnmatch doesn't
     # expand brace groups. Realistic for users with mixed corpora.
     cfg_path = wiki / "dikw.yml"

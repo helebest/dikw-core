@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-from dikw_core.config import ProviderConfig
 from dikw_core.providers import build_llm
 from dikw_core.providers.anthropic import AnthropicLLM
+
+from .fakes import make_provider_cfg
 
 
 @pytest.fixture()
@@ -57,7 +58,7 @@ def test_anthropic_client_omits_max_retries_when_none(
 def test_build_llm_wires_max_retries_from_config(
     captured_kwargs: dict[str, object],
 ) -> None:
-    cfg = ProviderConfig(llm="anthropic", llm_max_retries=4)
+    cfg = make_provider_cfg(llm="anthropic", llm_max_retries=4)
     llm = build_llm(cfg)
     assert isinstance(llm, AnthropicLLM)
     llm._get_client()

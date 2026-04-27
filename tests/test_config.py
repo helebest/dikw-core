@@ -9,7 +9,6 @@ from dikw_core.config import (
     DikwConfig,
     FilesystemStorageConfig,
     PostgresStorageConfig,
-    ProviderConfig,
     RetrievalConfig,
     SQLiteStorageConfig,
     default_config,
@@ -17,6 +16,8 @@ from dikw_core.config import (
     find_config,
     load_config,
 )
+
+from .fakes import make_provider_cfg as ProviderConfig
 
 
 def test_default_config_roundtrip(tmp_path: Path) -> None:
@@ -42,6 +43,10 @@ provider:
   embedding: openai_compat
   embedding_model: text-embedding-3-small
   embedding_base_url: https://example.invalid/v1
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
 storage:
   backend: postgres
   dsn: postgresql://u:p@h:5432/db
@@ -64,6 +69,11 @@ def test_load_config_filesystem_storage(tmp_path: Path) -> None:
     path = tmp_path / CONFIG_FILENAME
     path.write_text(
         """
+provider:
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
 storage:
   backend: filesystem
   root: .dikw/fs
@@ -113,6 +123,10 @@ def test_provider_config_llm_max_tokens_override_via_yaml(tmp_path: Path) -> Non
     path.write_text(
         """
 provider:
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
   llm_max_tokens_query: 512
   llm_max_tokens_synth: 4096
   llm_max_tokens_distill: 1536
@@ -141,6 +155,10 @@ def test_provider_config_max_retries_round_trip(tmp_path: Path) -> None:
     path.write_text(
         """
 provider:
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
   llm_max_retries: 3
   embedding_max_retries: 7
 sources: []
@@ -176,6 +194,10 @@ def test_dikw_config_retrieval_block_omitted_fills_defaults(tmp_path: Path) -> N
         """
 provider:
   llm: anthropic
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
 sources: []
 """,
         encoding="utf-8",
@@ -191,6 +213,11 @@ def test_dikw_config_retrieval_block_round_trip(tmp_path: Path) -> None:
     path = tmp_path / CONFIG_FILENAME
     path.write_text(
         """
+provider:
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
 retrieval:
   rrf_k: 40
   bm25_weight: 0.5
@@ -228,6 +255,11 @@ def test_retrieval_config_cjk_tokenizer_round_trips(tmp_path: Path) -> None:
     path = tmp_path / CONFIG_FILENAME
     path.write_text(
         """
+provider:
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
 retrieval:
   cjk_tokenizer: jieba
 sources: []
@@ -248,6 +280,11 @@ def test_retrieval_config_rejects_unknown_cjk_tokenizer(tmp_path: Path) -> None:
     path = tmp_path / CONFIG_FILENAME
     path.write_text(
         """
+provider:
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
 retrieval:
   cjk_tokenizer: trigram
 sources: []

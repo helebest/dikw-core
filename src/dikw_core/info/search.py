@@ -38,7 +38,7 @@ from ..schemas import (
     MultimodalInput,
     VecHit,
 )
-from ..storage.base import NotSupported, Storage, StorageError
+from ..storage.base import NotSupported, Storage
 from .tokenize import CJK_CHAR_CLASS, CjkTokenizer, preprocess_for_fts
 
 
@@ -162,6 +162,7 @@ class HybridSearcher:
         embedder: EmbeddingProvider | None,
         *,
         embedding_model: str | None = None,
+        text_version_id: int | None = None,
         multimodal: MultimodalSearch | None = None,
         rrf_k: int = RRF_K,
         bm25_weight: float = 1.0,
@@ -172,6 +173,11 @@ class HybridSearcher:
         self._storage = storage
         self._embedder = embedder
         self._embedding_model = embedding_model
+        # When set, ``vec_search`` is targeted at this specific text
+        # version_id. ``None`` means "let the storage adapter resolve
+        # the active text version" — fine for the common single-model
+        # case, but eval / migration paths pass an explicit id.
+        self._text_version_id = text_version_id
         self._mm = multimodal
         self._rrf_k = rrf_k
         self._bm25_weight = bm25_weight
@@ -189,6 +195,7 @@ class HybridSearcher:
         cfg: RetrievalConfigLike,
         *,
         embedding_model: str | None = None,
+        text_version_id: int | None = None,
         multimodal: MultimodalSearch | None = None,
     ) -> HybridSearcher:
         """Unpack a ``RetrievalConfig`` into the keyword kwargs.
@@ -201,6 +208,7 @@ class HybridSearcher:
             storage,
             embedder,
             embedding_model=embedding_model,
+            text_version_id=text_version_id,
             multimodal=multimodal,
             rrf_k=cfg.rrf_k,
             bm25_weight=cfg.bm25_weight,
@@ -232,14 +240,16 @@ class HybridSearcher:
                 "(embedder, embedding_model) pair"
             )
 
-        # Multimodal takes precedence so installations with both configured
-        # drive all retrieval through the unified vector space.
-        q_vec: list[float] | None = None
+        # Embed once per modality so the text leg searches
+        # ``vec_chunks_v<id>`` and the multimodal leg searches
+        # ``vec_assets_v<id>``; never share a vector across spaces.
+        q_vec_text: list[float] | None = None
+        q_vec_mm: list[float] | None = None
         if run_vec:
+            if text_vec_active:
+                q_vec_text = await self._embed_query_text(q)
             if self._mm is not None:
-                q_vec = await self._embed_query_multimodal(q)
-            elif text_vec_active:
-                q_vec = await self._embed_query_legacy(q)
+                q_vec_mm = await self._embed_query_multimodal(q)
 
         fts_task: asyncio.Task[list[FTSHit]] | None = None
         vec_task: asyncio.Task[list[VecHit]] | None = None
@@ -252,19 +262,24 @@ class HybridSearcher:
                     layer=layer,
                 )
             )
-        if q_vec is not None:
+        if q_vec_text is not None:
             vec_task = asyncio.create_task(
-                self._storage.vec_search(q_vec, limit=per_leg_limit, layer=layer)
-            )
-            if self._mm is not None:
-                asset_task = asyncio.create_task(
-                    self._storage.vec_search_assets(
-                        q_vec,
-                        version_id=self._mm.asset_version_id,
-                        limit=per_leg_limit,
-                        layer=layer,
-                    )
+                self._storage.vec_search(
+                    q_vec_text,
+                    version_id=self._text_version_id,
+                    limit=per_leg_limit,
+                    layer=layer,
                 )
+            )
+        if q_vec_mm is not None and self._mm is not None:
+            asset_task = asyncio.create_task(
+                self._storage.vec_search_assets(
+                    q_vec_mm,
+                    version_id=self._mm.asset_version_id,
+                    limit=per_leg_limit,
+                    layer=layer,
+                )
+            )
 
         fts_hits: list[FTSHit] = await fts_task if fts_task is not None else []
         vec_hits: list[VecHit] = []
@@ -272,14 +287,6 @@ class HybridSearcher:
             try:
                 vec_hits = await vec_task
             except NotSupported:
-                vec_hits = []
-            except StorageError as e:
-                # Mid-migration scenario: a multimodal-mode query against
-                # a legacy chunks_vec built with a different text-embed
-                # dim. Degrade to BM25 + asset-vec leg rather than
-                # killing the whole query.
-                if "dim" not in str(e):
-                    raise
                 vec_hits = []
         asset_hits: list[AssetVecHit] = []
         if asset_task is not None:
@@ -436,7 +443,7 @@ class HybridSearcher:
             )
         return hits
 
-    async def _embed_query_legacy(self, q: str) -> list[float] | None:
+    async def _embed_query_text(self, q: str) -> list[float] | None:
         assert self._embedder is not None
         assert self._embedding_model is not None
         vectors = await self._embedder.embed([q], model=self._embedding_model)

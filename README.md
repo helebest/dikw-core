@@ -155,10 +155,9 @@ storage:
   # schema: dikw
   # pool_size: 10
 
-  # --- filesystem: DB-less, Obsidian-vault native (≤ ~300 pages) ---
+  # --- filesystem: DB-less, Obsidian-vault native (≤ ~300 pages, FTS-only) ---
   # backend: filesystem
   # root: .dikw/fs
-  # embed: true            # turn on for pure-Python cosine vector search
 ```
 
 - **SQLite + `sqlite-vec` + FTS5** — the default. No extras required.
@@ -168,10 +167,10 @@ storage:
   for FTS and `vector(N)` for embeddings; the vector dimension is set at
   first insert.
 - **Filesystem / vault** — zero extra deps. JSONL sidecars under
-  `.dikw/fs/`, in-process inverted-index FTS, per-chunk `vecs/<id>.json`
-  files when `embed: true`. Good for personal vaults; not a multi-writer
-  story. Emits a hint to migrate once the corpus outgrows the scale
-  target.
+  `.dikw/fs/`, in-process inverted-index FTS, no dense retrieval (use
+  the sqlite backend if you need vectors). Good for personal vaults;
+  not a multi-writer story. Emits a hint to switch backends once the
+  corpus outgrows the scale target.
 
 Engine code talks only to the `Storage` Protocol
 ([`storage/base.py`](./src/dikw_core/storage/base.py)); each adapter

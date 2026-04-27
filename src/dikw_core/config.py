@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .info.tokenize import CjkTokenizer
 
@@ -145,8 +145,23 @@ class PostgresStorageConfig(BaseModel):
 class FilesystemStorageConfig(BaseModel):
     backend: Literal["filesystem"] = "filesystem"
     root: str = ".dikw/fs"
-    embed: bool = False
     max_pages_hint: int = 300
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_embed_field(cls, data: object) -> object:
+        # Custom message so the escape hatch is visible — the generic
+        # ``extra_forbidden`` from ``model_config`` would surface only
+        # the field name, not where to go next.
+        if isinstance(data, dict) and "embed" in data:
+            raise ValueError(
+                "filesystem backend has no `embed` field — it is FTS-only "
+                "by design. For dense retrieval, switch storage.backend to "
+                "`sqlite` in dikw.yml and re-ingest."
+            )
+        return data
 
 
 StorageConfig = Annotated[

@@ -61,7 +61,7 @@ async def storage(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterat
     if backend == "sqlite":
         s: Storage = SQLiteStorage(tmp_path / "index.sqlite")
     elif backend == "filesystem":
-        s = FilesystemStorage(tmp_path / ".dikw" / "fs", embed=True)
+        s = FilesystemStorage(tmp_path / ".dikw" / "fs")
     elif backend == "postgres":
         from dikw_core.storage.postgres import PostgresStorage
 
@@ -503,31 +503,83 @@ async def test_list_chunks_missing_embedding(storage: Storage) -> None:
     assert by_id[chunk_ids[2]].text == "ccc"
 
 
-async def test_filesystem_cache_methods_raise_notsupported(
-    tmp_path: Path,
-) -> None:
-    """Filesystem adapter declines the embed cache (pre-alpha).
+def test_filesystem_init_rejects_embed_kwarg(tmp_path: Path) -> None:
+    """``embed`` was a stale knob from the cancelled PR-B plan.
 
-    Documents the contract explicitly, separate from the parametrized
-    cache tests above (which skip rather than fail).
+    The constructor must not silently accept it — Python's strict
+    keyword handling does the job once the parameter is dropped from
+    the signature.
     """
-    fs = FilesystemStorage(tmp_path / ".dikw" / "fs", embed=True)
+    with pytest.raises(TypeError):
+        FilesystemStorage(tmp_path / ".dikw" / "fs", embed=True)  # type: ignore[call-arg]
+
+
+async def test_filesystem_rejects_all_dense_methods(tmp_path: Path) -> None:
+    """Filesystem is FTS-only by design — every dense / version-registry
+    method must raise ``NotSupported`` with a message that names the
+    sqlite escape hatch, not "yet" (which would imply PR-B is still
+    coming).
+
+    Asset metadata methods (``upsert_asset`` / ``get_asset`` /
+    ``replace_chunk_asset_refs`` / ``chunk_asset_refs_for_chunks`` /
+    ``chunks_referencing_assets``) are deliberately excluded — they are
+    not embedding-only and keep their "not implemented yet" wording
+    (Phase 5).
+    """
+    fs = FilesystemStorage(tmp_path / ".dikw" / "fs")
     await fs.connect()
     await fs.migrate()
     try:
-        with pytest.raises(NotSupported):
-            await fs.get_cached_embeddings(["a" * 64], version_id=1)
-        with pytest.raises(NotSupported):
-            await fs.cache_embeddings(
-                [
-                    CachedEmbeddingRow(
-                        content_hash="a" * 64,
-                        version_id=1,
-                        dim=4,
-                        embedding=[1.0, 0.0, 0.0, 0.0],
-                    )
-                ]
-            )
+        cached_row = CachedEmbeddingRow(
+            content_hash="a" * 64,
+            version_id=1,
+            dim=4,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        text_version = EmbeddingVersion(
+            modality="text",
+            provider="dummy",
+            model="dummy",
+            revision="",
+            dim=4,
+            normalize=True,
+            distance="cosine",
+        )
+        # Lazy factories — eager coroutine construction would leak
+        # pending awaitables if the first assertion already failed.
+        cases: list[tuple[str, object]] = [
+            ("upsert_embeddings", lambda: fs.upsert_embeddings([])),
+            (
+                "get_cached_embeddings",
+                lambda: fs.get_cached_embeddings(["a" * 64], version_id=1),
+            ),
+            ("cache_embeddings", lambda: fs.cache_embeddings([cached_row])),
+            (
+                "list_chunks_missing_embedding",
+                lambda: fs.list_chunks_missing_embedding(version_id=1),
+            ),
+            ("vec_search", lambda: fs.vec_search([1.0, 0.0, 0.0, 0.0])),
+            (
+                "upsert_embed_version",
+                lambda: fs.upsert_embed_version(text_version),
+            ),
+            (
+                "get_active_embed_version",
+                lambda: fs.get_active_embed_version(modality="text"),
+            ),
+            ("list_embed_versions", lambda: fs.list_embed_versions()),
+            ("upsert_asset_embeddings", lambda: fs.upsert_asset_embeddings([])),
+            (
+                "vec_search_assets",
+                lambda: fs.vec_search_assets([1.0, 0.0, 0.0, 0.0], version_id=1),
+            ),
+        ]
+        for label, factory in cases:
+            with pytest.raises(NotSupported) as excinfo:
+                await factory()  # type: ignore[operator]
+            msg = str(excinfo.value).lower()
+            assert "fts-only" in msg, f"{label}: missing 'FTS-only' in {msg!r}"
+            assert "sqlite" in msg, f"{label}: missing 'sqlite' in {msg!r}"
     finally:
         await fs.close()
 

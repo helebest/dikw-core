@@ -40,7 +40,7 @@ def build_storage(
         fs_root = Path(config.root)
         if not fs_root.is_absolute() and root is not None:
             fs_root = Path(root) / fs_root
-        return FilesystemStorage(fs_root, embed=config.embed)
+        return FilesystemStorage(fs_root)
     if isinstance(config, PostgresStorageConfig):
         try:
             from .postgres import PostgresStorage

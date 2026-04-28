@@ -308,7 +308,6 @@ async def test_materialize_revalidates_cache_hit_against_current_file(
     store, get, upsert = _make_fake_storage()
     store[stale_sha] = AssetRecord(
         asset_id=stale_sha,
-        hash=stale_sha,
         kind=AssetKind.IMAGE,
         mime="image/png",
         stored_path="assets/00/00000000-old.png",
@@ -334,7 +333,6 @@ async def test_materialize_revalidates_cache_hit_against_current_file(
     assert rec is not None
     record, was_new = rec
     # The path must be attached to the canonical record, not the stale one.
-    assert record.hash == canonical
     assert record.asset_id == canonical
     assert "x.png" not in store[stale_sha].original_paths
     assert was_new is True
@@ -377,9 +375,8 @@ async def test_materialize_uses_canonical_hash_when_streaming_hash_disagrees(
     assert rec is not None
     record, was_new = rec
     canonical = hashlib.sha256(png_bytes).hexdigest()
-    assert record.hash == canonical
     assert record.asset_id == canonical
-    assert record.hash != stale_sha
+    assert record.asset_id != stale_sha
     assert was_new is True
 
 
@@ -554,7 +551,7 @@ async def test_materialize_uses_engine_vault_path_layout(tmp_path: Path) -> None
     parts = rec.stored_path.split("/")
     assert parts[0] == "assets"
     assert len(parts[1]) == 2  # h2
-    assert parts[2].startswith(rec.hash[:8] + "-")
+    assert parts[2].startswith(rec.asset_id[:8] + "-")
     assert parts[2].endswith(".png")
     # Sanitized: spaces collapsed to '-'.
     assert "diagram-with-spaces" in parts[2]

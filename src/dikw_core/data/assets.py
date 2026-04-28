@@ -397,7 +397,6 @@ async def materialize_asset(
 
     record = AssetRecord(
         asset_id=sha,
-        hash=sha,
         kind=AssetKind.IMAGE,
         mime=mime,
         stored_path=rel_stored,

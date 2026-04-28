@@ -310,6 +310,53 @@ CREATE TABLE wisdom_evidence (
 );
 ```
 
+### Multimedia assets (v1)
+
+Image binaries referenced from markdown sources are content-addressed by the
+sha256 of their bytes (stored verbatim in `asset_id`, mirroring the role of
+`documents.hash` for sources). The chunk → asset bridge keeps text positions
+recoverable across file moves; per-asset embeddings live in their own
+runtime-created vec table, parallel to `vec_chunks_v<n>`.
+
+```sql
+-- D (multimedia, v1: images only)
+CREATE TABLE assets (
+    asset_id       TEXT PRIMARY KEY,        -- sha256 hex of the bytes
+    kind           TEXT CHECK (kind IN ('image')) NOT NULL,
+    mime           TEXT NOT NULL,
+    stored_path    TEXT NOT NULL,           -- relative to project_root
+    original_paths TEXT NOT NULL,           -- JSON list of source-side names
+    bytes          INTEGER NOT NULL,
+    media_meta     TEXT,                    -- per-kind JSON; image: {width,height}
+    created_ts     REAL NOT NULL
+);
+
+-- I (chunk → asset bridge)
+CREATE TABLE chunk_asset_refs (
+    chunk_id       INTEGER REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+    asset_id       TEXT    REFERENCES assets(asset_id),
+    ord            INTEGER NOT NULL,        -- 0-based ordinal within chunk
+    alt            TEXT NOT NULL DEFAULT '',
+    start_in_chunk INTEGER NOT NULL,
+    end_in_chunk   INTEGER NOT NULL,
+    PRIMARY KEY (chunk_id, ord)
+);
+
+-- I (asset embedding metadata; vector lives in vec_assets_v<n>, lazy-created
+--    by the same dim-locked CREATE pattern as vec_chunks_v<n>)
+CREATE TABLE asset_embed_meta (
+    asset_id   TEXT    NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+    version_id INTEGER NOT NULL REFERENCES embed_versions(version_id),
+    PRIMARY KEY (asset_id, version_id)
+);
+```
+
+`media_meta` is a per-kind discriminated union — for v1 images it carries
+`width` / `height`; future modalities (audio, video) slot in their own fields
+without an `ALTER TABLE`. `embed_versions` is the cross-modal embedding
+registry shared with `chunk_embed_meta` (text and multimodal versions
+coexist; each row produces its own `vec_*_v<n>` table).
+
 ## Core Operations
 
 Each operation is implemented in `dikw_core.api` and surfaced identically in CLI and MCP.

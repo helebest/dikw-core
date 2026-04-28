@@ -46,9 +46,31 @@ from dikw_core.info.search import HybridSearcher, RetrievalMode
 from dikw_core.providers import build_embedder
 from dikw_core.providers.base import EmbeddingProvider
 from dikw_core.storage import build_storage
-from dikw_core.storage.base import NotSupported
+from dikw_core.storage.base import NotSupported, Storage
 
 SEARCH_LIMIT = 100  # mirror runner.py
+
+
+async def resolve_active_text_version(
+    storage: Storage, *, default_model: str
+) -> tuple[int | None, str, int | None]:
+    """Return ``(version_id, model, dim)`` for the active text version.
+
+    Mirrors ``api.query()``'s pinning: when storage has an active text
+    ``embed_versions`` row, queries must use that row's model + dim so
+    query vectors land in the same space as indexed chunks even after
+    ``dikw.yml`` drifts. Falls back to ``(None, default_model, None)``
+    when no active row exists or the backend can't read versions, in
+    which case downstream ``build_embedder(dim_override=None)`` will
+    use ``cfg.provider.embedding_dim``.
+    """
+    try:
+        active_text = await storage.get_active_embed_version(modality="text")
+    except NotSupported:
+        active_text = None
+    if active_text is not None and active_text.version_id is not None:
+        return active_text.version_id, active_text.model, active_text.dim
+    return None, default_model, None
 
 
 class _CachedEmbedder:
@@ -122,21 +144,11 @@ async def replay(wiki: Path, dataset_name_or_path: str, mode: str) -> int:
     needs_embeddings = any(m in ("vector", "hybrid") for m in modes)
 
     # Mirror api.query(): pin queries to the snapshot's active text
-    # embed_versions row so query vectors always land in the same
-    # space as the indexed chunks, even when dikw.yml has drifted
-    # (different embedding_model / dim) since ingest.
-    text_version_id: int | None = None
-    text_query_model = cfg.provider.embedding_model
-    text_query_dim: int | None = None
-    if needs_embeddings:
-        try:
-            active_text = await storage.get_active_embed_version(modality="text")
-        except NotSupported:
-            active_text = None
-        if active_text is not None and active_text.version_id is not None:
-            text_version_id = active_text.version_id
-            text_query_model = active_text.model
-            text_query_dim = active_text.dim
+    # embed_versions row so query vectors land in the same space as
+    # indexed chunks even when dikw.yml has drifted since ingest.
+    text_version_id, text_query_model, text_query_dim = await resolve_active_text_version(
+        storage, default_model=cfg.provider.embedding_model
+    )
 
     embedder: EmbeddingProvider | None = None
     if needs_embeddings:

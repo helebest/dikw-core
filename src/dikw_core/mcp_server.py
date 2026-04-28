@@ -6,7 +6,8 @@ Phase 0-3 tools:
   * ``admin.ingest`` — run the ingest pipeline.
   * ``admin.lint`` — run the K-layer hygiene checker.
   * ``doc.search`` — hybrid search returning ranked hits (no LLM call).
-  * ``doc.read`` — return the body (or a chunk of it) for a given doc path or id.
+  * ``doc.read`` — return a document body (by ``path``) or a single chunk
+    (by ``chunk_id`` from ``doc.search``).
   * ``wiki.synthesize`` — turn source docs into K-layer wiki pages.
   * ``wiki.list`` — list on-disk wiki pages with titles + types.
   * ``wiki.get`` — read a wiki page back with front-matter.
@@ -28,6 +29,33 @@ from .knowledge.wiki import read_page
 from .providers import build_embedder
 from .schemas import Layer, WisdomStatus
 from .storage import build_storage
+
+
+async def _doc_read(arguments: dict[str, Any]) -> str:
+    """Resolve a ``doc.read`` request to text.
+
+    ``chunk_id`` takes precedence when both are given — avoids leaning
+    on JSON-Schema ``oneOf`` for a one-line precedence rule.
+    """
+    wiki_path = arguments.get("wiki_path", ".")
+    chunk_id = arguments.get("chunk_id")
+    doc_path = arguments.get("path")
+    if chunk_id is not None:
+        _cfg, _root, storage = await api._with_storage(wiki_path)
+        try:
+            chunk = await storage.get_chunk(int(chunk_id))
+        finally:
+            await storage.close()
+        if chunk is None:
+            raise ValueError(f"doc.read: chunk_id {chunk_id} not found")
+        return chunk.text
+    if doc_path is None:
+        raise ValueError("doc.read: provide either 'path' or 'chunk_id'")
+    _cfg, root = api.load_wiki(wiki_path)
+    abs_path = (root / doc_path).resolve()
+    if not abs_path.is_file():
+        raise ValueError(f"not a file: {doc_path}")
+    return Path(abs_path).read_text(encoding="utf-8")
 
 
 async def build_server() -> Any:
@@ -104,12 +132,21 @@ async def build_server() -> Any:
             ),
             Tool(
                 name="doc.read",
-                description="Return the full body of a document identified by its wiki-relative path.",
+                description=(
+                    "Return the body of a document (by path) or a single "
+                    "chunk (by chunk_id from doc.search). Supply exactly one."
+                ),
                 inputSchema={
                     "type": "object",
-                    "required": ["path"],
                     "properties": {
                         "path": {"type": "string", "description": "Wiki-relative doc path."},
+                        "chunk_id": {
+                            "type": "integer",
+                            "description": (
+                                "Storage chunk id from doc.search Hit.chunk_id. "
+                                "When set, returns just that chunk's text."
+                            ),
+                        },
                         "wiki_path": {"type": "string", "description": "Directory inside the wiki."},
                     },
                     "additionalProperties": False,
@@ -279,13 +316,7 @@ async def build_server() -> Any:
             return [TextContent(type="text", text=json.dumps(payload, indent=2))]
 
         if name == "doc.read":
-            doc_path = arguments["path"]
-            wiki_path = arguments.get("wiki_path", ".")
-            _cfg, root = api.load_wiki(wiki_path)
-            abs_path = (root / doc_path).resolve()
-            if not abs_path.is_file():
-                raise ValueError(f"not a file: {doc_path}")
-            text = Path(abs_path).read_text(encoding="utf-8")
+            text = await _doc_read(arguments)
             return [TextContent(type="text", text=text)]
 
         if name == "wiki.synthesize":

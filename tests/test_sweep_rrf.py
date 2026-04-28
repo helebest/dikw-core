@@ -37,6 +37,7 @@ def test_load_raw_dump_parses_mode_rows(tmp_path: Path) -> None:
             {
                 "dataset": "toy",
                 "mode": "bm25",
+                "q_id": 0,
                 "q": "q1",
                 "expect_any": ["a"],
                 "expect_none": False,
@@ -45,6 +46,7 @@ def test_load_raw_dump_parses_mode_rows(tmp_path: Path) -> None:
             {
                 "dataset": "toy",
                 "mode": "vector",
+                "q_id": 0,
                 "q": "q1",
                 "expect_any": ["a"],
                 "expect_none": False,
@@ -54,6 +56,7 @@ def test_load_raw_dump_parses_mode_rows(tmp_path: Path) -> None:
             {
                 "dataset": "toy",
                 "mode": "hybrid",
+                "q_id": 0,
                 "q": "q1",
                 "expect_any": ["a"],
                 "expect_none": False,
@@ -63,6 +66,7 @@ def test_load_raw_dump_parses_mode_rows(tmp_path: Path) -> None:
             {
                 "dataset": "toy",
                 "mode": "bm25",
+                "q_id": 0,
                 "q": "q_neg",
                 "expect_any": [],
                 "expect_none": True,
@@ -96,6 +100,7 @@ def test_evaluate_weights_shifts_toward_weighted_leg(tmp_path: Path) -> None:
             {
                 "dataset": "toy",
                 "mode": "bm25",
+                "q_id": 0,
                 "q": "q1",
                 "expect_any": ["gold"],
                 "expect_none": False,
@@ -104,6 +109,7 @@ def test_evaluate_weights_shifts_toward_weighted_leg(tmp_path: Path) -> None:
             {
                 "dataset": "toy",
                 "mode": "vector",
+                "q_id": 0,
                 "q": "q1",
                 "expect_any": ["gold"],
                 "expect_none": False,
@@ -135,19 +141,19 @@ def test_evaluate_weights_reproduces_legacy_at_equal_weights(tmp_path: Path) -> 
         dump,
         [
             {
-                "dataset": "d", "mode": "bm25", "q": "q1", "expect_any": ["a"],
+                "dataset": "d", "mode": "bm25", "q_id": 0, "q": "q1", "expect_any": ["a"],
                 "expect_none": False, "ranked": ["a", "b", "c"],
             },
             {
-                "dataset": "d", "mode": "vector", "q": "q1", "expect_any": ["a"],
+                "dataset": "d", "mode": "vector", "q_id": 0, "q": "q1", "expect_any": ["a"],
                 "expect_none": False, "ranked": ["b", "c", "a"],
             },
             {
-                "dataset": "d", "mode": "bm25", "q": "q2", "expect_any": ["x"],
+                "dataset": "d", "mode": "bm25", "q_id": 1, "q": "q2", "expect_any": ["x"],
                 "expect_none": False, "ranked": ["y", "x"],
             },
             {
-                "dataset": "d", "mode": "vector", "q": "q2", "expect_any": ["x"],
+                "dataset": "d", "mode": "vector", "q_id": 1, "q": "q2", "expect_any": ["x"],
                 "expect_none": False, "ranked": ["x", "y"],
             },
         ],
@@ -173,11 +179,11 @@ def test_sweep_grid_covers_all_combinations(tmp_path: Path) -> None:
         dump,
         [
             {
-                "dataset": "d", "mode": "bm25", "q": "q1", "expect_any": ["a"],
+                "dataset": "d", "mode": "bm25", "q_id": 0, "q": "q1", "expect_any": ["a"],
                 "expect_none": False, "ranked": ["a"],
             },
             {
-                "dataset": "d", "mode": "vector", "q": "q1", "expect_any": ["a"],
+                "dataset": "d", "mode": "vector", "q_id": 0, "q": "q1", "expect_any": ["a"],
                 "expect_none": False, "ranked": ["a"],
             },
         ],
@@ -197,6 +203,49 @@ def test_sweep_grid_covers_all_combinations(tmp_path: Path) -> None:
     assert (60, 1.0, 1.5) in combos
 
 
+def test_load_raw_dump_keys_by_q_id_not_q_text(tmp_path: Path) -> None:
+    """Two positives with byte-identical ``q`` text but distinct ``q_id``
+    must both round-trip; legacy keying-by-text dropped the second
+    silently.
+    """
+    dump = tmp_path / "raw.jsonl"
+    _write_dump(
+        dump,
+        [
+            {
+                "dataset": "ds", "mode": "bm25", "q_id": 0, "q": "duplicate",
+                "expect_any": ["alpha"], "expect_none": False,
+                "ranked": ["alpha", "x"],
+            },
+            {
+                "dataset": "ds", "mode": "vector", "q_id": 0, "q": "duplicate",
+                "expect_any": ["alpha"], "expect_none": False,
+                "ranked": ["alpha", "y"],
+            },
+            {
+                "dataset": "ds", "mode": "bm25", "q_id": 1, "q": "duplicate",
+                "expect_any": ["beta"], "expect_none": False,
+                "ranked": ["beta", "z"],
+            },
+            {
+                "dataset": "ds", "mode": "vector", "q_id": 1, "q": "duplicate",
+                "expect_any": ["beta"], "expect_none": False,
+                "ranked": ["beta", "w"],
+            },
+        ],
+    )
+
+    legs = load_raw_dump(dump)["ds"]
+
+    assert len(legs) == 2
+    by_gold = {tuple(leg.expect_any): leg for leg in legs}
+    assert by_gold[("alpha",)].bm25_ranked == ["alpha", "x"]
+    assert by_gold[("alpha",)].vector_ranked == ["alpha", "y"]
+    assert by_gold[("beta",)].bm25_ranked == ["beta", "z"]
+    assert by_gold[("beta",)].vector_ranked == ["beta", "w"]
+    assert all(leg.q == "duplicate" for leg in legs)
+
+
 def test_format_table_includes_reference_rows(tmp_path: Path) -> None:
     """Output pins the vanilla (1,1,60) row AND the shipped default row.
 
@@ -209,11 +258,11 @@ def test_format_table_includes_reference_rows(tmp_path: Path) -> None:
         dump,
         [
             {
-                "dataset": "d", "mode": "bm25", "q": "q1", "expect_any": ["a"],
+                "dataset": "d", "mode": "bm25", "q_id": 0, "q": "q1", "expect_any": ["a"],
                 "expect_none": False, "ranked": ["a"],
             },
             {
-                "dataset": "d", "mode": "vector", "q": "q1", "expect_any": ["a"],
+                "dataset": "d", "mode": "vector", "q_id": 0, "q": "q1", "expect_any": ["a"],
                 "expect_none": False, "ranked": ["a"],
             },
         ],

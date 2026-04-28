@@ -7,6 +7,135 @@ regression from a re-run variance.
 Newest first. `dikw eval` thresholds in each dataset's `dataset.yaml`
 are calibrated ~2-3 % below the most recent canonical-mode run.
 
+## 2026-04-28 — Fusion mode A/B/C: RRF vs CombSUM vs CombMNZ
+
+**Status:** experimental run, **not** a new canonical baseline. PR #32
+landed `retrieval.fusion: rrf|combsum|combmnz` (default `rrf`); this
+entry pins the empirical delta on `cmteb-t2-subset` so we know what to
+expect when reaching for the new knob. Same wiki, same indexed
+embeddings, same query embeds — only the dispatcher branch in
+`HybridSearcher.search` changes between runs. RRF row reproduces the
+2026-04-28 canonical baseline byte-for-byte (sanity check).
+
+### Run shape
+
+- **Wiki:** `/tmp/dikw-phase15-cmteb/` rebuilt fresh against the
+  current main (`5177117`); 5,000 documents, 5,000 chunks, 1
+  `embed_versions` row, ingest wall time ~22 min via Gitee
+  `Qwen3-Embedding-0.6B` at batch=16.
+- **Replay tool:** one-off
+  `/tmp/dikw-phase15-cmteb/run_3fusions.py` (analogue of
+  `evals/tools/run_phase15_from_snapshot.py`, but loops the 3 fusion
+  modes in **one** Python process so the in-memory query-embed cache
+  is shared across runs — saves ~6 min of Gitee API time vs three
+  separate CLI calls). Mutates `cfg.retrieval.fusion` between fuser
+  invocations; everything else is identical to the snapshot tool.
+- **Modes per fusion:** `bm25 / vector / hybrid` all run; bm25 and
+  vector are fusion-independent and **were verified byte-identical
+  across the three fusion modes** (sanity check on the dispatcher's
+  scope).
+
+### Hybrid results
+
+```
+dikw replay 3-fusion sweep — cmteb-t2-subset (Qwen3-Embedding-0.6B)
+┌─────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
+│ fusion  │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
+├─────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
+│ rrf     │    0.987 │     0.987 │ 0.979 │      0.946 │         0.988 │
+│ combsum │    0.977 │     0.990 │ 0.972 │      0.948 │         0.988 │
+│ combmnz │    0.983 │     0.987 │ 0.977 │      0.949 │         0.988 │
+└─────────┴──────────┴───────────┴───────┴────────────┴───────────────┘
+```
+
+Δ vs RRF (4-decimal precision, since the deltas are small):
+
+| metric | RRF | CombSUM | Δ | CombMNZ | Δ |
+|---|---:|---:|---:|---:|---:|
+| nDCG@10     | 0.9460 | 0.9482 | **+0.0021** | 0.9486 | **+0.0026** |
+| MRR         | 0.9794 | 0.9725 | -0.0069 | 0.9774 | -0.0020 |
+| hit@3       | 0.9867 | 0.9767 | -0.0100 | 0.9833 | -0.0033 |
+| hit@10      | 0.9867 | 0.9900 | +0.0033 | 0.9867 |  0.0000 |
+| recall@100  | 0.9877 | 0.9877 |  0.0000 | 0.9877 |  0.0000 |
+
+### Interpretation
+
+The hypothesis from PR #32's plan ("vector-dominant regimes will see
+CombMNZ ≥ CombSUM ≥ RRF") is **partially confirmed**:
+
+- **nDCG@10 wins for score-fusion**, in the predicted order
+  (CombMNZ +0.0026 > CombSUM +0.0021 > RRF). Both score-aware fusers
+  beat RRF on the published threshold metric, but the deltas are at
+  the noise floor — same magnitude as the 0.6B vs 8B nDCG@10 noise
+  reported in the canonical 04-28 entry.
+- **RRF wins MRR + hit@3**. Score-fusion's per-leg min-max
+  normalisation slightly perturbs the very head of the ranked list.
+  RRF's rank-only summation keeps a leg's rank-1 nailed at
+  `1 / (k + 1)` regardless of magnitude; CombSUM/CombMNZ let a
+  flat-distribution leg dilute the rank-1 signal.
+- **recall@100 is invariant.** All three fusers preserve the same
+  doc set in the top-100 — the ordering inside that set is what
+  fusion redistributes. Confirms fusion is a re-ranker, not a
+  recall-changer, at this corpus shape.
+
+**Net judgement:** RRF stays the right default. Score-fusion is a
+real but small lift on nDCG@10 (the metric `dataset.yaml` thresholds
+gate on); the trade is a measurable haircut on top-1 metrics. Worth
+keeping as opt-in for two regimes the 0.6B baseline already flagged
+as RRF-suboptimal: `vector` already very strong (CombMNZ buys back
+some of the rank-collapse RRF imposes), and very-close legs
+(CMTEB-0.6B `hybrid -0.003` vs `vector` under RRF — score-fusion
+gives the dispatcher something magnitude-shaped to discriminate on).
+Don't flip the default until a corpus shows a >0.005 nDCG@10 swing
+that direction.
+
+### Configuration
+
+| | |
+|---|---|
+| dikw commit | `5177117` (post-PR #32 main) |
+| Embedding | `Qwen3-Embedding-0.6B` @ Gitee AI, 1024-dim native, batch=16 |
+| Storage | sqlite + per-version `vec_chunks_v<id>` (PR #27 PR-A schema) |
+| Fusion config | `rrf_k: 60`, `bm25_weight: 0.3`, `vector_weight: 1.5` (shipped defaults) — same across all 3 fusion modes |
+| CJK tokenizer | `jieba` |
+| Wall time | ingest ~22 min, query-embed prebatch ~2 min, 3-mode replay ~6 min |
+| Approximate cost | ~¥0.05-0.10 (one ingest + 300-query single embed pass; 3 fusion replays share the cache) |
+
+### Known issues / observations
+
+**1. RRF row reproduces the published 04-28 baseline exactly.** nDCG@10
+0.9460 / hit@10 0.9867 / hit@3 0.9867 / MRR 0.9794 / recall@100 0.9877
+all match the canonical-mode entry to 4 decimal places — confirms the
+PR #32 dispatcher leaves the RRF path byte-identical (the
+`track_asset_dist = self._fusion != "rrf"` gate from the simplify
+follow-up was the load-bearing piece).
+
+**2. `--mode bm25` and `--mode vector` are byte-identical across the
+3 fusion modes.** Confirmed in the JSON dump
+(`/tmp/dikw-phase15-cmteb/.dikw/fusion_replay_results.json`) — the
+dispatcher only forks at the hybrid path, as designed.
+
+**3. Score fusion does not help SciFact at 0.6B.** Not run this
+cycle — 0.6B's vector leg on SciFact is already at BM25 parity
+(0.672 vs 0.669 nDCG@10 in the 04-28 baseline), so there is no
+"strong vector" for CombSUM/CombMNZ to amplify. Score-fusion's value
+proposition is "preserve magnitude when one leg dominates"; with no
+dominant leg, it has nothing to do. Skipping that ¥0.10 spend until
+the canonical-model decision lands.
+
+### Follow-ups
+
+1. **Don't change the default.** RRF stays. Document in
+   `docs/providers.md` (already done in PR #32) when to reach for
+   `combsum` / `combmnz`.
+2. **Sweep tool extension.** `evals/tools/sweep_rrf.py` re-fuses
+   offline from `--dump-raw` JSONL that records rank lists only. To
+   make CombSUM/CombMNZ sweepable without re-running the full eval,
+   the dump format needs scores. Defer until someone wants a
+   weight-tune sweep over the new fusers.
+3. **Pin replay tool with smoke unit test** (carried over from prior
+   baseline). Cheap; not done this cycle.
+
 ## 2026-04-28 — Phase 1.5 chunk-level fusion @ Qwen3-Embedding-0.6B
 
 **Status:** new canonical baseline for both `cmteb-t2-subset` and

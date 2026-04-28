@@ -92,7 +92,8 @@ retry/caching live in [`docs/providers.md`](./docs/providers.md).
 
 MiniMax has no embeddings endpoint — pair its Anthropic-compatible LLM surface
 with an OpenAI-compatible embedding vendor. The example below uses
-[Gitee AI](https://ai.gitee.com/v1) (`Qwen3-Embedding-8B`, matryoshka-truncatable).
+[Gitee AI](https://ai.gitee.com/v1) (`Qwen3-Embedding-0.6B`, 1024 native — the
+recommended default; swap in `Qwen3-Embedding-8B` if you want premium quality).
 Fill the URLs in by hand — dikw-core never auto-detects vendor endpoints:
 
 ```yaml
@@ -101,9 +102,9 @@ provider:
   llm_model: <MiniMax Anthropic-compatible model name>
   llm_base_url: <MiniMax Anthropic endpoint, e.g. https://api.minimaxi.com/anthropic>
   embedding: openai_compat
-  embedding_model: Qwen3-Embedding-8B
+  embedding_model: Qwen3-Embedding-0.6B
   embedding_base_url: https://ai.gitee.com/v1
-  embedding_dim: 1024               # required: matryoshka truncation; locked at first ingest
+  embedding_dim: 1024               # 0.6B native; locked at first ingest
   embedding_revision: ""            # bump to force re-embed when Qwen weights drift silently
   embedding_normalize: true
   embedding_distance: cosine

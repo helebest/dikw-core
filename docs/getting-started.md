@@ -153,9 +153,10 @@ caching, see [`providers.md`](./providers.md).
 ### Example: MiniMax LLM + Gitee AI embeddings
 
 MiniMax has no embeddings endpoint — pair it with an OpenAI-compatible
-embedding vendor. The example below uses Gitee AI's `Qwen3-Embedding-8B`
-(matryoshka-truncatable). dikw-core never auto-detects vendor URLs — fill
-these in by hand:
+embedding vendor. The example below uses Gitee AI's `Qwen3-Embedding-0.6B`
+(1024 native, the recommended default; swap in `Qwen3-Embedding-8B` if
+you want premium quality). dikw-core never auto-detects vendor URLs —
+fill these in by hand:
 
 ```yaml
 provider:
@@ -163,9 +164,9 @@ provider:
   llm_model: <MiniMax Anthropic-compatible model name>
   llm_base_url: <MiniMax Anthropic endpoint>
   embedding: openai_compat
-  embedding_model: Qwen3-Embedding-8B
+  embedding_model: Qwen3-Embedding-0.6B
   embedding_base_url: https://ai.gitee.com/v1
-  embedding_dim: 1024               # required: matryoshka truncation; locked at first ingest
+  embedding_dim: 1024               # 0.6B native; locked at first ingest
   embedding_revision: ""            # bump to force re-embed when Qwen weights drift silently
   embedding_normalize: true
   embedding_distance: cosine

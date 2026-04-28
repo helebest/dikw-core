@@ -106,6 +106,11 @@ class RetrievalConfig(BaseModel):
     # scales how much that leg's rank order influences the top-k.
     bm25_weight: float = 0.3
     vector_weight: float = 1.5
+    # Fusion algorithm. ``rrf`` (default) is rank-only and byte-identical
+    # to pre-CombSUM baselines; ``combsum`` / ``combmnz`` consume raw
+    # per-leg scores and preserve magnitude. See ``docs/providers.md`` →
+    # "Score-normalised fusion alternatives" for when to reach for each.
+    fusion: Literal["rrf", "combsum", "combmnz"] = "rrf"
     # Preprocesses CJK text with ``jieba`` before FTS5 indexing/querying
     # AND drives the chunker's token budget so long Chinese paragraphs
     # split. Required for Chinese corpora; ``unicode61`` otherwise splits

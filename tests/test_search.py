@@ -7,6 +7,8 @@ from dikw_core.info.search import (
     MultimodalSearch,
     _sanitize_fts,
     apply_source_diversity_penalty,
+    comb_mnz_fusion,
+    comb_sum_fusion,
     reciprocal_rank_fusion,
 )
 from dikw_core.storage.sqlite import SQLiteStorage
@@ -83,6 +85,100 @@ def test_rrf_accepts_int_keys() -> None:
     # Same numeric semantics as the str-keyed path.
     str_fused = reciprocal_rank_fusion([["1", "2", "3"], ["2", "3", "4"]])
     assert {str(k): v for k, v in fused.items()} == str_fused
+
+
+# ---- comb_sum_fusion / comb_mnz_fusion --------------------------------------
+
+
+def test_comb_sum_normalises_per_leg() -> None:
+    """Per-leg min-max maps each leg's range to [0, 1] independently — a
+    raw 100 in a small-magnitude leg shouldn't dwarf a raw 2 in a
+    different-scale leg post-fusion.
+    """
+    leg_big = [("a", 100.0), ("b", 50.0), ("c", 0.0)]
+    leg_small = [("d", 2.0), ("a", 1.0), ("c", 0.0)]
+    fused = comb_sum_fusion([leg_big, leg_small], weights=[1.0, 1.0])
+    # Per-leg [1.0, 0.5, 0.0] in each. "a" sums 1.0 + 0.5 = 1.5; "d" tops
+    # leg_small alone so is 1.0; "c" is 0.0 in both.
+    assert fused["a"] == pytest.approx(1.5)
+    assert fused["d"] == pytest.approx(1.0)
+    assert fused["c"] == pytest.approx(0.0)
+
+
+def test_comb_sum_weights_shift_ranking() -> None:
+    """Solo-discovered keys flip with asymmetric weights — same property
+    that test_rrf_weights_shift_ranking_toward_weighted_leg pins for RRF.
+    """
+    lists = [[("bm25_only", 1.0)], [("vec_only", 1.0)]]
+
+    equal = comb_sum_fusion(lists, weights=[1.0, 1.0])
+    assert equal["bm25_only"] == equal["vec_only"]
+
+    vec_heavy = comb_sum_fusion(lists, weights=[0.5, 1.0])
+    assert vec_heavy["vec_only"] > vec_heavy["bm25_only"]
+
+    bm25_heavy = comb_sum_fusion(lists, weights=[1.0, 0.5])
+    assert bm25_heavy["bm25_only"] > bm25_heavy["vec_only"]
+
+
+def test_comb_sum_handles_empty_leg() -> None:
+    """An empty leg contributes nothing instead of crashing. Real-world
+    case: vec_search may return [] when no embedder is wired.
+    """
+    fused = comb_sum_fusion([[("a", 1.0), ("b", 0.0)], []], weights=[1.0, 1.0])
+    assert fused == {"a": pytest.approx(1.0), "b": pytest.approx(0.0)}
+
+
+def test_comb_sum_single_score_leg_collapses_to_one() -> None:
+    """Degenerate leg where every entry has identical raw score (max ==
+    min) — must produce all 1.0 instead of dividing by zero.
+    """
+    leg = [("a", 5.0), ("b", 5.0)]
+    fused = comb_sum_fusion([leg], weights=[1.0])
+    assert fused == {"a": pytest.approx(1.0), "b": pytest.approx(1.0)}
+
+
+def test_comb_sum_weights_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError, match="length"):
+        comb_sum_fusion([[("a", 1.0)], [("b", 1.0)]], weights=[1.0])
+
+
+def test_comb_mnz_multiplies_by_leg_count() -> None:
+    """A key found by 2 legs scores 2 * CombSUM; a key found by 1 leg
+    scores 1 * CombSUM (i.e., plain CombSUM).
+    """
+    leg_a = [("shared", 1.0), ("solo_a", 0.0)]
+    leg_b = [("shared", 1.0), ("solo_b", 0.0)]
+    sum_ = comb_sum_fusion([leg_a, leg_b], weights=[1.0, 1.0])
+    mnz = comb_mnz_fusion([leg_a, leg_b], weights=[1.0, 1.0])
+    assert mnz["shared"] == pytest.approx(2 * sum_["shared"])
+    assert mnz["solo_a"] == pytest.approx(1 * sum_["solo_a"])
+    assert mnz["solo_b"] == pytest.approx(1 * sum_["solo_b"])
+
+
+def test_comb_mnz_single_leg_equals_comb_sum() -> None:
+    """One-leg case: leg_count == 1 for every key, so MNZ collapses to
+    CombSUM exactly.
+    """
+    leg = [("a", 3.0), ("b", 1.0), ("c", 0.0)]
+    sum_ = comb_sum_fusion([leg], weights=[1.0])
+    mnz = comb_mnz_fusion([leg], weights=[1.0])
+    assert mnz == sum_
+
+
+def test_comb_mnz_zero_weight_leg_excluded_from_count() -> None:
+    """Ablation guard: a leg with ``weights[i] == 0`` contributes zero
+    to ``CombSUM``; CombMNZ must not bump the consensus multiplier for
+    that leg either, or "turn off BM25" would still double-count
+    chunks BM25 retrieved.
+    """
+    leg_disabled = [("shared", 1.0)]
+    leg_active = [("shared", 1.0)]
+    mnz = comb_mnz_fusion([leg_disabled, leg_active], weights=[0.0, 1.0])
+    sum_ = comb_sum_fusion([leg_disabled, leg_active], weights=[0.0, 1.0])
+    # Both legs hit ``shared`` but BM25 leg is disabled → MNZ must
+    # collapse to CombSUM (multiplier == 1, not 2).
+    assert mnz == sum_
 
 
 # ---- apply_source_diversity_penalty (1.3.1) --------------------------------
@@ -635,6 +731,53 @@ async def test_hybrid_searcher_from_config_threads_alpha(tmp_path) -> None:
     # path of the parametric test above).
     alpha_paths = [h.path for h in hits if h.path == "sources/alpha.md"]
     assert len(alpha_paths) >= 2
+
+
+@pytest.mark.asyncio
+async def test_hybrid_searcher_combsum_dispatch(tmp_path) -> None:
+    """RetrievalConfig.fusion='combsum' → HybridSearcher.from_config →
+    search() exercises the score-bearing dispatch path. Asserts the attr
+    plumbs and the run produces hits without crashing on either fuser.
+    """
+    from dikw_core.config import RetrievalConfig
+
+    for mode in ("combsum", "combmnz"):
+        storage = SQLiteStorage(tmp_path / f"idx-{mode}.sqlite")
+        await storage.connect()
+        await storage.migrate()
+        embedder, version_id = await _populate_fixture_corpus(storage)
+
+        cfg = RetrievalConfig(fusion=mode)  # type: ignore[arg-type]
+        searcher = HybridSearcher.from_config(
+            storage, embedder, cfg, embedding_model="fake", text_version_id=version_id
+        )
+        assert searcher._fusion == mode
+        hits = await searcher.search("DIKW pyramid", limit=3)
+        await storage.close()
+        assert hits, f"fusion={mode} should still return hits on the corpus"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_searcher_rejects_unknown_fusion_mode(tmp_path) -> None:
+    """Direct ``HybridSearcher`` callers bypass pydantic's ``Literal``
+    validation. The dispatcher must reject typos at search() time
+    instead of silently running CombMNZ.
+    """
+    storage = SQLiteStorage(tmp_path / "idx-bogus.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    embedder, version_id = await _populate_fixture_corpus(storage)
+
+    searcher = HybridSearcher(
+        storage,
+        embedder,
+        embedding_model="fake",
+        text_version_id=version_id,
+        fusion="combsmm",  # typo — not a member of FusionMode  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="unknown fusion mode"):
+        await searcher.search("DIKW pyramid", limit=3)
+    await storage.close()
 
 
 # ---- cjk tokenizer integration ----------------------------------------------

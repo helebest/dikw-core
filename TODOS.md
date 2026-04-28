@@ -37,38 +37,6 @@ client-side, which duplicates chunker logic outside the engine.
 
 ---
 
-## T2 — Move `Hit` DTO to `schemas.py`
-
-**What:** Relocate `class Hit` from `src/dikw_core/info/search.py:82` to
-`src/dikw_core/schemas.py`. Pure rename PR.
-
-**Why:** CLAUDE.md mandates DTOs crossing the Storage Protocol live in
-`schemas.py`. Hit doesn't cross Storage — it crosses `info → api → mcp_server`.
-But it IS the public contract emitted to MCP clients via
-`doc.search` / `core.query`. Peers `FTSHit` / `VecHit` / `AssetVecHit` already
-live in schemas.py; Hit is the asymmetric outlier.
-
-**Pros:**
-- External consumers (MCP, future HTTP API) get a single schemas.py contract
-  surface
-- Consistent with FTSHit/VecHit/AssetVecHit siblings
-- Makes the "stable external API" file easy to find
-
-**Cons:**
-- Creates an import-cycle risk if schemas.py ends up importing info/
-  internals; need to verify AssetRecord etc. references are already clean
-  (spot check: yes, schemas.py already has all needed types)
-
-**Context for pickup:**
-- Hit currently defined at `info/search.py:82-91`
-- Used by `api.py` (return type of `HybridSearcher.search`), `mcp_server.py`
-  (serialized via `model_dump()`), tests
-- Pure move + adjust import paths; no behavior change
-
-**Depends on / blocked by:** None. Can land any time.
-
----
-
 ## T3 — chunk-level nDCG@k / recall@k in eval runner
 
 **What:** Phase 2.3 of the chunk-level retrieval plan computes only
@@ -132,6 +100,7 @@ it or the HTTP API lands. Observational.
 
 ## Closed
 
+- **T2** — Move `Hit` DTO to `schemas.py`. Done in PR #26 (`af202d8`).
 - **T5** — multimodal `q_vec` leaking into `chunks_vec.vec_search`. Fixed
   in PR #27 (PR-A): per-version `vec_chunks_v<id>` tables landed for the
   text channel; `HybridSearcher` now computes `q_vec_text` and `q_vec_mm`

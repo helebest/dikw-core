@@ -6,7 +6,7 @@
 #
 # tests/test_mvp_e2e.py copies this file verbatim to the temp wiki as dikw.yml.
 provider:
-  llm: anthropic
+  llm: anthropic_compat
   llm_model: MiniMax-M2.7
   llm_base_url: https://api.minimaxi.com/anthropic
   embedding: openai_compat

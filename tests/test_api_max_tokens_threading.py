@@ -69,7 +69,7 @@ def _write_wiki(
     (wiki / "dikw.yml").write_text(
         f"""\
 provider:
-  llm: anthropic
+  llm: anthropic_compat
   llm_model: stub-model
   embedding: openai_compat
   embedding_model: stub-embed

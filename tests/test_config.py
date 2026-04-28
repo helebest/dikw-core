@@ -38,7 +38,7 @@ def test_load_config_discriminated_storage(tmp_path: Path) -> None:
     path.write_text(
         """
 provider:
-  llm: anthropic
+  llm: anthropic_compat
   llm_model: claude-sonnet-4-6
   embedding: openai_compat
   embedding_model: text-embedding-3-small
@@ -220,7 +220,7 @@ def test_dikw_config_retrieval_block_omitted_fills_defaults(tmp_path: Path) -> N
     path.write_text(
         """
 provider:
-  llm: anthropic
+  llm: anthropic_compat
   embedding_dim: 1536
   embedding_revision: ''
   embedding_normalize: true

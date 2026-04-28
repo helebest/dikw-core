@@ -211,7 +211,7 @@ async def test_api_ingest_honours_embedding_batch_size(
     api.init_wiki(wiki, description="batch-size smoke test")
     (wiki / "dikw.yml").write_text(
         "provider:\n"
-        "  llm: anthropic\n"
+        "  llm: anthropic_compat\n"
         "  embedding: openai_compat\n"
         "  embedding_model: test-embed\n"
         "  embedding_base_url: https://fake.example/v1\n"

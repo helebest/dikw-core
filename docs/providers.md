@@ -7,16 +7,18 @@ you don't need to touch any.
 ## The design seam
 
 `dikw-core` ships with two protocol-level providers, both pluggable via
-`dikw.yml` alone:
+`dikw.yml` alone. The `llm` field names the **protocol** (which SDK
+to speak), not the vendor — vendor is whatever `llm_base_url` points at:
 
-- **`anthropic`** — uses the official `anthropic` async SDK. `base_url`
-  can retarget it at any Anthropic-protocol-compatible endpoint (e.g.,
-  MiniMax). Applies `cache_control: ephemeral` on the system prompt, so
-  repeated synth / query / distill within the 5-minute TTL hit the
-  prompt cache.
+- **`anthropic_compat`** — uses the official `anthropic` async SDK.
+  `llm_base_url` retargets it at any Anthropic-protocol-compatible
+  endpoint (e.g., MiniMax's `https://api.minimaxi.com/anthropic`).
+  Applies `cache_control: ephemeral` on the system prompt, so repeated
+  synth / query / distill within the 5-minute TTL hit the prompt cache.
+  Leave `llm_base_url` null to talk to api.anthropic.com directly.
 - **`openai_compat`** — uses the `openai` async SDK against any
-  `base_url` that speaks the OpenAI HTTP surface. Covers OpenAI, Azure,
-  Ollama, vLLM, TEI, DeepSeek, GLM, Gemini (OpenAI-compat mode),
+  `llm_base_url` that speaks the OpenAI HTTP surface. Covers OpenAI,
+  Azure, Ollama, vLLM, TEI, DeepSeek, GLM, Gemini (OpenAI-compat mode),
   Gitee AI, and most others.
 
 Every vendor falls under one of these two. **To add a new vendor you
@@ -30,8 +32,8 @@ cross-check the vendor's own docs.
 | Vendor | `llm` | `llm_base_url` | `embedding` | `embedding_base_url` | LLM key env | Embed key env |
 |---|---|---|---|---|---|---|
 | **OpenAI** (default) | `openai_compat` | `https://api.openai.com/v1` | `openai_compat` | same | `OPENAI_API_KEY` | `DIKW_EMBEDDING_API_KEY` |
-| **Anthropic** | `anthropic` | leave `null` | *(no embed — pair elsewhere)* | — | `ANTHROPIC_API_KEY` | — |
-| **MiniMax** | `anthropic` | `https://api.minimaxi.com/anthropic` | *(no embed — pair elsewhere)* | — | `ANTHROPIC_API_KEY` | — |
+| **Anthropic** | `anthropic_compat` | leave `null` | *(no embed — pair elsewhere)* | — | `ANTHROPIC_API_KEY` | — |
+| **MiniMax** | `anthropic_compat` | `https://api.minimaxi.com/anthropic` | *(no embed — pair elsewhere)* | — | `ANTHROPIC_API_KEY` | — |
 | **GLM / 智谱** | `openai_compat` | `https://open.bigmodel.cn/api/paas/v4` | `openai_compat` | same | `OPENAI_API_KEY` | `DIKW_EMBEDDING_API_KEY` |
 | **Gemini** | `openai_compat` | `https://generativelanguage.googleapis.com/v1beta/openai/` | `openai_compat` | same | `OPENAI_API_KEY` | `DIKW_EMBEDDING_API_KEY` |
 | **DeepSeek** | `openai_compat` | `https://api.deepseek.com/v1` | *(no embed — pair elsewhere)* | — | `OPENAI_API_KEY` | — |
@@ -111,7 +113,7 @@ first failure *but is idempotent via content hash*, so re-running
 resumes without double-embedding unchanged docs. For production
 automation, wrap the call in your own retry layer (e.g., `tenacity`).
 
-### 4. Prompt caching only on the `anthropic` leg
+### 4. Prompt caching only on the `anthropic_compat` leg
 
 The `AnthropicLLM` provider passes `cache_control: {"type": "ephemeral"}`
 on the system prompt, cutting repeat-call input-token cost by ~90%
@@ -380,7 +382,7 @@ your eval gates are tight enough that single-percent nDCG matters.
 
 ```yaml
 provider:
-  llm: anthropic                       # or whichever LLM you've configured
+  llm: anthropic_compat                # or whichever protocol you've configured
   embedding: openai_compat             # text leg — single-string input shape
   embedding_base_url: https://ai.gitee.com/v1
   embedding_model: Qwen3-Embedding-0.6B

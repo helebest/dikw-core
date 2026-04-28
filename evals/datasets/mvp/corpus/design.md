@@ -214,7 +214,7 @@ my-wiki/
 `dikw.yml` example:
 ```yaml
 provider:
-  llm: anthropic           # or: openai_compat
+  llm: anthropic_compat    # or: openai_compat (both are protocol names)
   llm_model: claude-sonnet-4-6
   embedding: openai_compat
   embedding_model: text-embedding-3-small

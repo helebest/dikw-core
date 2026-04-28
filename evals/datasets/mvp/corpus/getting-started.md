@@ -111,7 +111,7 @@ Edit `dikw.yml` to swap LLM or embedding providers without changing code:
 
 ```yaml
 provider:
-  llm: openai_compat           # anthropic | openai_compat
+  llm: openai_compat           # anthropic_compat | openai_compat (protocol names)
   llm_model: gpt-4.1-mini
   llm_base_url: http://localhost:11434/v1   # Ollama, vLLM, Azure, …
   embedding: openai_compat

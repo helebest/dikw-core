@@ -423,14 +423,12 @@ def _dump_raw_ranked(
 ) -> None:
     """Append per-mode ranked lists as JSONL.
 
-    One row per (query, mode). Positive queries carry ``expect_any``;
+    One row per (query, mode). Positives carry ``expect_any``;
     negatives carry ``expect_none: true`` with an empty ``expect_any``.
-    A consumer groups by ``q_id`` — the dataset-internal index of each
-    query — to get each query's bm25/vector/hybrid rankings side-by-
-    side. ``q_id`` is keyed independently for positives and negatives
-    because the reader filters out negatives anyway, and stable
-    enumeration matches the order ``spec.queries`` was iterated to
-    produce these rows.
+    Consumers join on ``q_id`` to get each query's bm25/vector/hybrid
+    rankings side-by-side. Positive and negative ``q_id``s are
+    independent namespaces — any joiner must filter by ``expect_none``
+    before keying.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:

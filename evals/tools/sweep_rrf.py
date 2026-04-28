@@ -28,7 +28,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 # Local import — we call into the production RRF so the sweep uses the
 # same code path production does.
@@ -75,18 +75,22 @@ class SweepResult:
 def load_raw_dump(path: Path) -> dict[str, list[QueryLegs]]:
     """Parse a ``--dump-raw`` JSONL file into per-dataset query legs.
 
-    Drops negatives (expect_none rows) — they have no positive relevance
-    set to score against, so they can't drive metric optimisation.
-
-    Keyed by ``q_id`` (dataset-internal query index) rather than the
-    raw ``q`` text, so duplicate query texts don't silently overwrite
-    each other. Reader requires the new field; old dumps without
-    ``q_id`` raise ``KeyError`` — re-dump rather than try to be clever.
+    Drops negatives (no positive relevance set to score against). Keys
+    by ``q_id`` so duplicate query texts don't collide. No back-compat
+    for ``q_id``-less dumps — re-dump.
     """
-    per_dataset: dict[str, dict[int, dict[str, Any]]] = defaultdict(
-        lambda: defaultdict(
-            lambda: {"bm25": [], "vector": [], "expect_any": [], "q": ""}
-        )
+
+    class _Bundle(TypedDict):
+        bm25: list[str]
+        vector: list[str]
+        expect_any: list[str]
+        q: str
+
+    def _new_bundle() -> _Bundle:
+        return {"bm25": [], "vector": [], "expect_any": [], "q": ""}
+
+    per_dataset: dict[str, dict[int, _Bundle]] = defaultdict(
+        lambda: defaultdict(_new_bundle)
     )
 
     with path.open("r", encoding="utf-8") as f:
@@ -100,21 +104,20 @@ def load_raw_dump(path: Path) -> dict[str, list[QueryLegs]]:
             ds = row["dataset"]
             qid = row["q_id"]
             mode = row["mode"]
+            # Hybrid rankings can't drive sweep re-fusion (we re-fuse the legs).
             if mode == "hybrid":
-                # hybrid rankings aren't useful for re-fusion — we re-fuse
-                # from bm25 + vector legs directly. Skip silently.
                 continue
-            per_dataset[ds][qid][mode] = list(row["ranked"])
-            # expect_any + q text are stable across modes; last writer wins.
-            per_dataset[ds][qid]["expect_any"] = list(row["expect_any"])
-            per_dataset[ds][qid]["q"] = row["q"]
+            bundle = per_dataset[ds][qid]
+            if mode in ("bm25", "vector"):
+                bundle[mode] = list(row["ranked"])
+            bundle["expect_any"] = list(row["expect_any"])
+            bundle["q"] = row["q"]
 
     result: dict[str, list[QueryLegs]] = {}
     for ds, qmap in per_dataset.items():
         legs: list[QueryLegs] = []
         for qid in sorted(qmap):
             bundle = qmap[qid]
-            # Skip queries that are missing both legs — can't fuse them.
             if not bundle["bm25"] and not bundle["vector"]:
                 continue
             legs.append(

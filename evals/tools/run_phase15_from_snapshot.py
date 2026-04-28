@@ -144,17 +144,11 @@ async def replay(wiki: Path, dataset_name_or_path: str, mode: str) -> int:
     needs_embeddings = any(m in ("vector", "hybrid") for m in modes)
 
     # Mirror api.query(): pin queries to the snapshot's active text
-    # embed_versions row so query vectors always land in the same
-    # space as the indexed chunks, even when dikw.yml has drifted
-    # (different embedding_model / dim) since ingest.
-    if needs_embeddings:
-        text_version_id, text_query_model, text_query_dim = await resolve_active_text_version(
-            storage, default_model=cfg.provider.embedding_model
-        )
-    else:
-        text_version_id = None
-        text_query_model = cfg.provider.embedding_model
-        text_query_dim = None
+    # embed_versions row so query vectors land in the same space as
+    # indexed chunks even when dikw.yml has drifted since ingest.
+    text_version_id, text_query_model, text_query_dim = await resolve_active_text_version(
+        storage, default_model=cfg.provider.embedding_model
+    )
 
     embedder: EmbeddingProvider | None = None
     if needs_embeddings:

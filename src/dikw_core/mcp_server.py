@@ -34,22 +34,14 @@ from .storage import build_storage
 async def _doc_read(arguments: dict[str, Any]) -> str:
     """Resolve a ``doc.read`` request to text.
 
-    Module-level so tests can drive it without spinning up the MCP
-    transport. ``chunk_id`` wins over ``path`` when both are given —
-    keeps the call deterministic without leaning on JSON-Schema oneOf.
+    ``chunk_id`` takes precedence when both are given — avoids leaning
+    on JSON-Schema ``oneOf`` for a one-line precedence rule.
     """
     wiki_path = arguments.get("wiki_path", ".")
     chunk_id = arguments.get("chunk_id")
     doc_path = arguments.get("path")
-    if chunk_id is None and doc_path is None:
-        raise ValueError("doc.read: provide either 'path' or 'chunk_id'")
     if chunk_id is not None:
-        cfg, root = api.load_wiki(wiki_path)
-        storage = build_storage(
-            cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
-        )
-        await storage.connect()
-        await storage.migrate()
+        _cfg, _root, storage = await api._with_storage(wiki_path)
         try:
             chunk = await storage.get_chunk(int(chunk_id))
         finally:
@@ -57,7 +49,8 @@ async def _doc_read(arguments: dict[str, Any]) -> str:
         if chunk is None:
             raise ValueError(f"doc.read: chunk_id {chunk_id} not found")
         return chunk.text
-    assert doc_path is not None  # narrowed by the chunk_id-or-path check above
+    if doc_path is None:
+        raise ValueError("doc.read: provide either 'path' or 'chunk_id'")
     _cfg, root = api.load_wiki(wiki_path)
     abs_path = (root / doc_path).resolve()
     if not abs_path.is_file():

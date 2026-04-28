@@ -1,22 +1,22 @@
 """Coverage for ``evals/tools/*`` recovery scripts.
 
-The Phase 1.5 replay tool's active-version pinning is the bit most
-likely to silently drift if ``api.query()`` ever changes its embedding-
-space contract. A unit test on the helper guarantees the snapshot
-replay path stays in sync.
+The Phase 1.5 replay tool's active-version pinning silently drifts if
+``api.query()`` ever changes its embedding-space contract; this test
+is the canary.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
+from dikw_core.schemas import EmbeddingVersion
 from dikw_core.storage.base import NotSupported, Storage
 
-# evals/ isn't on sys.path by default — the script is a CLI entry, not
-# a package. Add it so we can import the helper under test.
+# evals/tools is a CLI dir, not a package — add to sys.path.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TOOLS_DIR = _REPO_ROOT / "evals" / "tools"
 if str(_TOOLS_DIR) not in sys.path:
@@ -81,13 +81,11 @@ async def test_resolve_active_version_falls_back_to_cfg_when_none(
 
 
 class _NotSupportedStorage:
-    """Fake storage that raises ``NotSupported`` on the version read.
+    """Mirrors filesystem-style backends that don't implement versioning."""
 
-    Mirrors what filesystem-style backends do when they don't implement
-    embed versioning. Only the one method the helper calls is needed.
-    """
-
-    async def get_active_embed_version(self, *, modality: str) -> object:
+    async def get_active_embed_version(
+        self, *, modality: Literal["text", "multimodal"]
+    ) -> EmbeddingVersion | None:
         raise NotSupported(f"embed versions not supported (modality={modality})")
 
 

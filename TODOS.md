@@ -1,39 +1,8 @@
 # TODOS
 
 Deferred items captured during reviews. Each has enough context to be picked up
-in 3 months without needing to re-litigate the reasoning.
-
----
-
-## T1 — `doc.read(chunk_id=...)` MCP tool extension
-
-**What:** Extend `mcp_server.py::doc.read` to accept an optional `chunk_id: int`
-param; when present, return just that chunk's text (with optional surrounding
-context) instead of the whole file.
-
-**Why:** Phase 1 (chunk-level retrieval) makes `Hit.chunk_id` meaningful in
-the MCP `doc.search` JSON payload. But MCP clients have no way to fetch a
-specific chunk's context — they must pull the whole doc and re-chunk
-client-side, which duplicates chunker logic outside the engine.
-
-**Pros:**
-- Closes the "producer says chunk_id matters; consumer has no chunk-level read" gap
-- Keeps chunker logic single-sourced inside dikw-core
-- Enables LLM clients to read just-enough context (token budget friendly)
-
-**Cons:**
-- New MCP surface — schema evolution contract
-- Returning "chunk + N surrounding chunks" needs a policy decision (fixed N,
-  token budget, same doc only?)
-
-**Context for pickup:**
-- Phase 1 of the chunk-level retrieval plan lands `chunk_id` as non-optional
-  on `Hit`; this TODO closes the consumer side
-- Existing `mcp_server.py::doc.read` at :281-289 takes only `path` and
-  `wiki_path`; extending with `chunk_id` is additive
-- `Storage.get_chunk(chunk_id)` already exists (`storage/base.py:89`)
-
-**Depends on / blocked by:** Phase 1 of chunk-level retrieval plan.
+in 3 months without needing to re-litigate the reasoning. Closed items live in
+git history, not here.
 
 ---
 
@@ -95,19 +64,3 @@ they asked for top-5.
 
 **Depends on / blocked by:** None, but don't address until a real user hits
 it or the HTTP API lands. Observational.
-
----
-
-## Closed
-
-- **T2** — Move `Hit` DTO to `schemas.py`. Done in PR #26 (`af202d8`).
-- **T5** — multimodal `q_vec` leaking into `chunks_vec.vec_search`. Fixed
-  in PR #27 (PR-A): per-version `vec_chunks_v<id>` tables landed for the
-  text channel; `HybridSearcher` now computes `q_vec_text` and `q_vec_mm`
-  independently against their own `version_id`s. The dim-mismatch fallback
-  at the storage boundary is gone.
-- **T6** — `embed_versions` UNIQUE missing `modality`. Fixed in PR #27
-  (PR-A): UNIQUE on both backends extends to
-  `(provider, model, revision, dim, normalize, distance, modality)` and
-  `upsert_embed_version`'s match key matches.
-

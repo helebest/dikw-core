@@ -14,9 +14,14 @@ v1 has two operating modes:
   downstream consumers (CLI display, MCP schema, LLM synthesis) can
   render or cite them.
 
-RRF is the right fusion choice — BM25 negative-log scores, cosine
-distances on text vectors, and cosine distances on image vectors don't
-normalize cleanly against each other, but their rank orderings do.
+Fusion algorithm is configurable via ``RetrievalConfig.fusion``: ``rrf``
+(default, rank-only), ``combsum`` (per-leg min-max → weighted sum), or
+``combmnz`` (CombSUM * number of legs that retrieved each key). RRF is
+the safe default because BM25 negative-log scores and cosine distances
+don't normalize cleanly against each other, but rank ordering does;
+CombSUM/CombMNZ trade that safety for magnitude preservation when one
+leg dominates or both legs are close at the head — see
+``evals/BASELINES.md`` for the empirical motivation.
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ class RetrievalConfigLike(Protocol):
     rrf_k: int
     bm25_weight: float
     vector_weight: float
+    fusion: FusionMode
     cjk_tokenizer: CjkTokenizer
     same_doc_penalty_alpha: float
 
@@ -148,6 +154,94 @@ def reciprocal_rank_fusion[K: Hashable](
     return scores
 
 
+FusionMode = Literal["rrf", "combsum", "combmnz"]
+
+
+def _normalise_per_leg[K: Hashable](
+    scored: list[tuple[K, float]],
+) -> dict[K, float]:
+    """Per-leg min-max → ``[0, 1]``. ``max == min`` collapses to all 1.0
+    (degenerate single-score leg) instead of dividing by zero.
+
+    Duplicate keys within one leg keep their highest score. Empty input
+    returns an empty dict.
+    """
+    if not scored:
+        return {}
+    best: dict[K, float] = {}
+    for key, score in scored:
+        prev = best.get(key)
+        if prev is None or score > prev:
+            best[key] = score
+    lo = min(best.values())
+    hi = max(best.values())
+    span = hi - lo
+    if span == 0.0:
+        return dict.fromkeys(best, 1.0)
+    return {k: (s - lo) / span for k, s in best.items()}
+
+
+def comb_sum_fusion[K: Hashable](
+    scored_lists: list[list[tuple[K, float]]],
+    *,
+    weights: list[float] | None = None,
+) -> dict[K, float]:
+    """CombSUM: per-leg min-max normalise → weighted sum across legs.
+
+    Each leg supplies ``(key, score_higher_is_better)`` pairs. Score
+    scales differ across legs (BM25 unbounded vs cosine ``[0, 2]``), so
+    each leg is normalised independently before summing — every leg
+    contributes at most ``weights[i]`` to a key's fused score.
+
+    Compared to RRF (rank-only), CombSUM preserves magnitude: a clear
+    leader by raw score keeps its margin, where RRF would collapse it
+    to ``1/(k+1)``. Useful when one leg is much stronger than the
+    others or when both legs are close at the head and rank-based
+    fusion has nothing to discriminate (CMTEB-0.6B observation).
+    """
+    if weights is None:
+        weights = [1.0] * len(scored_lists)
+    if len(weights) != len(scored_lists):
+        raise ValueError(
+            f"weights length {len(weights)} must match scored_lists length "
+            f"{len(scored_lists)}"
+        )
+    fused: dict[K, float] = {}
+    for leg, w in zip(scored_lists, weights, strict=True):
+        for key, score in _normalise_per_leg(leg).items():
+            fused[key] = fused.get(key, 0.0) + w * score
+    return fused
+
+
+def comb_mnz_fusion[K: Hashable](
+    scored_lists: list[list[tuple[K, float]]],
+    *,
+    weights: list[float] | None = None,
+) -> dict[K, float]:
+    """CombMNZ: ``CombSUM(key) * (number of legs that retrieved key)``.
+
+    Boosts consensus across legs on top of CombSUM's magnitude
+    preservation. A key found by all three legs scores ``3 * CombSUM``;
+    a key found by only one scores ``1 * CombSUM`` (i.e., plain
+    CombSUM). Single-leg scenarios collapse to CombSUM exactly.
+    """
+    if weights is None:
+        weights = [1.0] * len(scored_lists)
+    if len(weights) != len(scored_lists):
+        raise ValueError(
+            f"weights length {len(weights)} must match scored_lists length "
+            f"{len(scored_lists)}"
+        )
+    fused: dict[K, float] = {}
+    leg_count: dict[K, int] = {}
+    for leg, w in zip(scored_lists, weights, strict=True):
+        normalised = _normalise_per_leg(leg)
+        for key, score in normalised.items():
+            fused[key] = fused.get(key, 0.0) + w * score
+            leg_count[key] = leg_count.get(key, 0) + 1
+    return {k: s * leg_count[k] for k, s in fused.items()}
+
+
 class HybridSearcher:
     """Composes FTS + vector search(es) on top of a ``Storage`` backend.
 
@@ -167,6 +261,7 @@ class HybridSearcher:
         rrf_k: int = RRF_K,
         bm25_weight: float = 1.0,
         vector_weight: float = 1.0,
+        fusion: FusionMode = "rrf",
         cjk_tokenizer: CjkTokenizer = "none",
         same_doc_penalty_alpha: float = 0.3,
     ) -> None:
@@ -182,6 +277,7 @@ class HybridSearcher:
         self._rrf_k = rrf_k
         self._bm25_weight = bm25_weight
         self._vector_weight = vector_weight
+        self._fusion: FusionMode = fusion
         # Must match the storage adapter's ingest-time tokenizer; a
         # mismatch silently drops CJK hits.
         self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
@@ -213,6 +309,7 @@ class HybridSearcher:
             rrf_k=cfg.rrf_k,
             bm25_weight=cfg.bm25_weight,
             vector_weight=cfg.vector_weight,
+            fusion=cfg.fusion,
             cjk_tokenizer=cfg.cjk_tokenizer,
             same_doc_penalty_alpha=cfg.same_doc_penalty_alpha,
         )
@@ -298,13 +395,16 @@ class HybridSearcher:
         # Asset hits promote the chunks that reference them. Each promoted
         # chunk enters the fusion pool directly — chunk-level fusion means
         # multiple chunks from the same asset's parent doc all compete on
-        # their own merit.
+        # their own merit. The first asset that surfaces a chunk wins its
+        # rank slot; ``asset_dist_by_chunk`` independently tracks the best
+        # (smallest) distance across all assets that reach that chunk so
+        # score-based fusion sees the strongest cross-modal signal.
         asset_chunk_ranked: list[int] = []
         asset_chunk_doc_ids: dict[int, str] = {}
+        asset_dist_by_chunk: dict[int, float] = {}
         if asset_hits:
-            asset_ids_ordered = [h.asset_id for h in asset_hits]
             chunks_by_asset = await self._storage.chunks_referencing_assets(
-                asset_ids_ordered
+                [h.asset_id for h in asset_hits]
             )
             promoted_chunk_ids = list(
                 {cid for cids in chunks_by_asset.values() for cid in cids}
@@ -314,33 +414,60 @@ class HybridSearcher:
                 for c in await self._storage.get_chunks(promoted_chunk_ids)
                 if c.chunk_id is not None
             }
-            seen_chunks: set[int] = set()
-            for asset_id in asset_ids_ordered:
-                for cid in chunks_by_asset.get(asset_id, []):
+            for h in asset_hits:
+                for cid in chunks_by_asset.get(h.asset_id, []):
                     chunk = chunk_by_id.get(cid)
-                    if chunk is None or cid in seen_chunks:
+                    if chunk is None:
+                        continue
+                    prev = asset_dist_by_chunk.get(cid)
+                    if prev is None or h.distance < prev:
+                        asset_dist_by_chunk[cid] = h.distance
+                    if cid in asset_chunk_doc_ids:
                         continue
                     asset_chunk_ranked.append(cid)
                     asset_chunk_doc_ids[cid] = chunk.doc_id
-                    seen_chunks.add(cid)
 
         # Build chunk-level rank lists. FTSHit.chunk_id is `int | None` in
         # the schema (legacy compat); every shipped adapter populates it,
-        # but defensively skip any None to keep RRF keys homogeneous.
+        # but defensively skip any None to keep fusion keys homogeneous.
         fts_ranked = [h.chunk_id for h in fts_hits if h.chunk_id is not None]
         vec_ranked = [h.chunk_id for h in vec_hits]
         # Asset channel rides the vector weight — same family of signal
         # (semantic similarity in the multimodal space), distinct only in
         # what's embedded (chunk text vs asset bytes).
-        fused = reciprocal_rank_fusion(
-            [fts_ranked, vec_ranked, asset_chunk_ranked],
-            k=self._rrf_k,
-            weights=[
-                self._bm25_weight,
-                self._vector_weight,
-                self._vector_weight,
-            ],
-        )
+        fusion_weights = [
+            self._bm25_weight,
+            self._vector_weight,
+            self._vector_weight,
+        ]
+        if self._fusion == "rrf":
+            fused = reciprocal_rank_fusion(
+                [fts_ranked, vec_ranked, asset_chunk_ranked],
+                k=self._rrf_k,
+                weights=fusion_weights,
+            )
+        else:
+            # Score-bearing tuples for CombSUM / CombMNZ. ``FTSHit.score``
+            # is already higher-is-better (negated BM25); cosine distances
+            # flip via ``-distance`` so per-leg min-max sees a consistent
+            # direction. Ties within a leg keep the first occurrence (see
+            # ``_normalise_per_leg``).
+            fts_scored: list[tuple[int, float]] = [
+                (h.chunk_id, h.score) for h in fts_hits if h.chunk_id is not None
+            ]
+            vec_scored: list[tuple[int, float]] = [
+                (h.chunk_id, -h.distance) for h in vec_hits
+            ]
+            asset_scored: list[tuple[int, float]] = [
+                (cid, -asset_dist_by_chunk[cid]) for cid in asset_chunk_ranked
+            ]
+            fuser = (
+                comb_sum_fusion if self._fusion == "combsum" else comb_mnz_fusion
+            )
+            fused = fuser(
+                [fts_scored, vec_scored, asset_scored],
+                weights=fusion_weights,
+            )
 
         # Per-chunk doc_id lookup, sourced from every leg that knows it.
         # Vec/asset legs always carry doc_id; FTS hits do too. The first

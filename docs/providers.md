@@ -254,6 +254,43 @@ retrieval:
 No code change needed — `api.query` and the MCP `doc.search` tool pick
 up the block on next call.
 
+### Score-normalised fusion alternatives
+
+`retrieval.fusion` selects the algorithm that combines BM25 + vector +
+asset legs. Three options ship:
+
+- `rrf` (default) — Reciprocal Rank Fusion. Rank-only, robust against
+  heterogeneous score scales (BM25 unbounded vs cosine `[0, 2]`). The
+  safe choice and what every existing baseline in `evals/BASELINES.md`
+  was measured under.
+- `combsum` — per-leg min-max normalises raw scores to `[0, 1]` then
+  weighted-sums across legs. Preserves **magnitude**: a leg's clear
+  leader keeps its margin where RRF would collapse it to `1/(k+1)`.
+  Reach for it when one leg dominates (vector-strong corpora) or both
+  legs are close at the head and rank-based fusion has nothing to
+  discriminate (CMTEB-0.6B observation: hybrid `-0.003` vs vector
+  nDCG@10 under RRF).
+- `combmnz` — `CombSUM × (number of legs that retrieved each key)`.
+  Boosts cross-leg consensus on top of CombSUM's magnitude
+  preservation. Single-leg corpora collapse to plain CombSUM.
+
+```yaml
+retrieval:
+  fusion: combsum     # default: rrf
+  bm25_weight: 0.3    # weights still apply; per-leg cap on contribution
+  vector_weight: 1.5
+```
+
+The same `bm25_weight` / `vector_weight` knobs cap the per-leg
+contribution under all three modes (CombSUM/CombMNZ multiply the
+normalised `[0, 1]` score by the weight; RRF multiplies the rank
+reciprocal). `rrf_k` is RRF-only and is ignored under
+`combsum` / `combmnz`. Today the offline sweep tool
+(`evals/tools/sweep_rrf.py`) only re-fuses RRF — switching fusion mode
+requires editing `dikw.yml` and replaying through
+`evals/tools/run_phase15_from_snapshot.py` (no API spend, the
+embeddings stay cached).
+
 For a Chinese benchmark, repeat with `convert_cmteb.py` against a
 HuggingFace download — same workflow, see
 [`evals/README.md`](../evals/README.md#public-benchmarks) for the

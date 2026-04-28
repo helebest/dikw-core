@@ -28,6 +28,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # Local import — we call into the production RRF so the sweep uses the
 # same code path production does.
@@ -76,9 +77,16 @@ def load_raw_dump(path: Path) -> dict[str, list[QueryLegs]]:
 
     Drops negatives (expect_none rows) — they have no positive relevance
     set to score against, so they can't drive metric optimisation.
+
+    Keyed by ``q_id`` (dataset-internal query index) rather than the
+    raw ``q`` text, so duplicate query texts don't silently overwrite
+    each other. Reader requires the new field; old dumps without
+    ``q_id`` raise ``KeyError`` — re-dump rather than try to be clever.
     """
-    per_dataset: dict[str, dict[str, dict[str, list[str]]]] = defaultdict(
-        lambda: defaultdict(lambda: {"bm25": [], "vector": [], "expect_any": []})
+    per_dataset: dict[str, dict[int, dict[str, Any]]] = defaultdict(
+        lambda: defaultdict(
+            lambda: {"bm25": [], "vector": [], "expect_any": [], "q": ""}
+        )
     )
 
     with path.open("r", encoding="utf-8") as f:
@@ -90,27 +98,28 @@ def load_raw_dump(path: Path) -> dict[str, list[QueryLegs]]:
             if row.get("expect_none"):
                 continue
             ds = row["dataset"]
-            q = row["q"]
+            qid = row["q_id"]
             mode = row["mode"]
             if mode == "hybrid":
                 # hybrid rankings aren't useful for re-fusion — we re-fuse
                 # from bm25 + vector legs directly. Skip silently.
                 continue
-            per_dataset[ds][q][mode] = list(row["ranked"])
-            # expect_any is the same across modes for a given query; last
-            # writer wins is fine.
-            per_dataset[ds][q]["expect_any"] = list(row["expect_any"])
+            per_dataset[ds][qid][mode] = list(row["ranked"])
+            # expect_any + q text are stable across modes; last writer wins.
+            per_dataset[ds][qid]["expect_any"] = list(row["expect_any"])
+            per_dataset[ds][qid]["q"] = row["q"]
 
     result: dict[str, list[QueryLegs]] = {}
     for ds, qmap in per_dataset.items():
         legs: list[QueryLegs] = []
-        for q, bundle in qmap.items():
-            # Skip queries that are missing a leg — can't fuse them.
+        for qid in sorted(qmap):
+            bundle = qmap[qid]
+            # Skip queries that are missing both legs — can't fuse them.
             if not bundle["bm25"] and not bundle["vector"]:
                 continue
             legs.append(
                 QueryLegs(
-                    q=q,
+                    q=bundle["q"],
                     expect_any=list(bundle["expect_any"]),
                     bm25_ranked=list(bundle["bm25"]),
                     vector_ranked=list(bundle["vector"]),

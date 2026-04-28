@@ -345,6 +345,38 @@ async def test_run_eval_dump_raw_writes_per_mode_jsonl(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_eval_dump_raw_assigns_q_id_for_stable_keying(
+    tmp_path: Path,
+) -> None:
+    """``q_id`` indexes positives and negatives independently, so the
+    sweep tool can join (mode, q_id) rows without the raw ``q`` text
+    needing to be unique. Two queries with byte-identical ``q`` text
+    must end up at distinct ``q_id``s and survive round-trip.
+    """
+    import json
+
+    ds = _write_dataset(
+        tmp_path,
+        queries=[
+            ("foo and bar topics", ["alpha"]),
+            ("foo and bar topics", ["beta"]),  # duplicate text, different gold
+        ],
+    )
+    spec = load_dataset(ds)
+    dump = tmp_path / "raw.jsonl"
+    await run_eval(spec, mode="all", raw_dump_path=dump)
+
+    rows = [json.loads(line) for line in dump.read_text(encoding="utf-8").splitlines()]
+    bm25_rows = [r for r in rows if r["mode"] == "bm25"]
+    assert len(bm25_rows) == 2
+    qids = sorted(r["q_id"] for r in bm25_rows)
+    assert qids == [0, 1]
+    by_qid = {r["q_id"]: r for r in bm25_rows}
+    assert by_qid[0]["expect_any"] == ["alpha"]
+    assert by_qid[1]["expect_any"] == ["beta"]
+
+
+@pytest.mark.asyncio
 async def test_run_eval_dump_raw_single_mode_is_noop(tmp_path: Path) -> None:
     """Single-mode runs can't feed the sweep tool (needs both legs) — the
     runner silently skips writing rather than producing a half-populated

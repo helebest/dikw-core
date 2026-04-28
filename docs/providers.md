@@ -375,16 +375,20 @@ assets:
 ```
 
 The text leg and the multimodal leg write **separate** vec tables
-(`chunks_vec` / `vec_assets_v<n>`); their dims do not have to match.
-Both legs read `DIKW_EMBEDDING_API_KEY` — never `OPENAI_API_KEY`. If LLM
-and embedding target different vendors, set them as distinct env vars.
+(`vec_chunks_v<n>` / `vec_assets_v<n>`, one per `embed_versions` row);
+their dims do not have to match. Both legs read
+`DIKW_EMBEDDING_API_KEY` — never `OPENAI_API_KEY`. If LLM and
+embedding target different vendors, set them as distinct env vars.
 
-**Note on chunk routing**: when `assets.multimodal` is configured, the
-ingest pipeline routes both chunks AND assets through the multimodal
-embedder (so they share one vector space for cross-modal retrieval).
-The `embedding_model` / `embedding_dim` keys above only matter
-for legacy text-only mode (no `assets.multimodal` block) — they're
-inert when the multimodal block is present.
+**Note on chunk routing**: text and multimodal are strictly separate
+channels. Chunk text always flows through the **text** embedder
+(`provider.embedding_model`) into `vec_chunks_v<text_version_id>`,
+even when `assets.multimodal` is configured. The multimodal embedder
+embeds **assets only** (image bytes) into
+`vec_assets_v<mm_version_id>`. Cross-modal retrieval works because
+`info/search.HybridSearcher` runs both legs and asset-vec hits
+promote the chunks that reference matching images via
+`chunk_asset_refs` — the two vector spaces don't need to coincide.
 
 ### Verifying the config end-to-end
 

@@ -225,19 +225,10 @@ def comb_mnz_fusion[K: Hashable](
     a key found by only one scores ``1 * CombSUM`` (i.e., plain
     CombSUM). Single-leg scenarios collapse to CombSUM exactly.
     """
-    if weights is None:
-        weights = [1.0] * len(scored_lists)
-    if len(weights) != len(scored_lists):
-        raise ValueError(
-            f"weights length {len(weights)} must match scored_lists length "
-            f"{len(scored_lists)}"
-        )
-    fused: dict[K, float] = {}
+    fused = comb_sum_fusion(scored_lists, weights=weights)
     leg_count: dict[K, int] = {}
-    for leg, w in zip(scored_lists, weights, strict=True):
-        normalised = _normalise_per_leg(leg)
-        for key, score in normalised.items():
-            fused[key] = fused.get(key, 0.0) + w * score
+    for leg in scored_lists:
+        for key in _normalise_per_leg(leg):
             leg_count[key] = leg_count.get(key, 0) + 1
     return {k: s * leg_count[k] for k, s in fused.items()}
 
@@ -392,16 +383,16 @@ class HybridSearcher:
             except NotSupported:
                 asset_hits = []
 
-        # Asset hits promote the chunks that reference them. Each promoted
-        # chunk enters the fusion pool directly — chunk-level fusion means
-        # multiple chunks from the same asset's parent doc all compete on
-        # their own merit. The first asset that surfaces a chunk wins its
-        # rank slot; ``asset_dist_by_chunk`` independently tracks the best
-        # (smallest) distance across all assets that reach that chunk so
-        # score-based fusion sees the strongest cross-modal signal.
+        # Asset hits promote the chunks that reference them. The first
+        # asset that surfaces a chunk wins its rank slot. Score fusion
+        # additionally tracks the best (smallest) distance across all
+        # assets that reach the chunk into ``asset_dist_by_chunk``; that
+        # bookkeeping is gated on ``self._fusion != "rrf"`` so RRF runs
+        # are byte-identical to pre-PR behaviour.
         asset_chunk_ranked: list[int] = []
         asset_chunk_doc_ids: dict[int, str] = {}
         asset_dist_by_chunk: dict[int, float] = {}
+        track_asset_dist = self._fusion != "rrf"
         if asset_hits:
             chunks_by_asset = await self._storage.chunks_referencing_assets(
                 [h.asset_id for h in asset_hits]
@@ -419,9 +410,10 @@ class HybridSearcher:
                     chunk = chunk_by_id.get(cid)
                     if chunk is None:
                         continue
-                    prev = asset_dist_by_chunk.get(cid)
-                    if prev is None or h.distance < prev:
-                        asset_dist_by_chunk[cid] = h.distance
+                    if track_asset_dist:
+                        prev = asset_dist_by_chunk.get(cid)
+                        if prev is None or h.distance < prev:
+                            asset_dist_by_chunk[cid] = h.distance
                     if cid in asset_chunk_doc_ids:
                         continue
                     asset_chunk_ranked.append(cid)

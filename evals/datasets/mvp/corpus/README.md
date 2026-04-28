@@ -63,7 +63,7 @@ Configured via `dikw.yml`:
 
 ```yaml
 provider:
-  llm: anthropic_compat         # protocol name (not vendor); or: openai_compat
+  llm: anthropic_compat         # or: openai_compat
   llm_model: claude-sonnet-4-6
   llm_base_url: null            # set for openai_compat (Azure, Ollama, vLLM, DeepSeek, …)
   embedding: openai_compat

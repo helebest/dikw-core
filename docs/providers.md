@@ -371,18 +371,18 @@ Both legs on Gitee, same vendor and key. Empirical dims (probed
 | Model | Native dim | `dimensions` knob | Default if unset |
 |---|---|---|---|
 | `Qwen3-Embedding-0.6B` (text-only, **recommended**) | **1024 fixed** | n/a | 1024 |
-| `Qwen3-Embedding-8B` (text-only, premium) | 4096 | matryoshka 4096 / 1024 / 512 / 256 | **1024** |
+| `Qwen3-Embedding-8B` (text-only, larger / higher-cost) | 4096 | matryoshka 4096 / 1024 / 512 / 256 | **1024** |
 | `Qwen3-VL-Embedding-8B` (multimodal) | **1024 fixed** | not accepted | 1024 |
 
 `0.6B` is the recommended default: same 1024 dim as the multimodal leg,
 ~13x fewer params than `8B`, and on CMTEB-T2 it lands within the noise
 floor of `8B` for retrieval quality (see `evals/BASELINES.md`,
-2026-04-28 entry). Reach for `8B` only if you have budget headroom and
+2026-04-28 entry). Reach for `8B` only when you have budget headroom and
 your eval gates are tight enough that single-percent nDCG matters.
 
 ```yaml
 provider:
-  llm: anthropic_compat                # or whichever protocol you've configured
+  llm: anthropic_compat                # or whichever LLM you've configured
   embedding: openai_compat             # text leg — single-string input shape
   embedding_base_url: https://ai.gitee.com/v1
   embedding_model: Qwen3-Embedding-0.6B
@@ -393,7 +393,7 @@ provider:
                                        # change later. Switch to
                                        # Qwen3-Embedding-8B (with dim 1024
                                        # via matryoshka, or 4096 native)
-                                       # if you want premium quality.
+                                       # for higher-cost runs.
   embedding_revision: ""               # bump to force re-embed when Qwen
                                        # weights drift silently behind the
                                        # stable model name

@@ -65,7 +65,7 @@ Configured via `dikw.yml`:
 
 ```yaml
 provider:
-  llm: anthropic_compat         # protocol name (not vendor); or: openai_compat
+  llm: anthropic_compat         # or: openai_compat
   llm_model: claude-sonnet-4-6
   llm_base_url: null            # set for any Anthropic-protocol-compatible endpoint
   embedding: openai_compat
@@ -77,12 +77,14 @@ provider:
   embedding_distance: cosine
 ```
 
+`llm` names a wire **protocol** (which SDK to speak), not a vendor — the
+actual vendor is whatever `llm_base_url` points at.
+
 - `anthropic_compat` → uses the `anthropic` async SDK with `cache_control`
   on the system prompt, so repeated synth/query calls hit the prompt cache.
   Set `llm_base_url` to retarget the SDK at any Anthropic-protocol-compatible
   endpoint (e.g., MiniMax's `https://api.minimaxi.com/anthropic`); leave null
-  for api.anthropic.com. Note: `anthropic_compat` is the **protocol** name —
-  the actual vendor is whatever `llm_base_url` points at.
+  for api.anthropic.com.
 - `openai_compat` → uses the `openai` async SDK against any base URL that
   speaks the OpenAI HTTP surface (Azure, Ollama, vLLM, DeepSeek, MiniMax, …).
 
@@ -95,7 +97,8 @@ retry/caching live in [`docs/providers.md`](./docs/providers.md).
 MiniMax has no embeddings endpoint — pair its Anthropic-compatible LLM surface
 with an OpenAI-compatible embedding vendor. The example below uses
 [Gitee AI](https://ai.gitee.com/v1) (`Qwen3-Embedding-0.6B`, 1024 native — the
-recommended default; swap in `Qwen3-Embedding-8B` if you want premium quality).
+recommended default; swap in `Qwen3-Embedding-8B` with `embedding_dim: 1024`
+matryoshka or `4096` native for higher-cost / marginal-quality runs).
 Fill the URLs in by hand — dikw-core never auto-detects vendor endpoints:
 
 ```yaml

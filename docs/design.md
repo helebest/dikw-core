@@ -270,8 +270,16 @@ CREATE TABLE chunks (
     start_off INTEGER, end_off INTEGER,
     text      TEXT
 );
-CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[EMB_DIM]);
-CREATE TABLE embed_meta (chunk_id INTEGER, model TEXT, PRIMARY KEY(chunk_id, model));
+-- Per-version vec table (one per embed_versions row, lazy-created at first
+-- ingest). The dim is locked at CREATE time per sqlite-vec, so a model swap
+-- registers a fresh `embed_versions` row + a fresh `vec_chunks_v<n>` table
+-- — old vectors stay queryable, no rebuild needed.
+CREATE VIRTUAL TABLE vec_chunks_v<n> USING vec0(embedding float[<dim>]);
+CREATE TABLE chunk_embed_meta (
+    chunk_id   INTEGER NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+    version_id INTEGER NOT NULL REFERENCES embed_versions(version_id),
+    PRIMARY KEY (chunk_id, version_id)
+);
 
 -- K (link graph spans K and W)
 CREATE TABLE links (
@@ -308,7 +316,7 @@ Each operation is implemented in `dikw_core.api` and surfaced identically in CLI
 
 | Op | Input | Output | Notes |
 |---|---|---|---|
-| `ingest(paths)` | file paths | updated `documents`/`chunks`/`documents_fts`/`chunks_vec` | D→I; deterministic; idempotent by content hash |
+| `ingest(paths)` | file paths | updated `documents`/`chunks`/`documents_fts`/`vec_chunks_v<id>` | D→I; deterministic; idempotent by content hash |
 | `synthesize(scope)` | source doc_ids (or "new since log") | new/updated wiki pages + wiki_log entries | I→K; LLM call with prompts/synthesize.md |
 | `distill(window)` | optional time/topic window | candidate wisdom items in `wisdom/_candidates/` + `wisdom_items(status='candidate')` | K→W; LLM call with prompts/distill.md; always produces candidates, never auto-approves |
 | `review()` | — | interactive CLI workflow to approve/edit/reject candidates | W gate; writes final files to `wisdom/*.md` |

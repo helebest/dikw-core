@@ -166,6 +166,21 @@ def test_comb_mnz_single_leg_equals_comb_sum() -> None:
     assert mnz == sum_
 
 
+def test_comb_mnz_zero_weight_leg_excluded_from_count() -> None:
+    """Ablation guard: a leg with ``weights[i] == 0`` contributes zero
+    to ``CombSUM``; CombMNZ must not bump the consensus multiplier for
+    that leg either, or "turn off BM25" would still double-count
+    chunks BM25 retrieved.
+    """
+    leg_disabled = [("shared", 1.0)]
+    leg_active = [("shared", 1.0)]
+    mnz = comb_mnz_fusion([leg_disabled, leg_active], weights=[0.0, 1.0])
+    sum_ = comb_sum_fusion([leg_disabled, leg_active], weights=[0.0, 1.0])
+    # Both legs hit ``shared`` but BM25 leg is disabled → MNZ must
+    # collapse to CombSUM (multiplier == 1, not 2).
+    assert mnz == sum_
+
+
 # ---- apply_source_diversity_penalty (1.3.1) --------------------------------
 
 
@@ -740,6 +755,29 @@ async def test_hybrid_searcher_combsum_dispatch(tmp_path) -> None:
         hits = await searcher.search("DIKW pyramid", limit=3)
         await storage.close()
         assert hits, f"fusion={mode} should still return hits on the corpus"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_searcher_rejects_unknown_fusion_mode(tmp_path) -> None:
+    """Direct ``HybridSearcher`` callers bypass pydantic's ``Literal``
+    validation. The dispatcher must reject typos at search() time
+    instead of silently running CombMNZ.
+    """
+    storage = SQLiteStorage(tmp_path / "idx-bogus.sqlite")
+    await storage.connect()
+    await storage.migrate()
+    embedder, version_id = await _populate_fixture_corpus(storage)
+
+    searcher = HybridSearcher(
+        storage,
+        embedder,
+        embedding_model="fake",
+        text_version_id=version_id,
+        fusion="combsmm",  # typo — not a member of FusionMode  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="unknown fusion mode"):
+        await searcher.search("DIKW pyramid", limit=3)
+    await storage.close()
 
 
 # ---- cjk tokenizer integration ----------------------------------------------

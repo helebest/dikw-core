@@ -224,10 +224,20 @@ def comb_mnz_fusion[K: Hashable](
     preservation. A key found by all three legs scores ``3 * CombSUM``;
     a key found by only one scores ``1 * CombSUM`` (i.e., plain
     CombSUM). Single-leg scenarios collapse to CombSUM exactly.
+
+    Zero-weight legs are excluded from the consensus multiplier — a
+    leg the caller explicitly disabled via ``weights[i] == 0`` has no
+    contribution to ``CombSUM`` and must not bump the leg-count either,
+    or ablation runs would behave inconsistently between modes.
     """
     fused = comb_sum_fusion(scored_lists, weights=weights)
+    effective_weights = (
+        weights if weights is not None else [1.0] * len(scored_lists)
+    )
     leg_count: dict[K, int] = {}
-    for leg in scored_lists:
+    for leg, w in zip(scored_lists, effective_weights, strict=True):
+        if w == 0.0:
+            continue
         for key in _normalise_per_leg(leg):
             leg_count[key] = leg_count.get(key, 0) + 1
     return {k: s * leg_count[k] for k, s in fused.items()}
@@ -438,7 +448,7 @@ class HybridSearcher:
                 k=self._rrf_k,
                 weights=fusion_weights,
             )
-        else:
+        elif self._fusion in ("combsum", "combmnz"):
             # Score-bearing tuples for CombSUM / CombMNZ. ``FTSHit.score``
             # is already higher-is-better (negated BM25); cosine distances
             # flip via ``-distance`` so per-leg min-max sees a consistent
@@ -459,6 +469,16 @@ class HybridSearcher:
             fused = fuser(
                 [fts_scored, vec_scored, asset_scored],
                 weights=fusion_weights,
+            )
+        else:
+            # Defends direct ``HybridSearcher`` callers that bypass
+            # ``RetrievalConfig``'s pydantic ``Literal`` validation —
+            # without this raise, an unknown mode falls through to
+            # CombMNZ silently and the only signal is degraded ranking
+            # quality (very hard to debug).
+            raise ValueError(
+                f"unknown fusion mode: {self._fusion!r}; "
+                f"expected one of 'rrf', 'combsum', 'combmnz'"
             )
 
         # Per-chunk doc_id lookup, sourced from every leg that knows it.

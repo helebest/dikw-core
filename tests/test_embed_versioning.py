@@ -52,7 +52,6 @@ def _asset(asset_id: str) -> AssetRecord:
 
     return AssetRecord(
         asset_id=asset_id,
-        hash=asset_id,
         kind=AssetKind.IMAGE,
         mime="image/png",
         stored_path=f"assets/{asset_id[:2]}/{asset_id[:8]}.png",

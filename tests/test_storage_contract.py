@@ -751,7 +751,6 @@ def _make_asset(
 ) -> AssetRecord:
     return AssetRecord(
         asset_id=asset_id,
-        hash=asset_id,
         kind=AssetKind.IMAGE,
         mime="image/png",
         stored_path=f"assets/{asset_id[:2]}/{asset_id[:8]}-img.png",

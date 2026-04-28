@@ -24,7 +24,6 @@ from tests.fakes import FakeMultimodalEmbedding
 def _asset(asset_id: str, *, stored_path: str, mime: str = "image/png") -> AssetRecord:
     return AssetRecord(
         asset_id=asset_id,
-        hash=asset_id,
         kind=AssetKind.IMAGE,
         mime=mime,
         stored_path=stored_path,

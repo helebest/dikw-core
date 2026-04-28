@@ -782,12 +782,11 @@ class SQLiteStorage:
                 conn.execute(
                     """
                     INSERT INTO assets(
-                        asset_id, hash, kind, mime, stored_path, original_paths,
+                        asset_id, kind, mime, stored_path, original_paths,
                         bytes, media_meta, created_ts
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(asset_id) DO UPDATE SET
-                        hash = excluded.hash,
                         kind = excluded.kind,
                         mime = excluded.mime,
                         stored_path = excluded.stored_path,
@@ -797,7 +796,6 @@ class SQLiteStorage:
                     """,
                     (
                         asset.asset_id,
-                        asset.hash,
                         asset.kind.value,
                         asset.mime,
                         asset.stored_path,
@@ -1419,7 +1417,6 @@ def _row_to_wisdom(row: sqlite3.Row) -> WisdomItem:
 def _row_to_asset(row: sqlite3.Row) -> AssetRecord:
     return AssetRecord(
         asset_id=row["asset_id"],
-        hash=row["hash"],
         kind=AssetKind(row["kind"]),
         mime=row["mime"],
         stored_path=row["stored_path"],

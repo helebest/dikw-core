@@ -239,13 +239,12 @@ async def test_fresh_install_assets_schema(tmp_path: Path) -> None:
         conn = storage._conn
         assert conn is not None
         cols = _table_columns(conn, "assets")
-        for legacy in ("width", "height", "caption", "caption_model"):
+        for legacy in ("width", "height", "caption", "caption_model", "hash"):
             assert legacy not in cols, f"fresh DB grew {legacy!r}: {sorted(cols)}"
         assert "media_meta" in cols
         # Spot-check that the rest of the table didn't change shape.
         for required in (
             "asset_id",
-            "hash",
             "kind",
             "mime",
             "stored_path",

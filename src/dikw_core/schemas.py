@@ -250,16 +250,14 @@ def load_media_meta(payload: str | None) -> MediaMeta | None:
 class AssetRecord(BaseModel):
     """A multimedia asset materialized into the engine-managed vault path.
 
-    ``asset_id`` is the sha256 of the bytes and is the single source of
-    truth for identity; ``hash`` is kept as a separate column so it can
-    be queried/indexed without parsing the asset_id. ``media_meta`` is a
-    per-kind discriminated union — for v1 (image-only) it carries width
+    ``asset_id`` is the sha256 hex of the bytes and is the sole identity
+    column — content-addressed, like ``documents.hash``. ``media_meta`` is
+    a per-kind discriminated union — for v1 (image-only) it carries width
     and height; future modalities slot in their own fields without an
     ``ALTER TABLE``.
     """
 
     asset_id: str
-    hash: str
     kind: AssetKind
     mime: str
     stored_path: str  # relative to project_root, e.g. "assets/ab/ab3f12ef-foo.png"

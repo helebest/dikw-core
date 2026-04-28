@@ -723,12 +723,11 @@ class PostgresStorage:
                 await cur.execute(
                     """
                     INSERT INTO assets (
-                        asset_id, hash, kind, mime, stored_path,
+                        asset_id, kind, mime, stored_path,
                         original_paths, bytes, media_meta, created_ts
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (asset_id) DO UPDATE SET
-                        hash = EXCLUDED.hash,
                         kind = EXCLUDED.kind,
                         mime = EXCLUDED.mime,
                         stored_path = EXCLUDED.stored_path,
@@ -738,7 +737,6 @@ class PostgresStorage:
                     """,
                     (
                         asset.asset_id,
-                        asset.hash,
                         asset.kind.value,
                         asset.mime,
                         asset.stored_path,
@@ -753,7 +751,7 @@ class PostgresStorage:
     async def get_asset(self, asset_id: str) -> AssetRecord | None:
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT asset_id, hash, kind, mime, stored_path, "
+                "SELECT asset_id, kind, mime, stored_path, "
                 "original_paths, bytes, media_meta, created_ts "
                 "FROM assets WHERE asset_id = %s",
                 (asset_id,),
@@ -1131,14 +1129,13 @@ def _row_to_document(row: Any) -> DocumentRecord:
 def _row_to_asset(row: Any) -> AssetRecord:
     return AssetRecord(
         asset_id=row[0],
-        hash=row[1],
-        kind=AssetKind(row[2]),
-        mime=row[3],
-        stored_path=row[4],
-        original_paths=json.loads(row[5]),
-        bytes=int(row[6]),
-        media_meta=load_media_meta(row[7]),
-        created_ts=float(row[8]),
+        kind=AssetKind(row[1]),
+        mime=row[2],
+        stored_path=row[3],
+        original_paths=json.loads(row[4]),
+        bytes=int(row[5]),
+        media_meta=load_media_meta(row[6]),
+        created_ts=float(row[7]),
     )
 
 

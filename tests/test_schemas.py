@@ -16,7 +16,6 @@ def _bare_asset(**overrides: object) -> AssetRecord:
     """Build a minimal ``AssetRecord`` with all fields except media_meta set."""
     base: dict[str, object] = {
         "asset_id": "a" * 64,
-        "hash": "a" * 64,
         "kind": AssetKind.IMAGE,
         "mime": "image/png",
         "stored_path": "assets/aa/aaaaaaaa-img.png",
@@ -54,6 +53,14 @@ def test_asset_record_drops_legacy_fields() -> None:
     fields = AssetRecord.model_fields
     for legacy in ("width", "height", "caption", "caption_model"):
         assert legacy not in fields, f"legacy field {legacy!r} resurfaced"
+
+
+def test_asset_record_drops_hash_field() -> None:
+    """``asset_id`` is itself the sha256 hex of the bytes, so a separate
+    ``hash`` column would always carry the identical value. Pinned dead
+    here so a future revert lands on a red test instead of silently
+    reintroducing the duplicate UNIQUE column."""
+    assert "hash" not in AssetRecord.model_fields
 
 
 def test_asset_record_media_meta_defaults_to_none() -> None:

@@ -11,8 +11,7 @@
 -- ---- Multimedia assets ---------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS assets (
-    asset_id       TEXT PRIMARY KEY,         -- = sha256 hash
-    hash           TEXT UNIQUE NOT NULL,
+    asset_id       TEXT PRIMARY KEY,         -- sha256 hex of the bytes; content-addressed identity
     kind           TEXT NOT NULL CHECK (kind IN ('image')),
     mime           TEXT NOT NULL,
     stored_path    TEXT NOT NULL,            -- relative to project_root

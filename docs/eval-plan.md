@@ -128,9 +128,10 @@ parity impossible (and not actually useful):
    override via `retrieval:` block in `dikw.yml`. Full sweep table:
    [`evals/BASELINES.md`](../evals/BASELINES.md).
 4. **Embedding dim choice.** The benchmark stubs default to
-   Qwen3-Embedding-8B at 1024-dim (matryoshka truncation) for cost.
-   The 4096-dim native vectors would shift dense + hybrid numbers; pin
-   the dim in `dataset.yaml`'s comments so re-runs reproduce.
+   Qwen3-Embedding-0.6B at 1024-dim (native) for cost. Premium runs
+   on Qwen3-Embedding-8B (1024 matryoshka or 4096 native) shift dense
+   + hybrid numbers; pin the model + dim in `dataset.yaml`'s comments
+   so re-runs reproduce.
 5. **CMTEB sample sizing.** The Chinese benchmarks ship at 1M+
    passages; we sample down to ~5K. Fewer distractors → higher
    absolute metrics than the published full-corpus numbers. The

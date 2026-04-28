@@ -7,16 +7,18 @@ you don't need to touch any.
 ## The design seam
 
 `dikw-core` ships with two protocol-level providers, both pluggable via
-`dikw.yml` alone:
+`dikw.yml` alone. The `llm` field names the **protocol** (which SDK
+to speak), not the vendor — vendor is whatever `llm_base_url` points at:
 
-- **`anthropic`** — uses the official `anthropic` async SDK. `base_url`
-  can retarget it at any Anthropic-protocol-compatible endpoint (e.g.,
-  MiniMax). Applies `cache_control: ephemeral` on the system prompt, so
-  repeated synth / query / distill within the 5-minute TTL hit the
-  prompt cache.
+- **`anthropic_compat`** — uses the official `anthropic` async SDK.
+  `llm_base_url` retargets it at any Anthropic-protocol-compatible
+  endpoint (e.g., MiniMax's `https://api.minimaxi.com/anthropic`).
+  Applies `cache_control: ephemeral` on the system prompt, so repeated
+  synth / query / distill within the 5-minute TTL hit the prompt cache.
+  Leave `llm_base_url` null to talk to api.anthropic.com directly.
 - **`openai_compat`** — uses the `openai` async SDK against any
-  `base_url` that speaks the OpenAI HTTP surface. Covers OpenAI, Azure,
-  Ollama, vLLM, TEI, DeepSeek, GLM, Gemini (OpenAI-compat mode),
+  `llm_base_url` that speaks the OpenAI HTTP surface. Covers OpenAI,
+  Azure, Ollama, vLLM, TEI, DeepSeek, GLM, Gemini (OpenAI-compat mode),
   Gitee AI, and most others.
 
 Every vendor falls under one of these two. **To add a new vendor you
@@ -30,8 +32,8 @@ cross-check the vendor's own docs.
 | Vendor | `llm` | `llm_base_url` | `embedding` | `embedding_base_url` | LLM key env | Embed key env |
 |---|---|---|---|---|---|---|
 | **OpenAI** (default) | `openai_compat` | `https://api.openai.com/v1` | `openai_compat` | same | `OPENAI_API_KEY` | `DIKW_EMBEDDING_API_KEY` |
-| **Anthropic** | `anthropic` | leave `null` | *(no embed — pair elsewhere)* | — | `ANTHROPIC_API_KEY` | — |
-| **MiniMax** | `anthropic` | `https://api.minimaxi.com/anthropic` | *(no embed — pair elsewhere)* | — | `ANTHROPIC_API_KEY` | — |
+| **Anthropic** | `anthropic_compat` | leave `null` | *(no embed — pair elsewhere)* | — | `ANTHROPIC_API_KEY` | — |
+| **MiniMax** | `anthropic_compat` | `https://api.minimaxi.com/anthropic` | *(no embed — pair elsewhere)* | — | `ANTHROPIC_API_KEY` | — |
 | **GLM / 智谱** | `openai_compat` | `https://open.bigmodel.cn/api/paas/v4` | `openai_compat` | same | `OPENAI_API_KEY` | `DIKW_EMBEDDING_API_KEY` |
 | **Gemini** | `openai_compat` | `https://generativelanguage.googleapis.com/v1beta/openai/` | `openai_compat` | same | `OPENAI_API_KEY` | `DIKW_EMBEDDING_API_KEY` |
 | **DeepSeek** | `openai_compat` | `https://api.deepseek.com/v1` | *(no embed — pair elsewhere)* | — | `OPENAI_API_KEY` | — |
@@ -111,7 +113,7 @@ first failure *but is idempotent via content hash*, so re-running
 resumes without double-embedding unchanged docs. For production
 automation, wrap the call in your own retry layer (e.g., `tenacity`).
 
-### 4. Prompt caching only on the `anthropic` leg
+### 4. Prompt caching only on the `anthropic_compat` leg
 
 The `AnthropicLLM` provider passes `cache_control: {"type": "ephemeral"}`
 on the system prompt, cutting repeat-call input-token cost by ~90%
@@ -189,8 +191,8 @@ cd scratch-bench-wiki
 # Edit dikw.yml's provider block:
 #   embedding: openai_compat
 #   embedding_base_url: https://ai.gitee.com/v1
-#   embedding_model: Qwen3-Embedding-8B
-#   embedding_dim: 1024               # required: matryoshka truncation
+#   embedding_model: Qwen3-Embedding-0.6B
+#   embedding_dim: 1024               # 0.6B native dim
 #   embedding_revision: ""
 #   embedding_normalize: true
 #   embedding_distance: cosine
@@ -368,23 +370,30 @@ Both legs on Gitee, same vendor and key. Empirical dims (probed
 
 | Model | Native dim | `dimensions` knob | Default if unset |
 |---|---|---|---|
-| `Qwen3-Embedding-8B` (text-only) | 4096 | matryoshka 4096 / 1024 / 512 / 256 | **1024** |
+| `Qwen3-Embedding-0.6B` (text-only, **recommended**) | **1024 fixed** | n/a | 1024 |
+| `Qwen3-Embedding-8B` (text-only, larger / higher-cost) | 4096 | matryoshka 4096 / 1024 / 512 / 256 | **1024** |
 | `Qwen3-VL-Embedding-8B` (multimodal) | **1024 fixed** | not accepted | 1024 |
+
+`0.6B` is the recommended default: same 1024 dim as the multimodal leg,
+~13x fewer params than `8B`, and on CMTEB-T2 it lands within the noise
+floor of `8B` for retrieval quality (see `evals/BASELINES.md`,
+2026-04-28 entry). Reach for `8B` only when you have budget headroom and
+your eval gates are tight enough that single-percent nDCG matters.
 
 ```yaml
 provider:
-  llm: anthropic                       # or whichever LLM you've configured
+  llm: anthropic_compat                # or whichever LLM you've configured
   embedding: openai_compat             # text leg — single-string input shape
   embedding_base_url: https://ai.gitee.com/v1
-  embedding_model: Qwen3-Embedding-8B
-  embedding_dim: 1024                  # match Qwen3-VL dim so both legs of
-                                       # hybrid retrieval live in equally-
-                                       # priced spaces. Set to 4096 if you
-                                       # want native quality on the text
-                                       # leg and don't mind the dim split
-                                       # (vec tables are independent).
-                                       # WARNING: dim locks at first ingest
-                                       # (gotcha #1), don't change later.
+  embedding_model: Qwen3-Embedding-0.6B
+  embedding_dim: 1024                  # 0.6B native; matches Qwen3-VL so
+                                       # both hybrid legs live in the same
+                                       # dim space. WARNING: dim locks at
+                                       # first ingest (gotcha #1) — don't
+                                       # change later. Switch to
+                                       # Qwen3-Embedding-8B (with dim 1024
+                                       # via matryoshka, or 4096 native)
+                                       # for higher-cost runs.
   embedding_revision: ""               # bump to force re-embed when Qwen
                                        # weights drift silently behind the
                                        # stable model name

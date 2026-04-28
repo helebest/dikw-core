@@ -58,7 +58,7 @@ def test_anthropic_client_omits_max_retries_when_none(
 def test_build_llm_wires_max_retries_from_config(
     captured_kwargs: dict[str, object],
 ) -> None:
-    cfg = make_provider_cfg(llm="anthropic", llm_max_retries=4)
+    cfg = make_provider_cfg(llm="anthropic_compat", llm_max_retries=4)
     llm = build_llm(cfg)
     assert isinstance(llm, AnthropicLLM)
     llm._get_client()

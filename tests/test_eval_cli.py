@@ -201,7 +201,7 @@ def test_cli_eval_provider_mode_threads_retrieval_config(
     api.init_wiki(wiki, description="retrieval threading guard")
     (wiki / "dikw.yml").write_text(
         """provider:
-  llm: anthropic
+  llm: anthropic_compat
   embedding: openai_compat
   embedding_model: fake-model
   embedding_base_url: https://example.invalid

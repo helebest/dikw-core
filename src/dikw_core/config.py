@@ -17,12 +17,18 @@ from .info.tokenize import CjkTokenizer
 
 
 class ProviderConfig(BaseModel):
-    llm: Literal["anthropic", "openai_compat"] = "anthropic"
+    # ``anthropic_compat`` / ``openai_compat`` are protocol names, not vendor
+    # names — pick the wire protocol the SDK speaks, then pin the vendor via
+    # ``llm_base_url`` (e.g., ``anthropic_compat`` + MiniMax's
+    # https://api.minimaxi.com/anthropic). Defaults to ``anthropic_compat``
+    # so a fresh ``dikw init`` against api.anthropic.com is one key away.
+    llm: Literal["anthropic_compat", "openai_compat"] = "anthropic_compat"
     llm_model: str = "claude-sonnet-4-6"
     embedding: Literal["openai_compat"] = "openai_compat"
     embedding_model: str = "text-embedding-3-small"
     # The OpenAI-compat base URL is used for BOTH `openai_compat` LLM calls and
-    # for embeddings when the LLM provider is Anthropic (which has no embeddings API).
+    # for embeddings when the LLM provider is anthropic_compat (which has no
+    # embeddings API on the Anthropic protocol).
     embedding_base_url: str = "https://api.openai.com/v1"
     # The four fields below form the version identity registered into
     # ``embed_versions``. All required so dim/normalize/distance drift
@@ -42,9 +48,10 @@ class ProviderConfig(BaseModel):
     # (e.g., "gitee-ai", "openai", "azure-east"). Describes which vendor
     # the embedding endpoint points at; purely for human diagnostics.
     embedding_provider_label: str | None = None
-    # Used by both "anthropic" and "openai_compat" LLM providers. For anthropic,
-    # points the Anthropic SDK at an Anthropic-protocol-compatible endpoint
-    # (e.g., MiniMax's Anthropic surface). Leave null to use the provider default.
+    # Used by both LLM protocols. For ``anthropic_compat``, retargets the
+    # Anthropic SDK at any Anthropic-protocol-compatible endpoint (e.g.,
+    # MiniMax's https://api.minimaxi.com/anthropic). Leave null to use the
+    # SDK's default endpoint (api.anthropic.com / api.openai.com).
     llm_base_url: str | None = None
     # Per-operation response budget handed to ``LLMProvider.complete`` via
     # ``max_tokens``. Defaults match the values previously hardcoded in

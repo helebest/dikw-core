@@ -56,7 +56,7 @@ def test_anthropic_client_omits_base_url_by_default(
 def test_build_llm_wires_base_url_from_config(
     captured_kwargs: dict[str, object],
 ) -> None:
-    cfg = make_provider_cfg(llm="anthropic", llm_base_url="http://minimax.example/anthropic")
+    cfg = make_provider_cfg(llm="anthropic_compat", llm_base_url="http://minimax.example/anthropic")
     llm = build_llm(cfg)
     assert isinstance(llm, AnthropicLLM)
     llm._get_client()

@@ -17,7 +17,7 @@ from .openai_compat import OpenAICompatEmbeddings, OpenAICompatLLM
 
 
 def build_llm(config: ProviderConfig) -> LLMProvider:
-    if config.llm == "anthropic":
+    if config.llm == "anthropic_compat":
         return AnthropicLLM(
             base_url=config.llm_base_url,
             max_retries=config.llm_max_retries,

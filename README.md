@@ -65,7 +65,7 @@ Configured via `dikw.yml`:
 
 ```yaml
 provider:
-  llm: anthropic                # or: openai_compat
+  llm: anthropic_compat         # or: openai_compat
   llm_model: claude-sonnet-4-6
   llm_base_url: null            # set for any Anthropic-protocol-compatible endpoint
   embedding: openai_compat
@@ -77,10 +77,14 @@ provider:
   embedding_distance: cosine
 ```
 
-- `anthropic` → uses the `anthropic` async SDK with `cache_control` on the
-  system prompt, so repeated synth/query calls hit the prompt cache. Set
-  `llm_base_url` to retarget the SDK at any Anthropic-compatible endpoint
-  (e.g., MiniMax); leave null for api.anthropic.com.
+`llm` names a wire **protocol** (which SDK to speak), not a vendor — the
+actual vendor is whatever `llm_base_url` points at.
+
+- `anthropic_compat` → uses the `anthropic` async SDK with `cache_control`
+  on the system prompt, so repeated synth/query calls hit the prompt cache.
+  Set `llm_base_url` to retarget the SDK at any Anthropic-protocol-compatible
+  endpoint (e.g., MiniMax's `https://api.minimaxi.com/anthropic`); leave null
+  for api.anthropic.com.
 - `openai_compat` → uses the `openai` async SDK against any base URL that
   speaks the OpenAI HTTP surface (Azure, Ollama, vLLM, DeepSeek, MiniMax, …).
 
@@ -92,18 +96,20 @@ retry/caching live in [`docs/providers.md`](./docs/providers.md).
 
 MiniMax has no embeddings endpoint — pair its Anthropic-compatible LLM surface
 with an OpenAI-compatible embedding vendor. The example below uses
-[Gitee AI](https://ai.gitee.com/v1) (`Qwen3-Embedding-8B`, matryoshka-truncatable).
+[Gitee AI](https://ai.gitee.com/v1) (`Qwen3-Embedding-0.6B`, 1024 native — the
+recommended default; swap in `Qwen3-Embedding-8B` with `embedding_dim: 1024`
+matryoshka or `4096` native for higher-cost / marginal-quality runs).
 Fill the URLs in by hand — dikw-core never auto-detects vendor endpoints:
 
 ```yaml
 provider:
-  llm: anthropic
+  llm: anthropic_compat
   llm_model: <MiniMax Anthropic-compatible model name>
-  llm_base_url: <MiniMax Anthropic endpoint, e.g. https://api.minimaxi.com/anthropic>
+  llm_base_url: https://api.minimaxi.com/anthropic
   embedding: openai_compat
-  embedding_model: Qwen3-Embedding-8B
+  embedding_model: Qwen3-Embedding-0.6B
   embedding_base_url: https://ai.gitee.com/v1
-  embedding_dim: 1024               # required: matryoshka truncation; locked at first ingest
+  embedding_dim: 1024               # 0.6B native; locked at first ingest
   embedding_revision: ""            # bump to force re-embed when Qwen weights drift silently
   embedding_normalize: true
   embedding_distance: cosine

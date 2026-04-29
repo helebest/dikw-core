@@ -131,7 +131,8 @@ class SQLiteStorage:
             conn = self._require_conn()
             with conn:
                 conn.execute(
-                    "CREATE TABLE IF NOT EXISTS meta_kv (key TEXT PRIMARY KEY, value TEXT)"
+                    "CREATE TABLE IF NOT EXISTS meta_kv ("
+                    "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
                 )
                 applied = _read_schema_version_sqlite(conn)
                 # Apply migration files in numeric prefix order, skipping
@@ -164,6 +165,7 @@ class SQLiteStorage:
             self._migrate_legacy_wiki_log_id(conn)
             self._migrate_legacy_documents_path_key(conn)
             self._migrate_legacy_wisdom_evidence_id(conn)
+            self._migrate_legacy_meta_kv_value_notnull(conn)
 
         await asyncio.to_thread(_run)
 
@@ -1467,6 +1469,46 @@ class SQLiteStorage:
                     )
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
+
+    def _migrate_legacy_meta_kv_value_notnull(self, conn: sqlite3.Connection) -> None:
+        """Add ``NOT NULL`` to ``meta_kv.value`` on a pre-parity table.
+
+        SQLite cannot ALTER an existing column's nullability in place,
+        so legacy DBs that landed before this commit shipped
+        ``value TEXT`` without the constraint. The Postgres adapter has
+        always declared it ``NOT NULL`` — this brings them in line.
+
+        Idempotent: skips when the column is already NOT NULL or when
+        the table doesn't exist. Safe at runtime because every existing
+        writer (``_write_schema_version_*``) already supplies a non-null
+        value, so the rebuild can never reject a real row.
+        """
+        info = conn.execute("PRAGMA table_info('meta_kv')").fetchall()
+        if not info:
+            return
+        for row in info:
+            if row["name"] == "value":
+                if int(row["notnull"]) == 1:
+                    return
+                break
+        else:
+            return
+        with conn:
+            conn.execute("DROP TABLE IF EXISTS meta_kv_new")
+            conn.execute(
+                "CREATE TABLE meta_kv_new ("
+                "  key TEXT PRIMARY KEY, value TEXT NOT NULL"
+                ")"
+            )
+            # Filter NULLs defensively; the writer never inserts them
+            # but a hand-edited DB might. Dropping a NULL row is the
+            # only sensible recovery when the new constraint forbids it.
+            conn.execute(
+                "INSERT INTO meta_kv_new(key, value) "
+                "SELECT key, value FROM meta_kv WHERE value IS NOT NULL"
+            )
+            conn.execute("DROP TABLE meta_kv")
+            conn.execute("ALTER TABLE meta_kv_new RENAME TO meta_kv")
 
     def _migrate_legacy_documents_path_key(self, conn: sqlite3.Connection) -> None:
         """Add the ``path_key`` column to a pre-normalization ``documents`` table.

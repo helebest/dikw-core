@@ -141,6 +141,33 @@ async def test_migrate_is_idempotent(storage: Storage) -> None:
     assert counts.documents_by_layer == {}
 
 
+async def test_meta_kv_value_is_not_null(storage: Storage) -> None:
+    """``meta_kv.value`` must reject NULLs on both SQL adapters so the
+    schema_version writer can never silently drop the version. The
+    filesystem backend has no DB-level metadata table and is skipped.
+    """
+    if not _has_schema_constraints(storage):
+        pytest.skip("backend has no meta_kv table")
+    await storage.migrate()
+
+    cls_name = type(storage).__name__
+    if cls_name == "SQLiteStorage":
+        conn = storage._conn  # type: ignore[attr-defined]
+        info = conn.execute("PRAGMA table_info('meta_kv')").fetchall()
+        nn_by_col = {r["name"]: int(r["notnull"]) for r in info}
+    else:
+        async with storage._acquire() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]
+            await cur.execute(
+                "SELECT column_name, is_nullable FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'meta_kv'"
+            )
+            rows = await cur.fetchall()
+        nn_by_col = {r[0]: 0 if r[1] == "YES" else 1 for r in rows}
+    assert nn_by_col.get("value") == 1, (
+        f"meta_kv.value must be NOT NULL; got nullable shape {nn_by_col!r}"
+    )
+
+
 async def test_migrate_records_schema_version(storage: Storage) -> None:
     """After ``migrate()`` the SQL adapters must record the highest
     applied migration number in ``meta_kv['schema_version']``. The

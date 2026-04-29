@@ -33,6 +33,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from ..info.tokenize import WORD_OR_CJK_CHARS, CjkTokenizer, preprocess_for_fts
 from ..schemas import (
     AssetEmbeddingRow,
     AssetRecord,
@@ -57,16 +58,16 @@ from ..schemas import (
 )
 from .base import NotSupported
 
-_WORD = re.compile(r"[A-Za-z][A-Za-z0-9']+")
+# Word regex covers ASCII word characters + the basic CJK ideograph
+# range so Chinese tokens (post-jieba whitespace segmentation) survive
+# tokenization without being split per-character. ``\w`` under
+# ``re.UNICODE`` already matches diacritic-bearing latin letters.
+_WORD = re.compile(rf"[{WORD_OR_CJK_CHARS}]+", re.UNICODE)
 
 _DENSE_NOT_SUPPORTED = (
     "filesystem backend is FTS-only by design — switch to the sqlite "
     "backend for dense retrieval"
 )
-
-
-def _tokenise(text: str) -> list[str]:
-    return [w.lower() for w in _WORD.findall(text)]
 
 
 class FilesystemStorage:
@@ -80,9 +81,19 @@ class FilesystemStorage:
     WISDOM_EVIDENCE_FILE = "wisdom_evidence.jsonl"
     CHUNK_COUNTER_FILE = "chunk_counter.txt"
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        cjk_tokenizer: CjkTokenizer = "none",
+    ) -> None:
         self._root = Path(root)
         self._lock = asyncio.Lock()
+        # Mirror SQLiteStorage's ingest-side preprocessing: with the
+        # tokenizer set, CJK runs in chunk text get whitespace-segmented
+        # (via jieba) before they hit the inverted index, and queries
+        # go through the same preprocessor for symmetry.
+        self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
 
         # In-memory caches populated by ``connect()``.
         self._docs: dict[str, DocumentRecord] = {}
@@ -93,6 +104,15 @@ class FilesystemStorage:
         self._wisdom_items: dict[str, WisdomItem] = {}
         self._wisdom_evidence: dict[str, list[WisdomEvidence]] = defaultdict(list)
         self._chunk_counter = 0
+
+    def _tokenise(self, text: str) -> list[str]:
+        """Lowercase word tokens with CJK pre-segmentation.
+
+        Symmetric on ingest + query — see ``info.search._sanitize_fts``
+        for the same preprocessing on the SQLite/PG side.
+        """
+        pre = preprocess_for_fts(text, tokenizer=self._cjk_tokenizer)
+        return [w.lower() for w in _WORD.findall(pre)]
 
     # ---- filesystem paths ------------------------------------------------
 
@@ -270,7 +290,7 @@ class FilesystemStorage:
     async def fts_search(
         self, q: str, *, limit: int = 20, layer: Layer | None = None
     ) -> list[FTSHit]:
-        q_tokens = set(_tokenise(q))
+        q_tokens = set(self._tokenise(q))
         if not q_tokens:
             return []
 
@@ -283,7 +303,7 @@ class FilesystemStorage:
                 continue
             if layer is not None and doc.layer != layer:
                 continue
-            toks = set(_tokenise(chunk.text))
+            toks = set(self._tokenise(chunk.text))
             chunk_tokens[cid] = toks
             for t in toks:
                 df[t] += 1

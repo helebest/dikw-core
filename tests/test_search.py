@@ -819,22 +819,23 @@ async def test_cjk_tokenizer_jieba_ingest_stores_segmented_body(tmp_path) -> Non
         [ChunkRecord(doc_id=doc_id, seq=0, start=0, end=6, text="机器学习入门")],
     )
 
-    # Inspect what was actually written — sqlite3 is synchronous but the
-    # async wrapper is happy to return a value here.
-    def _read_body() -> tuple[str, str]:
+    # ``documents_fts`` is body-only — JOIN onto ``chunks`` to scope
+    # by doc_id (rowid alignment is the contract).
+    def _read_body() -> str:
         conn = storage._require_conn()  # type: ignore[attr-defined]
         row = conn.execute(
-            "SELECT title, body FROM documents_fts WHERE path = ?",
-            ("sources/zh.md",),
+            "SELECT body FROM documents_fts "
+            "JOIN chunks c ON c.chunk_id = documents_fts.rowid "
+            "WHERE c.doc_id = ?",
+            (doc_id,),
         ).fetchone()
-        return row["title"], row["body"]
+        return str(row["body"])
 
-    title, body = _read_body()
+    body = _read_body()
     # At minimum jieba has surfaced at least one 2+ char Chinese word
     # as a whitespace-bounded token. The pre-feature path would store
     # the raw string "机器学习入门" with no whitespace.
     assert " " in body, f"body not segmented: {body!r}"
-    assert " " in title, f"title not segmented: {title!r}"
     await storage.close()
 
 
@@ -924,8 +925,10 @@ async def test_cjk_tokenizer_none_leaves_body_verbatim(tmp_path) -> None:
     def _read_body() -> str:
         conn = storage._require_conn()  # type: ignore[attr-defined]
         row = conn.execute(
-            "SELECT body FROM documents_fts WHERE path = ?",
-            ("sources/en.md",),
+            "SELECT body FROM documents_fts "
+            "JOIN chunks c ON c.chunk_id = documents_fts.rowid "
+            "WHERE c.doc_id = ?",
+            (doc_id,),
         ).fetchone()
         return str(row["body"])
 

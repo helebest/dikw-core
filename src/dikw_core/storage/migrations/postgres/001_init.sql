@@ -4,6 +4,13 @@
 -- Per-version vec_chunks_v<id> / vec_assets_v<id> tables are created
 -- lazily in Python so the engine can parameterise the embedding
 -- dimension at first insert. See storage/postgres.py.
+--
+-- FTS surface: ``chunks.fts`` is a generated tsvector over
+-- ``chunks.text`` indexed by GIN. ``Storage.fts_search`` consumes
+-- ``info/search.py:_sanitize_fts``'s SQLite-flavored OR-form input
+-- via ``to_tsquery`` (with a per-call format adapter
+-- ``_fts_to_tsquery_string``); ``plainto_tsquery`` would re-tokenize
+-- the sanitizer output and silently break multi-word queries.
 
 CREATE TABLE IF NOT EXISTS meta_kv (
     key   TEXT PRIMARY KEY,

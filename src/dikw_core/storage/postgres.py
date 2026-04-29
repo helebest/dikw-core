@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from collections.abc import Iterable, Sequence
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..info.tokenize import WORD_OR_CJK_CHARS
 from ..schemas import (
     AssetEmbeddingRow,
     AssetKind,
@@ -407,15 +409,24 @@ class PostgresStorage:
     async def fts_search(
         self, q: str, *, limit: int = 20, layer: Layer | None = None
     ) -> list[FTSHit]:
+        # ``info/search.py:_sanitize_fts`` produces SQLite-flavored FTS5
+        # input like ``'"foo" OR "bar"'``. PG's ``plainto_tsquery`` would
+        # re-tokenize that string and treat ``OR`` as a literal search
+        # word — broken for any multi-word query. Translate the
+        # SQLite form into PG ``to_tsquery`` syntax (``'foo | bar'``)
+        # and short-circuit empty queries (``to_tsquery('')`` raises).
+        parsed = _fts_to_tsquery_string(q)
+        if not parsed:
+            return []
         sql = (
             "SELECT c.doc_id, c.chunk_id, "
-            "ts_rank(c.fts, plainto_tsquery('simple', %s)) AS score, "
-            "ts_headline('simple', c.text, plainto_tsquery('simple', %s), "
+            "ts_rank(c.fts, to_tsquery('simple', %s)) AS score, "
+            "ts_headline('simple', c.text, to_tsquery('simple', %s), "
             "  'StartSel=<mark>,StopSel=</mark>,ShortWord=2,MaxWords=25,MinWords=5') AS snip "
             "FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
-            "WHERE d.active = TRUE AND c.fts @@ plainto_tsquery('simple', %s)"
+            "WHERE d.active = TRUE AND c.fts @@ to_tsquery('simple', %s)"
         )
-        params: list[Any] = [q, q, q]
+        params: list[Any] = [parsed, parsed, parsed]
         if layer is not None:
             sql += " AND d.layer = %s"
             params.append(layer.value)
@@ -1316,3 +1327,40 @@ def _row_to_wisdom(row: Any) -> WisdomItem:
         created_ts=float(row[7]),
         approved_ts=float(row[8]) if row[8] is not None else None,
     )
+
+
+_TS_TOKEN_RE = re.compile(r'"([^"]+)"')
+# Word-or-CJK runs in the raw input become independent tokens. Anything
+# else (whitespace, punctuation, tsquery operators ``& | ! ( )``) is a
+# split boundary — never carried into a token, so user input can't be
+# parsed as tsquery syntax.
+_TS_RAW_TOKEN_RE = re.compile(rf"[{WORD_OR_CJK_CHARS}]+")
+
+
+def _fts_to_tsquery_string(q: str) -> str:
+    """Translate any ``Storage.fts_search`` query into PG to_tsquery form.
+
+    Two input shapes flow into this helper:
+
+    1. **Pre-sanitized form** from ``info/search.py:_sanitize_fts``:
+       ``'"foo" OR "bar"'`` — the SQLite-flavored quoted bag-of-words.
+       Strip the quotes, join with ``' | '``.
+    2. **Raw form** from any direct ``Storage.fts_search`` caller
+       (e.g. the ``test_chunks_and_fts_search`` contract test passes
+       ``"brown"`` straight through). Pull every word/CJK run out as
+       a token via ``re.findall`` so punctuation acts as a token
+       boundary the same way ``plainto_tsquery`` would split it —
+       ``"retrieval.rrf_k"`` becomes two tokens (``retrieval``,
+       ``rrf_k``), not one collapsed lexeme.
+
+    Empty input → empty output; the caller must short-circuit because
+    ``to_tsquery('')`` raises in PG.
+    """
+    # Sanitized form (``'"foo" OR "bar"'``): lift tokens from inside
+    # the quotes. Raw form (``foo bar`` / ``foo&bar``): pull every
+    # word-or-CJK run out via the same regex the inverted character
+    # class would split on. Empty/whitespace inputs return an empty
+    # list either way; the caller short-circuits.
+    quoted = _TS_TOKEN_RE.findall(q)
+    tokens = [t for t in quoted if t] if quoted else _TS_RAW_TOKEN_RE.findall(q)
+    return " | ".join(tokens)

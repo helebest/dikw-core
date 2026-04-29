@@ -207,6 +207,30 @@ async def test_migrate_records_schema_version(storage: Storage) -> None:
     assert await _read_schema_version(storage) == expected
 
 
+def test_sqlite_001_init_declares_meta_kv() -> None:
+    """``meta_kv`` must be declared in the SQLite ``001_init.sql`` file
+    for parity with the Postgres migration. The Python-side inline
+    ``CREATE TABLE`` in ``SQLiteStorage.migrate()`` still runs first
+    (it has to, so ``_read_schema_version_sqlite`` can read the row
+    before any migration files apply), but a schema-diff between the
+    two adapters' ``migrations/`` trees should not surface a phantom
+    "Postgres has meta_kv, SQLite doesn't" because of where the table
+    happens to be declared.
+    """
+    from importlib import resources
+
+    sql = (
+        resources.files("dikw_core.storage.migrations.sqlite")
+        .joinpath("001_init.sql")
+        .read_text(encoding="utf-8")
+    )
+    assert "CREATE TABLE IF NOT EXISTS meta_kv" in sql, (
+        "001_init.sql must declare meta_kv for parity with the PG "
+        "migration; the inline create in sqlite.py:migrate() stays "
+        "but the .sql file is the documentation source of truth."
+    )
+
+
 def _expected_max_migration(adapter_name: str) -> int:
     """Resolve the highest migration number the adapter currently ships."""
     from dikw_core.storage._migrations import ordered_migrations
@@ -390,6 +414,371 @@ async def test_chunks_and_fts_search(storage: Storage) -> None:
     assert any(h.doc_id == doc.doc_id for h in hits)
     # snippet highlighting is available
     assert any(h.snippet and "brown" in h.snippet.lower() for h in hits)
+
+
+async def test_sqlite_documents_fts_body_only(storage: Storage) -> None:
+    """SQLite ``documents_fts`` must scope to ``body`` only — no
+    ``path UNINDEXED`` / ``title`` / ``layer UNINDEXED`` columns —
+    and use ``tokenize = "unicode61"`` (no ``remove_diacritics``).
+
+    The PG side has always indexed only ``chunks.text`` via the
+    generated ``chunks.fts`` tsvector; aligning SQLite to the same
+    column scope removes silent recall divergence on title-heavy
+    queries. Diacritics are preserved on both sides post-alignment.
+    """
+    if type(storage).__name__ != "SQLiteStorage":
+        pytest.skip("documents_fts is SQLite-only")
+    await storage.migrate()
+    conn = storage._conn  # type: ignore[attr-defined]
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'documents_fts'"
+    ).fetchone()
+    assert row is not None, "documents_fts virtual table missing"
+    sql = row["sql"]
+    assert "path UNINDEXED" not in sql, (
+        f"documents_fts must not index path; got:\n{sql}"
+    )
+    assert "layer UNINDEXED" not in sql, (
+        f"documents_fts must not index layer; got:\n{sql}"
+    )
+    # ``remove_diacritics 0`` must be explicit: unicode61 defaults to
+    # ``1`` which still strips diacritics. We want the byte-level
+    # behavior of PG's ``to_tsvector('simple', ...)``.
+    assert "remove_diacritics 0" in sql, (
+        f"documents_fts must explicitly pin remove_diacritics=0; got:\n{sql}"
+    )
+
+
+async def test_fts_preserves_diacritics(storage: Storage) -> None:
+    """Cross-adapter contract: FTS preserves diacritics. ``café`` is a
+    different token from ``cafe``. Searching ``"café"`` returns the
+    diacritic-bearing chunk; searching ``"cafe"`` does not.
+
+    Pre-PR SQLite stripped diacritics (``unicode61 remove_diacritics
+    2``); aligning to the PG/filesystem behavior (preserve as-is)
+    keeps cross-backend recall consistent without pulling in the
+    ``unaccent`` extension.
+    """
+    doc = _make_doc("sources/diacritics.md")
+    await storage.upsert_document(doc)
+    await storage.replace_chunks(
+        doc.doc_id,
+        [
+            ChunkRecord(
+                doc_id=doc.doc_id,
+                seq=0,
+                start=0,
+                end=18,
+                text="café au lait recipe",
+            ),
+        ],
+    )
+
+    hits_with_diacritic = await storage.fts_search('"café"', limit=5)
+    assert any(h.doc_id == doc.doc_id for h in hits_with_diacritic), (
+        "querying with the exact diacritic-bearing token must hit"
+    )
+
+    hits_without_diacritic = await storage.fts_search('"cafe"', limit=5)
+    assert not any(h.doc_id == doc.doc_id for h in hits_without_diacritic), (
+        "querying without the diacritic must NOT hit a diacritic-only "
+        "indexed token (i.e. no implicit unaccent / remove_diacritics)"
+    )
+
+
+async def test_sqlite_legacy_fts_rebuild_preserves_data(tmp_path: Path) -> None:
+    """A legacy DB whose ``documents_fts`` was built with the old
+    4-column shape + ``remove_diacritics 2`` tokenizer must survive
+    ``migrate()``: the table is rebuilt body-only with diacritics
+    preserved, and the stored chunk text remains searchable through
+    the new tokenizer.
+
+    Repopulating from ``chunks`` (which always carry the raw text) is
+    what makes the rebuild idempotent — the FTS table is purely
+    derived state.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "legacy.sqlite"
+
+    # Hand-craft the pre-PR shape: bare-bones documents + chunks +
+    # the old 4-column FTS5 virtual table with diacritic stripping.
+    raw = sqlite3.connect(str(db_path))
+    raw.row_factory = sqlite3.Row
+    raw.executescript(
+        """
+        CREATE TABLE documents (
+            doc_id   TEXT PRIMARY KEY,
+            path     TEXT NOT NULL UNIQUE,
+            path_key TEXT,
+            title    TEXT,
+            hash     TEXT,
+            mtime    REAL,
+            layer    TEXT,
+            active   INTEGER
+        );
+        CREATE TABLE chunks (
+            chunk_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id    TEXT NOT NULL,
+            seq       INTEGER NOT NULL,
+            start_off INTEGER NOT NULL,
+            end_off   INTEGER NOT NULL,
+            text      TEXT NOT NULL,
+            UNIQUE (doc_id, seq)
+        );
+        CREATE VIRTUAL TABLE documents_fts USING fts5(
+            path UNINDEXED,
+            title,
+            body,
+            layer UNINDEXED,
+            tokenize = "unicode61 remove_diacritics 2"
+        );
+        """
+    )
+    raw.execute(
+        "INSERT INTO documents(doc_id, path, path_key, title, hash, "
+        "mtime, layer, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("legacy::a.md", "a.md", "a.md", "a", "h", 0.0, "source", 1),
+    )
+    cur = raw.execute(
+        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("legacy::a.md", 0, 0, 18, "café au lait recipe"),
+    )
+    chunk_id = cur.lastrowid
+    raw.execute(
+        "INSERT INTO documents_fts(rowid, path, title, body, layer) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (chunk_id, "a.md", "a", "café au lait recipe", "source"),
+    )
+    raw.commit()
+    raw.close()
+
+    # Hand the legacy DB to SQLiteStorage and let migrate() rebuild it.
+    s = SQLiteStorage(db_path)
+    await s.connect()
+    await s.migrate()
+    try:
+        conn = s._conn  # type: ignore[attr-defined]
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'documents_fts'"
+        ).fetchone()["sql"]
+        assert "path UNINDEXED" not in sql
+        assert "remove_diacritics 0" in sql
+        # Data survived the rebuild — search the diacritic-bearing
+        # token and confirm we still hit the same chunk.
+        hits = await s.fts_search('"café"', limit=5)
+        assert any(h.doc_id == "legacy::a.md" for h in hits), (
+            "legacy chunk text must remain searchable after FTS rebuild"
+        )
+    finally:
+        await s.close()
+
+
+async def test_sqlite_legacy_fts_rebuild_preserves_cjk_search(tmp_path: Path) -> None:
+    """A legacy DB containing CJK chunks must remain CJK-searchable
+    after the rebuild when the live process runs ``cjk_tokenizer="jieba"``.
+
+    Index/query symmetry is the hard constraint here: queries go
+    through ``_sanitize_fts(q, cjk_tokenizer="jieba")`` which
+    whitespace-segments via jieba; the index has to be tokenized the
+    same way or "机器" never matches a row that's stored raw.
+    Repopulating with the live tokenizer keeps the two ends in
+    lockstep regardless of what the legacy DB was originally indexed
+    under (which isn't recorded).
+    """
+    import sqlite3
+
+    db_path = tmp_path / "legacy_cjk.sqlite"
+
+    raw = sqlite3.connect(str(db_path))
+    raw.row_factory = sqlite3.Row
+    raw.executescript(
+        """
+        CREATE TABLE documents (
+            doc_id   TEXT PRIMARY KEY,
+            path     TEXT NOT NULL UNIQUE,
+            path_key TEXT,
+            title    TEXT,
+            hash     TEXT,
+            mtime    REAL,
+            layer    TEXT,
+            active   INTEGER
+        );
+        CREATE TABLE chunks (
+            chunk_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id    TEXT NOT NULL,
+            seq       INTEGER NOT NULL,
+            start_off INTEGER NOT NULL,
+            end_off   INTEGER NOT NULL,
+            text      TEXT NOT NULL,
+            UNIQUE (doc_id, seq)
+        );
+        CREATE VIRTUAL TABLE documents_fts USING fts5(
+            path UNINDEXED, title, body, layer UNINDEXED,
+            tokenize = "unicode61 remove_diacritics 2"
+        );
+        """
+    )
+    raw.execute(
+        "INSERT INTO documents(doc_id, path, path_key, title, hash, "
+        "mtime, layer, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("legacy::zh.md", "zh.md", "zh.md", "z", "h", 0.0, "source", 1),
+    )
+    cur = raw.execute(
+        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("legacy::zh.md", 0, 0, 6, "机器学习入门"),
+    )
+    raw.execute(
+        "INSERT INTO documents_fts(rowid, path, title, body, layer) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (cur.lastrowid, "zh.md", "z", "机器学习入门", "source"),
+    )
+    raw.commit()
+    raw.close()
+
+    s = SQLiteStorage(db_path, cjk_tokenizer="jieba")
+    await s.connect()
+    await s.migrate()
+    try:
+        hits = await s.fts_search("机器", limit=5)
+        assert any(h.doc_id == "legacy::zh.md" for h in hits), (
+            "legacy CJK chunk must stay searchable after rebuild — "
+            "rebuild must apply the live cjk_tokenizer so queries "
+            "(also segmented by jieba) can find the indexed tokens"
+        )
+    finally:
+        await s.close()
+
+
+def test_pg_fts_to_tsquery_string_translates_or_form() -> None:
+    """``_fts_to_tsquery_string`` translates the SQLite-flavored output
+    of ``info/search.py:_sanitize_fts`` (``'"foo" OR "bar"'``) into the
+    PG ``to_tsquery`` form (``'foo | bar'``).
+
+    Pure function — exercised without a Postgres fixture so the
+    translation contract is locked even when CI runs without PG.
+    """
+    from dikw_core.storage.postgres import _fts_to_tsquery_string
+
+    assert _fts_to_tsquery_string('"foo" OR "bar"') == "foo | bar"
+    assert _fts_to_tsquery_string('"single"') == "single"
+    assert _fts_to_tsquery_string("") == ""
+    # Empty token list (after stripping) → empty (caller short-circuits)
+    assert _fts_to_tsquery_string('""') == ""
+    # CJK passes through (the helper imports WORD_OR_CJK_CHARS so
+    # jieba-segmented Chinese tokens survive translation)
+    assert _fts_to_tsquery_string('"机器" OR "学习"') == "机器 | 学习"
+    # Raw (un-sanitized) input must also work — direct callers like
+    # ``test_chunks_and_fts_search`` pass plain words. Single token:
+    assert _fts_to_tsquery_string("brown") == "brown"
+    # Multi-token raw input: whitespace acts as token boundary
+    assert _fts_to_tsquery_string("alpha bravo") == "alpha | bravo"
+    # Punctuation is also a token boundary on the raw path — same as
+    # ``plainto_tsquery`` would split it. ``foo&bar`` and
+    # ``retrieval.rrf_k`` must become independent tokens, not a
+    # collapsed lexeme.
+    assert _fts_to_tsquery_string("foo&bar") == "foo | bar"
+    assert _fts_to_tsquery_string("retrieval.rrf_k") == "retrieval | rrf_k"
+
+
+async def test_pg_fts_search_multi_word_or(storage: Storage) -> None:
+    """PG ``fts_search`` must honor the ``OR``-joined sanitized query
+    that ``info/search.py:_sanitize_fts`` produces. Pre-PR PG used
+    ``plainto_tsquery('simple', q)`` which re-tokenized the literal
+    string ``'"alpha" OR "bravo"'`` and treated ``OR`` as a search
+    word — yielding 0 hits for any multi-word query.
+    """
+    if type(storage).__name__ != "PostgresStorage":
+        pytest.skip("PG-specific to_tsquery translation")
+    from dikw_core.info.search import _sanitize_fts
+
+    doc_a = _make_doc("sources/a.md")
+    doc_b = _make_doc("sources/b.md")
+    doc_c = _make_doc("sources/c.md")
+    await storage.upsert_document(doc_a)
+    await storage.upsert_document(doc_b)
+    await storage.upsert_document(doc_c)
+    await storage.replace_chunks(
+        doc_a.doc_id,
+        [ChunkRecord(doc_id=doc_a.doc_id, seq=0, start=0, end=5, text="alpha")],
+    )
+    await storage.replace_chunks(
+        doc_b.doc_id,
+        [ChunkRecord(doc_id=doc_b.doc_id, seq=0, start=0, end=5, text="bravo")],
+    )
+    await storage.replace_chunks(
+        doc_c.doc_id,
+        [ChunkRecord(doc_id=doc_c.doc_id, seq=0, start=0, end=7, text="charlie")],
+    )
+
+    sanitized = _sanitize_fts("alpha bravo")
+    assert " OR " in sanitized, (
+        f"_sanitize_fts contract changed; helper expects OR form: {sanitized!r}"
+    )
+
+    hits = await storage.fts_search(sanitized, limit=10)
+    hit_doc_ids = {h.doc_id for h in hits}
+    assert doc_a.doc_id in hit_doc_ids, "alpha-only doc must hit on OR query"
+    assert doc_b.doc_id in hit_doc_ids, "bravo-only doc must hit on OR query"
+    assert doc_c.doc_id not in hit_doc_ids, (
+        "charlie has neither token; must not hit"
+    )
+
+
+async def test_filesystem_constructor_accepts_cjk_tokenizer(tmp_path: Path) -> None:
+    """``FilesystemStorage`` must accept ``cjk_tokenizer`` so the
+    ingest path can pre-segment CJK text the same way the SQLite
+    adapter does. Pre-PR the constructor only took ``root``, so the
+    factory ``build_storage`` couldn't thread the wiki-level
+    ``RetrievalConfig.cjk_tokenizer`` through.
+    """
+    s = FilesystemStorage(tmp_path / "fs", cjk_tokenizer="jieba")
+    await s.connect()
+    try:
+        # Sanity check: the value made it onto the instance and isn't
+        # lost behind a default.
+        assert s._cjk_tokenizer == "jieba"  # type: ignore[attr-defined]
+    finally:
+        await s.close()
+
+
+async def test_filesystem_fts_segments_cjk_via_jieba(tmp_path: Path) -> None:
+    """End-to-end: with ``cjk_tokenizer='jieba'`` the filesystem FTS
+    can find a CJK word inside a longer run, mirroring SQLite's
+    ``preprocess_for_fts`` ingest path. Pre-PR ``_tokenise`` was
+    ``r"[A-Za-z][A-Za-z0-9']+"`` — Chinese characters never matched
+    so a CJK wiki was effectively unsearchable on the filesystem
+    backend.
+    """
+    s = FilesystemStorage(tmp_path / "fs", cjk_tokenizer="jieba")
+    await s.connect()
+    await s.migrate()
+    try:
+        doc = _make_doc("sources/zh.md")
+        await s.upsert_document(doc)
+        await s.replace_chunks(
+            doc.doc_id,
+            [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=6, text="机器学习入门")],
+        )
+        hits = await s.fts_search("机器", limit=5)
+        assert any(h.doc_id == doc.doc_id for h in hits), (
+            "CJK token must be searchable when cjk_tokenizer='jieba'"
+        )
+    finally:
+        await s.close()
+
+
+async def test_pg_fts_search_empty_query_returns_empty(storage: Storage) -> None:
+    """Sanitizer can produce an empty string when every token is
+    a reserved word or punctuation. PG ``fts_search`` must short-circuit
+    rather than feeding ``''`` to ``to_tsquery`` (which would raise).
+    """
+    if type(storage).__name__ != "PostgresStorage":
+        pytest.skip("PG-specific to_tsquery short-circuit")
+    hits = await storage.fts_search("", limit=5)
+    assert hits == []
 
 
 async def test_embeddings_and_vec_search(storage: Storage) -> None:

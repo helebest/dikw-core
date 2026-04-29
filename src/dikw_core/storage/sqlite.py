@@ -166,6 +166,7 @@ class SQLiteStorage:
             self._migrate_legacy_documents_path_key(conn)
             self._migrate_legacy_wisdom_evidence_id(conn)
             self._migrate_legacy_meta_kv_value_notnull(conn)
+            self._migrate_legacy_documents_fts(conn)
 
         await asyncio.to_thread(_run)
 
@@ -276,6 +277,15 @@ class SQLiteStorage:
             conn = self._require_conn()
             ids: list[int] = []
             with conn:
+                # Drop FTS rows for this doc BEFORE deleting the chunks
+                # they reference — the rowid lookup goes through the
+                # ``chunks`` table, so once chunks are gone we can't
+                # find the FTS rows to delete anymore.
+                conn.execute(
+                    "DELETE FROM documents_fts WHERE rowid IN ("
+                    "SELECT chunk_id FROM chunks WHERE doc_id = ?)",
+                    (doc_id,),
+                )
                 conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
                 for c in chunks:
                     cur = conn.execute(
@@ -284,39 +294,19 @@ class SQLiteStorage:
                         (c.doc_id, c.seq, c.start, c.end, c.text),
                     )
                     ids.append(int(cur.lastrowid or 0))
-                # refresh FTS rows for this document: delete stale, add new
-                conn.execute(
-                    "DELETE FROM documents_fts WHERE path = "
-                    "(SELECT path FROM documents WHERE doc_id = ?)",
-                    (doc_id,),
-                )
-                doc_row = conn.execute(
-                    "SELECT path, title, layer FROM documents WHERE doc_id = ?",
-                    (doc_id,),
-                ).fetchone()
-                if doc_row is not None:
-                    # rowid = chunk_id lets `fts_search` return chunk_id
-                    # so `chunk_asset_refs` can attach to FTS-only hits.
-                    # Title + body go through the same preprocessor the
-                    # query side uses in `_sanitize_fts`.
-                    title = preprocess_for_fts(
-                        doc_row["title"] or "", tokenizer=self._cjk_tokenizer
+                # rowid = chunk_id lets `fts_search` return chunk_id so
+                # `chunk_asset_refs` can attach to FTS-only hits. Body
+                # goes through the same preprocessor the query side
+                # uses in `_sanitize_fts`.
+                for cid, c in zip(ids, chunks, strict=True):
+                    body = preprocess_for_fts(
+                        c.text, tokenizer=self._cjk_tokenizer
                     )
-                    for cid, c in zip(ids, chunks, strict=True):
-                        body = preprocess_for_fts(
-                            c.text, tokenizer=self._cjk_tokenizer
-                        )
-                        conn.execute(
-                            "INSERT INTO documents_fts(rowid, path, title, body, layer) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (
-                                cid,
-                                doc_row["path"],
-                                title,
-                                body,
-                                doc_row["layer"],
-                            ),
-                        )
+                    conn.execute(
+                        "INSERT INTO documents_fts(rowid, body) "
+                        "VALUES (?, ?)",
+                        (cid, body),
+                    )
             return ids
 
         return await asyncio.to_thread(_run)
@@ -492,29 +482,31 @@ class SQLiteStorage:
     ) -> list[FTSHit]:
         def _run() -> list[FTSHit]:
             conn = self._require_conn()
+            # ``documents_fts`` is body-only; doc_id and layer come back
+            # via JOIN through ``chunks`` (rowid = chunk_id) onto
+            # ``documents``. Snippet column index 0 == the only indexed
+            # column (``body``).
             sql = (
-                "SELECT documents_fts.rowid AS chunk_id, path, "
-                "snippet(documents_fts, 2, '<mark>', '</mark>', '…', 10) AS snip, "
+                "SELECT documents_fts.rowid AS chunk_id, d.doc_id AS doc_id, "
+                "snippet(documents_fts, 0, '<mark>', '</mark>', '…', 10) AS snip, "
                 "bm25(documents_fts) AS score "
-                "FROM documents_fts WHERE documents_fts MATCH ?"
+                "FROM documents_fts "
+                "JOIN chunks c ON c.chunk_id = documents_fts.rowid "
+                "JOIN documents d ON d.doc_id = c.doc_id "
+                "WHERE documents_fts MATCH ? AND d.active = 1"
             )
             params: list[Any] = [q]
             if layer is not None:
-                sql += " AND layer = ?"
+                sql += " AND d.layer = ?"
                 params.append(layer.value)
             sql += " ORDER BY score LIMIT ?"
             params.append(limit)
             hits: list[FTSHit] = []
             for row in conn.execute(sql, params).fetchall():
-                doc_row = conn.execute(
-                    "SELECT doc_id FROM documents WHERE path = ?", (row["path"],)
-                ).fetchone()
-                if doc_row is None:
-                    continue
                 # bm25 returns lower-is-better; invert so higher = better
                 hits.append(
                     FTSHit(
-                        doc_id=doc_row["doc_id"],
+                        doc_id=row["doc_id"],
                         chunk_id=int(row["chunk_id"]),
                         score=-float(row["score"]),
                         snippet=row["snip"],
@@ -1506,6 +1498,88 @@ class SQLiteStorage:
             )
             conn.execute("DROP TABLE meta_kv")
             conn.execute("ALTER TABLE meta_kv_new RENAME TO meta_kv")
+
+    def _migrate_legacy_documents_fts(self, conn: sqlite3.Connection) -> None:
+        """Rebuild ``documents_fts`` body-only without diacritic stripping.
+
+        Pre-PR shape was an FTS5 virtual table over ``(path UNINDEXED,
+        title, body, layer UNINDEXED)`` with ``tokenize = "unicode61
+        remove_diacritics 2"``. Post-PR is body-only with plain
+        ``unicode61`` so SQLite's column scope and tokenizer behavior
+        match Postgres' ``chunks.fts`` ``to_tsvector('simple', text)``.
+
+        FTS5 cannot ALTER columns or change tokenizer in place, so the
+        rebuild is a DROP + CREATE + repopulate from ``chunks`` (which
+        always carry the raw text — the FTS table is purely derived
+        state). No FK concerns: FTS5 virtual tables are nothing
+        REFERENCES, so no ``PRAGMA foreign_keys OFF`` dance.
+
+        The repopulate path uses ``self._cjk_tokenizer`` (i.e. the
+        live config) deliberately, even though the legacy DB doesn't
+        record what tokenizer it was originally indexed with. The
+        priority is **index/query symmetry**: query construction in
+        ``info/search.py:_sanitize_fts`` runs every search through
+        the same live ``cjk_tokenizer``, so the rebuilt index has to
+        match or CJK searches lose every existing chunk. The
+        alternative — repopulating raw and waiting for a reingest —
+        leaves a window where a legacy ``jieba`` corpus is
+        unsearchable on CJK queries (already-segmented index rows
+        gone, raw rows in their place, query still segments). That's
+        the worse failure mode. ``RetrievalConfig.cjk_tokenizer``
+        being documented as "requires reingest to switch" still
+        holds for *changing* the tokenizer mid-life; this rebuild
+        just preserves whatever is currently configured.
+
+        Idempotent: detects the old shape (4-column or
+        ``remove_diacritics`` in tokenize) and skips otherwise.
+        Crash-safe: the whole rebuild runs in a single transaction.
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'documents_fts'"
+        ).fetchone()
+        if row is None:
+            return
+        sql = row["sql"] or ""
+        # Legacy if the 4-column UNINDEXED shape is present, or the
+        # tokenizer doesn't pin ``remove_diacritics 0`` (``unicode61``
+        # without an explicit ``0`` defaults to ``1`` which still
+        # strips most diacritics — that's the divergence we're
+        # closing). The ``title`` column doesn't get its own check
+        # because the ``UNINDEXED`` neighbours uniquely identify the
+        # legacy shape, and a bare ``"title"`` substring would
+        # false-match any future tokenizer option containing that
+        # word.
+        is_legacy = (
+            "path UNINDEXED" in sql
+            or "layer UNINDEXED" in sql
+            or "remove_diacritics 0" not in sql
+        )
+        if not is_legacy:
+            return
+        with conn:
+            conn.execute("DROP TABLE documents_fts")
+            conn.execute(
+                "CREATE VIRTUAL TABLE documents_fts USING fts5("
+                "  body, tokenize = \"unicode61 remove_diacritics 0\")"
+            )
+            # Bulk-insert via executemany so a 100k-chunk legacy DB
+            # doesn't stall on N round-tripped INSERTs. Tokenizer
+            # choice (live ``self._cjk_tokenizer``) is justified at
+            # length in the docstring above — index/query symmetry
+            # trumps "preserve the legacy tokenization" because
+            # asymmetry guarantees the queries miss.
+            rows = conn.execute(
+                "SELECT chunk_id, text FROM chunks ORDER BY chunk_id"
+            ).fetchall()
+            payload = [
+                (int(row["chunk_id"]),
+                 preprocess_for_fts(row["text"], tokenizer=self._cjk_tokenizer))
+                for row in rows
+            ]
+            conn.executemany(
+                "INSERT INTO documents_fts(rowid, body) VALUES (?, ?)",
+                payload,
+            )
 
     def _migrate_legacy_documents_path_key(self, conn: sqlite3.Connection) -> None:
         """Add the ``path_key`` column to a pre-normalization ``documents`` table.

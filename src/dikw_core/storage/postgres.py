@@ -689,16 +689,17 @@ class PostgresStorage:
     async def get_wisdom_evidence(self, item_id: str) -> list[WisdomEvidence]:
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT doc_id, excerpt, line FROM wisdom_evidence "
+                "SELECT id, doc_id, excerpt, line FROM wisdom_evidence "
                 "WHERE item_id = %s ORDER BY id ASC",
                 (item_id,),
             )
             rows = await cur.fetchall()
         return [
             WisdomEvidence(
-                doc_id=r[0],
-                excerpt=r[1],
-                line=int(r[2]) if r[2] is not None else None,
+                id=int(r[0]),
+                doc_id=r[1],
+                excerpt=r[2],
+                line=int(r[3]) if r[3] is not None else None,
             )
             for r in rows
         ]

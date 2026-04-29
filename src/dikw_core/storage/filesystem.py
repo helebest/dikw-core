@@ -140,13 +140,20 @@ class FilesystemStorage:
             for obj in _read_jsonl(self._p(self.WISDOM_ITEMS_FILE)):
                 item = WisdomItem(**obj)
                 self._wisdom_items[item.item_id] = item
+            # Backfill an ascending id for legacy sidecar entries that
+            # were written before the SQL parity fix. Position-in-file
+            # within an item_id partition mirrors insertion order.
+            ev_pos: dict[str, int] = {}
             for obj in _read_jsonl(self._p(self.WISDOM_EVIDENCE_FILE)):
+                item_id = obj["item_id"]
+                ev_pos[item_id] = ev_pos.get(item_id, 0) + 1
                 ev = WisdomEvidence(
+                    id=obj.get("id") if obj.get("id") is not None else ev_pos[item_id],
                     doc_id=obj["doc_id"],
                     excerpt=obj["excerpt"],
                     line=obj.get("line"),
                 )
-                self._wisdom_evidence[obj["item_id"]].append(ev)
+                self._wisdom_evidence[item_id].append(ev)
             # chunk counter
             cf = self._p(self.CHUNK_COUNTER_FILE)
             if cf.is_file():
@@ -377,7 +384,11 @@ class FilesystemStorage:
     ) -> None:
         async with self._lock:
             self._wisdom_items[item.item_id] = item
-            self._wisdom_evidence[item.item_id] = list(evidence)
+            # Assign 1-based monotonic ids per evidence row for parity
+            # with sqlite/postgres ``BIGSERIAL`` / ``AUTOINCREMENT``.
+            self._wisdom_evidence[item.item_id] = [
+                e.model_copy(update={"id": i + 1}) for i, e in enumerate(evidence)
+            ]
             await self._flush_wisdom()
 
     async def list_wisdom(

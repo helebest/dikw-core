@@ -845,6 +845,38 @@ async def test_wisdom_lifecycle(storage: Storage) -> None:
     assert len(approved) == 1
 
 
+async def test_wisdom_evidence_id_preserves_insertion_order(
+    storage: Storage,
+) -> None:
+    """``get_wisdom_evidence`` must return rows in insertion order across
+    all backends. SQLite gained an explicit AUTOINCREMENT id (mirroring
+    PG's BIGSERIAL) so both adapters' ``ORDER BY id ASC`` is stable;
+    filesystem assigns positional ids on put_wisdom.
+    """
+    doc = _make_doc("wiki/concept.md", layer=Layer.WIKI)
+    await storage.upsert_document(doc)
+    ts = time.time()
+    item = WisdomItem(
+        item_id="W-EV-ORDER",
+        kind=WisdomKind.PRINCIPLE,
+        title="Test ordering",
+        body="...",
+        confidence=0.5,
+        created_ts=ts,
+    )
+    evidence = [
+        WisdomEvidence(doc_id=doc.doc_id, excerpt=f"piece-{i}", line=i)
+        for i in range(5)
+    ]
+    await storage.put_wisdom(item, evidence)
+
+    rows = await storage.get_wisdom_evidence("W-EV-ORDER")
+    assert [r.excerpt for r in rows] == [f"piece-{i}" for i in range(5)]
+    assert all(r.id is not None for r in rows)
+    ids = [r.id for r in rows]
+    assert ids == sorted(ids)
+
+
 # ---- Multimedia assets + chunk_asset_refs (Phase F) ----------------------
 
 

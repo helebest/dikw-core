@@ -106,7 +106,13 @@ CREATE TABLE IF NOT EXISTS wisdom_items (
 CREATE INDEX IF NOT EXISTS wisdom_status ON wisdom_items(status);
 CREATE INDEX IF NOT EXISTS wisdom_kind ON wisdom_items(kind);
 
+-- ``id`` mirrors the Postgres ``BIGSERIAL PRIMARY KEY`` so the two
+-- adapters return evidence rows in the same insertion order via the
+-- same ``ORDER BY id`` clause. Without it SQLite has to lean on the
+-- implicit rowid, which is correct in practice but invisible to
+-- contract tests / external readers.
 CREATE TABLE IF NOT EXISTS wisdom_evidence (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
     item_id TEXT NOT NULL REFERENCES wisdom_items(item_id) ON DELETE CASCADE,
     doc_id  TEXT NOT NULL REFERENCES documents(doc_id),
     excerpt TEXT NOT NULL,

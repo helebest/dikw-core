@@ -536,12 +536,15 @@ class PostgresStorage:
     async def list_wiki_log(
         self, *, since_ts: float | None = None, limit: int | None = None
     ) -> list[WikiLogEntry]:
-        sql = "SELECT ts, action, src, dst, note FROM wiki_log"
+        sql = "SELECT id, ts, action, src, dst, note FROM wiki_log"
         params: list[Any] = []
         if since_ts is not None:
             sql += " WHERE ts >= %s"
             params.append(since_ts)
-        sql += " ORDER BY ts ASC"
+        # (ts, id) tie-break: float-second ts can collide for events
+        # in the same ingest batch; BIGSERIAL id preserves insertion
+        # order within a second.
+        sql += " ORDER BY ts ASC, id ASC"
         if limit is not None:
             sql += " LIMIT %s"
             params.append(int(limit))
@@ -550,11 +553,12 @@ class PostgresStorage:
             rows = await cur.fetchall()
         return [
             WikiLogEntry(
-                ts=float(r[0]),
-                action=r[1],
-                src=r[2],
-                dst=r[3],
-                note=r[4],
+                id=int(r[0]),
+                ts=float(r[1]),
+                action=r[2],
+                src=r[3],
+                dst=r[4],
+                note=r[5],
             )
             for r in rows
         ]

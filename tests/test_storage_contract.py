@@ -709,6 +709,28 @@ async def test_wiki_log_append(storage: Storage) -> None:
     assert counts.last_wiki_log_ts == pytest.approx(ts, abs=1.0)
 
 
+async def test_wiki_log_same_ts_tiebreak(storage: Storage) -> None:
+    """Events appended within the same float-second must come back in
+    insertion order; ts collisions are real (one ingest run can append
+    multiple entries inside a single second).
+    """
+    ts = time.time()
+    notes = [f"event-{i}" for i in range(5)]
+    for note in notes:
+        await storage.append_wiki_log(
+            WikiLogEntry(ts=ts, action="ingest", src="sources/a.md", note=note)
+        )
+
+    rows = await storage.list_wiki_log(since_ts=ts)
+    same_ts = [r for r in rows if r.ts == ts]
+    assert [r.note for r in same_ts] == notes
+    # storage layer must assign a non-None monotonic id per row
+    assigned_ids = [r.id for r in same_ts]
+    assert all(i is not None for i in assigned_ids)
+    assert assigned_ids == sorted(assigned_ids)
+    assert len(set(assigned_ids)) == len(assigned_ids)
+
+
 async def test_wisdom_lifecycle(storage: Storage) -> None:
     doc = _make_doc("wiki/concept.md", layer=Layer.WIKI)
     await storage.upsert_document(doc)

@@ -65,7 +65,12 @@ CREATE TABLE IF NOT EXISTS links (
 
 CREATE INDEX IF NOT EXISTS links_dst ON links(dst_path);
 
+-- ``id`` is an explicit AUTOINCREMENT column so monotonic ordering is
+-- preserved when multiple events share the same ``ts`` (``time.time()``
+-- is float-second resolution; an ingest batch can append multiple rows
+-- in the same second). Mirrors the Postgres ``BIGSERIAL`` column.
 CREATE TABLE IF NOT EXISTS wiki_log (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts     REAL NOT NULL,
     action TEXT NOT NULL,
     src    TEXT,

@@ -129,6 +129,12 @@ class LinkRecord(BaseModel):
 
 
 class WikiLogEntry(BaseModel):
+    # ``id`` is None on construction; the storage layer assigns it on
+    # insert via SQLite AUTOINCREMENT / Postgres BIGSERIAL. Acts as a
+    # monotonic tiebreaker when two events land in the same float-second
+    # ``ts`` — ``list_wiki_log`` orders by ``(ts, id)`` so retrieval
+    # order matches insert order even within a sub-second burst.
+    id: int | None = None
     ts: float
     action: Literal["ingest", "synth", "distill", "review", "lint", "delete"]
     src: str | None = None

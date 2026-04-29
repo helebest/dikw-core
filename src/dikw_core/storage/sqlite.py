@@ -148,6 +148,7 @@ class SQLiteStorage:
             self._verify_no_legacy_text_embed_tables(conn)
             self._migrate_legacy_chunk_offset_columns(conn)
             self._migrate_legacy_assets_columns(conn)
+            self._migrate_legacy_wiki_log_id(conn)
 
         await asyncio.to_thread(_run)
 
@@ -629,18 +630,22 @@ class SQLiteStorage:
     ) -> list[WikiLogEntry]:
         def _run() -> list[WikiLogEntry]:
             conn = self._require_conn()
-            sql = "SELECT ts, action, src, dst, note FROM wiki_log"
+            sql = "SELECT id, ts, action, src, dst, note FROM wiki_log"
             params: list[Any] = []
             if since_ts is not None:
                 sql += " WHERE ts >= ?"
                 params.append(since_ts)
-            sql += " ORDER BY ts ASC"
+            # (ts, id) tie-break: float-second ts can collide for events
+            # in the same ingest batch; AUTOINCREMENT id preserves
+            # insertion order within a second.
+            sql += " ORDER BY ts ASC, id ASC"
             if limit is not None:
                 sql += " LIMIT ?"
                 params.append(int(limit))
             rows = conn.execute(sql, params).fetchall()
             return [
                 WikiLogEntry(
+                    id=int(r["id"]),
                     ts=float(r["ts"]),
                     action=r["action"],
                     src=r["src"],
@@ -1320,6 +1325,67 @@ class SQLiteStorage:
         for legacy in ("caption", "caption_model", "height", "width"):
             if legacy in cols:
                 conn.execute(f"ALTER TABLE assets DROP COLUMN {legacy}")
+
+    def _migrate_legacy_wiki_log_id(self, conn: sqlite3.Connection) -> None:
+        """Add the explicit ``id`` column to a pre-parity ``wiki_log`` table.
+
+        Older DBs created before the SQLite/Postgres parity fix have no
+        explicit ``id`` and rely on the implicit rowid for ordering.
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op against an existing
+        table, so without this helper an upgrade leaves ``id`` missing
+        and ``list_wiki_log``'s ``ORDER BY ts ASC, id ASC`` would fail.
+
+        Idempotent and crash-safe:
+        * skips when the table is absent or already has ``id``;
+        * drops a stale ``wiki_log_new`` from a prior crashed attempt
+          before re-creating it, so re-running on a partially-migrated
+          DB never trips on "table already exists";
+        * runs the rebuild in a single transaction so a crash midway
+          rolls back to the original shape rather than leaving a
+          half-built table around.
+
+        SQLite cannot add an INTEGER PRIMARY KEY column via
+        ``ALTER TABLE`` (rowid aliasing requires the column at CREATE
+        time), so this does a copy-rebuild: create new table, copy rows
+        in rowid order so AUTOINCREMENT ids match the original event
+        order, swap the names. chunk-level FKs reference ``chunks`` not
+        ``wiki_log``, so the rebuild is structurally safe.
+        """
+        info = conn.execute("PRAGMA table_info('wiki_log')").fetchall()
+        if not info:
+            return
+        cols = {row["name"] for row in info}
+        if "id" in cols:
+            # Defensive cleanup: a prior crashed attempt may have left
+            # ``wiki_log_new`` around even though the rename never
+            # happened. A current ``id``-bearing wiki_log means the
+            # rebuild is no longer needed; drop the orphan to keep the
+            # DB tidy.
+            conn.execute("DROP TABLE IF EXISTS wiki_log_new")
+            return
+        with conn:  # transaction: all-or-nothing rebuild
+            conn.execute("DROP TABLE IF EXISTS wiki_log_new")
+            conn.execute("DROP INDEX IF EXISTS wiki_log_ts")
+            conn.execute(
+                "CREATE TABLE wiki_log_new ("
+                "  id     INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "  ts     REAL NOT NULL,"
+                "  action TEXT NOT NULL,"
+                "  src    TEXT,"
+                "  dst    TEXT,"
+                "  note   TEXT"
+                ")"
+            )
+            # Copy rows in original rowid order so AUTOINCREMENT ids
+            # increase along the original event timeline.
+            conn.execute(
+                "INSERT INTO wiki_log_new(ts, action, src, dst, note) "
+                "SELECT ts, action, src, dst, note FROM wiki_log "
+                "ORDER BY rowid ASC"
+            )
+            conn.execute("DROP TABLE wiki_log")
+            conn.execute("ALTER TABLE wiki_log_new RENAME TO wiki_log")
+            conn.execute("CREATE INDEX IF NOT EXISTS wiki_log_ts ON wiki_log(ts)")
 
     def _ensure_vec_table(
         self,

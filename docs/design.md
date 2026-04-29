@@ -81,7 +81,7 @@ Module boundaries are chosen so each subpackage fits in a single reading pass an
 - **Language**: Python 3.12+
 - **Packaging**: `uv` → `pyproject.toml` (PEP 621), `uv.lock` committed; single source layout under `src/dikw_core/`
 - **Storage (MVP, default)**: stdlib `sqlite3` + `sqlite-vec` (pip) for vectors; FTS5 built into SQLite. Behind a `Storage` Protocol.
-- **Storage (planned, enterprise)**: Postgres 15+ with `pgvector` ≥0.6 and `tsvector`/`pg_trgm` for full-text, via `psycopg[binary,pool]`. Optional extra: `uv pip install dikw-core[postgres]`.
+- **Storage (planned, enterprise)**: Postgres 15+ with `pgvector` ≥0.6 and `tsvector` + GIN for full-text, via `psycopg[binary,pool]`. Optional extra: `uv pip install dikw-core[postgres]`.
 - **Storage (planned, vault-native)**: Filesystem backend — the vault IS the index. No DB. Chunks/links/wisdom-items live in `.dikw/` JSON sidecars; retrieval is FTS + LLM-driven navigation over `index.md` + link graph (no dense retrieval — users who outgrow lexical-only flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest). Matches Karpathy's "scoping deterministic, reasoning probabilistic" claim at ≤~200 pages. No extra dep footprint.
 - **Schemas**: Pydantic v2 for config, records, tool I/O
 - **Markdown**: `markdown-it-py` + `python-frontmatter`; wiki-link parsing via a small in-repo module (not a heavy dep)
@@ -244,20 +244,27 @@ sources:
 
 ## Data Model
 
-The logical model is backend-agnostic; the SQL below is the **SQLite reference schema** used by the MVP adapter. The Postgres adapter maps the same logical entities to equivalent structures — `tsvector` + GIN + `pg_trgm` for FTS, `pgvector` for embeddings, regular tables for the rest — behind the same `Storage` Protocol.
+The logical model is backend-agnostic; the SQL below is the **SQLite reference schema** used by the MVP adapter. The Postgres adapter maps the same logical entities to equivalent structures — `tsvector` + GIN for FTS, `pgvector` for embeddings, regular tables for the rest — behind the same `Storage` Protocol.
 
 ### SQLite reference schema (MVP)
 
 ```sql
 -- D
+-- ``path`` carries the user's spelling (display path); ``path_key`` is
+-- the engine's NFC + casefold lookup key. Splitting the two lets the
+-- same logical file under different macOS NFD / NTFS-case spellings
+-- resolve to a single row while ``dikw status`` still shows whichever
+-- spelling is on disk. ``data/path_norm.normalize_path`` is the single
+-- source of truth for the transformation.
 CREATE TABLE documents (
-    doc_id TEXT PRIMARY KEY,
-    path   TEXT UNIQUE NOT NULL,
-    title  TEXT,
-    hash   TEXT NOT NULL,                 -- sha256 of body; indexed for reverse lookup
-    mtime  REAL,
-    layer  TEXT CHECK (layer IN ('source','wiki','wisdom')) NOT NULL,
-    active INTEGER DEFAULT 1
+    doc_id   TEXT PRIMARY KEY,
+    path     TEXT NOT NULL,
+    path_key TEXT NOT NULL UNIQUE,
+    title    TEXT,
+    hash     TEXT NOT NULL,             -- sha256 of body; indexed for reverse lookup
+    mtime    REAL,
+    layer    TEXT CHECK (layer IN ('source','wiki','wisdom')) NOT NULL,
+    active   INTEGER DEFAULT 1
 );
 CREATE INDEX documents_hash_idx ON documents(hash);
 

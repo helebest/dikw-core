@@ -44,6 +44,7 @@ from ..schemas import (
     dump_media_meta,
     load_media_meta,
 )
+from ._migrations import SCHEMA_VERSION_KEY, ordered_migrations
 from ._vec_codec import deserialize_vec, serialize_vec
 from .base import NotSupported, StorageError
 
@@ -82,13 +83,12 @@ class PostgresStorage:
                 "install via `uv pip install dikw-core[postgres]`"
             ) from e
 
-        # Extensions must exist before the pool hands out connections,
-        # because ``configure`` below registers pgvector types on each
-        # new connection — which needs the ``vector`` type present.
+        # The vector extension must exist before the pool hands out
+        # connections because the SQL below uses ``::vector`` casts;
+        # those need the extension type to be present.
         boot = await psycopg.AsyncConnection.connect(self._dsn, autocommit=True)
         try:
             async with boot.cursor() as cur:
-                await cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
                 await cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 await cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
         finally:
@@ -121,11 +121,28 @@ class PostgresStorage:
         scripts = self._load_migration_scripts()
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
-                for sql_text in scripts:
+                # Ensure meta_kv exists before reading schema_version.
+                # SQLite creates it inline in migrate(); the PG version
+                # is in 001_init.sql but legacy DBs may have skipped it
+                # if they predate meta_kv — guard with IF NOT EXISTS so
+                # the read below never trips a "no such table" error.
+                await cur.execute(
+                    "CREATE TABLE IF NOT EXISTS meta_kv ("
+                    "  key TEXT PRIMARY KEY, value TEXT NOT NULL"
+                    ")"
+                )
+                applied = await _read_schema_version_pg(cur)
+                applied_in_run = applied
+                for n, sql_text in scripts:
+                    if n <= applied:
+                        continue
                     await cur.execute(sql_text)
+                    applied_in_run = max(applied_in_run, n)
+                await _write_schema_version_pg(cur, applied_in_run)
             await conn.commit()
             await self._verify_no_legacy_content_table(conn)
             await self._verify_no_legacy_text_embed_tables(conn)
+            await self._migrate_legacy_documents_path_key(conn)
 
     # ---- D layer ---------------------------------------------------------
 
@@ -134,10 +151,13 @@ class PostgresStorage:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    INSERT INTO documents(doc_id, path, title, hash, mtime, layer, active)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO documents(
+                        doc_id, path, path_key, title, hash, mtime, layer, active
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (doc_id) DO UPDATE SET
                         path = EXCLUDED.path,
+                        path_key = EXCLUDED.path_key,
                         title = EXCLUDED.title,
                         hash = EXCLUDED.hash,
                         mtime = EXCLUDED.mtime,
@@ -147,6 +167,7 @@ class PostgresStorage:
                     (
                         doc.doc_id,
                         doc.path,
+                        doc.path_key,
                         doc.title,
                         doc.hash,
                         doc.mtime,
@@ -159,7 +180,7 @@ class PostgresStorage:
     async def get_document(self, doc_id: str) -> DocumentRecord | None:
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT doc_id, path, title, hash, mtime, layer, active "
+                "SELECT doc_id, path, path_key, title, hash, mtime, layer, active "
                 "FROM documents WHERE doc_id = %s",
                 (doc_id,),
             )
@@ -174,7 +195,7 @@ class PostgresStorage:
             return []
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT doc_id, path, title, hash, mtime, layer, active "
+                "SELECT doc_id, path, path_key, title, hash, mtime, layer, active "
                 "FROM documents WHERE doc_id = ANY(%s)",
                 (ids,),
             )
@@ -189,7 +210,7 @@ class PostgresStorage:
         since_ts: float | None = None,
     ) -> Iterable[DocumentRecord]:
         sql = (
-            "SELECT doc_id, path, title, hash, mtime, layer, active "
+            "SELECT doc_id, path, path_key, title, hash, mtime, layer, active "
             "FROM documents WHERE TRUE"
         )
         params: list[Any] = []
@@ -537,12 +558,15 @@ class PostgresStorage:
     async def list_wiki_log(
         self, *, since_ts: float | None = None, limit: int | None = None
     ) -> list[WikiLogEntry]:
-        sql = "SELECT ts, action, src, dst, note FROM wiki_log"
+        sql = "SELECT id, ts, action, src, dst, note FROM wiki_log"
         params: list[Any] = []
         if since_ts is not None:
             sql += " WHERE ts >= %s"
             params.append(since_ts)
-        sql += " ORDER BY ts ASC"
+        # (ts, id) tie-break: float-second ts can collide for events
+        # in the same ingest batch; BIGSERIAL id preserves insertion
+        # order within a second.
+        sql += " ORDER BY ts ASC, id ASC"
         if limit is not None:
             sql += " LIMIT %s"
             params.append(int(limit))
@@ -551,11 +575,12 @@ class PostgresStorage:
             rows = await cur.fetchall()
         return [
             WikiLogEntry(
-                ts=float(r[0]),
-                action=r[1],
-                src=r[2],
-                dst=r[3],
-                note=r[4],
+                id=int(r[0]),
+                ts=float(r[1]),
+                action=r[2],
+                src=r[3],
+                dst=r[4],
+                note=r[5],
             )
             for r in rows
         ]
@@ -1022,14 +1047,18 @@ class PostgresStorage:
             raise StorageError("PostgresStorage is not connected; call `connect()` first")
         return _ConnectionContext(self._pool, self._schema)
 
-    def _load_migration_scripts(self) -> list[str]:
+    def _load_migration_scripts(self) -> list[tuple[int, str]]:
+        """Return ``(number, body)`` pairs sorted by numeric prefix.
+
+        Body is read eagerly because callers iterate the list multiple
+        times during version-aware application; ``ordered_migrations``
+        only yields filenames and stays cheap to call standalone.
+        """
         pkg = resources.files(MIGRATIONS_PACKAGE)
-        names = sorted(
-            r.name
-            for r in pkg.iterdir()
-            if r.is_file() and r.name.endswith(".sql")
-        )
-        return [pkg.joinpath(n).read_text(encoding="utf-8") for n in names]
+        return [
+            (n, pkg.joinpath(name).read_text(encoding="utf-8"))
+            for n, name in ordered_migrations(MIGRATIONS_PACKAGE)
+        ]
 
     async def _ensure_vec_table(
         self,
@@ -1091,6 +1120,99 @@ class PostgresStorage:
                         "embedding schema."
                     )
 
+    async def _migrate_legacy_documents_path_key(
+        self, conn: AsyncConnection
+    ) -> None:
+        """Add ``path_key`` to a pre-normalization ``documents`` table.
+
+        Older PG DBs have ``path TEXT UNIQUE NOT NULL`` and no
+        ``path_key``. This helper:
+
+        1. Adds ``path_key TEXT`` (no UNIQUE yet — backfill must run
+           first; the migration file's NOT NULL is satisfied via
+           backfill before the constraint flips on).
+        2. Backfills via ``normalize_path`` in Python; PG has no
+           Unicode-NFC normalization in core SQL (``normalize()`` exists
+           but no casefold equivalent), so the work happens in-process.
+        3. Detects case-only collisions and bails with rebuild
+           instructions if any are found — pre-alpha policy.
+        4. Adds the UNIQUE constraint and drops the legacy
+           ``documents_path_key`` column-equivalent UNIQUE on ``path``.
+
+        Idempotent: short-circuits when ``path_key`` already exists on
+        the table.
+        """
+        from ..data.path_norm import normalize_path
+
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'documents'"
+            )
+            cols = {r[0] for r in await cur.fetchall()}
+        if not cols or "path_key" in cols:
+            return
+
+        async with conn.cursor() as cur:
+            await cur.execute("ALTER TABLE documents ADD COLUMN path_key TEXT")
+            await cur.execute("SELECT doc_id, path FROM documents")
+            rows = await cur.fetchall()
+            for doc_id, path in rows:
+                await cur.execute(
+                    "UPDATE documents SET path_key = %s WHERE doc_id = %s",
+                    (normalize_path(path), doc_id),
+                )
+            await cur.execute(
+                "SELECT path_key, COUNT(*) FROM documents "
+                "GROUP BY path_key HAVING COUNT(*) > 1 LIMIT 1"
+            )
+            collision = await cur.fetchone()
+            if collision is not None:
+                await conn.rollback()
+                raise StorageError(
+                    "documents.path_key collision detected during legacy "
+                    f"migration (path_key={collision[0]!r}, rows={collision[1]}). "
+                    "The legacy DB had two case-only-different paths for what is "
+                    "now one logical document. Drop the schema "
+                    "(`DROP SCHEMA <schema> CASCADE`) and re-run `dikw ingest` "
+                    "to rebuild on the path_key-aware schema."
+                )
+            await cur.execute("ALTER TABLE documents ALTER COLUMN path_key SET NOT NULL")
+            await cur.execute("ALTER TABLE documents ADD UNIQUE (path_key)")
+            # Drop the legacy column-level UNIQUE on ``path``. PG names
+            # auto-generated single-column UNIQUEs ``<table>_<col>_key``,
+            # so the legacy one is ``documents_path_key`` (UNIQUE on the
+            # ``path`` column). DROP IF EXISTS is safe if an older
+            # install renamed it; the new uniqueness already lives on
+            # path_key by the time we get here.
+            await cur.execute(
+                "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_path_key"
+            )
+        await conn.commit()
+
+
+async def _read_schema_version_pg(cur: Any) -> int:
+    """Read ``meta_kv['schema_version']`` as an int. Missing row → 0."""
+    await cur.execute(
+        "SELECT value FROM meta_kv WHERE key = %s", (SCHEMA_VERSION_KEY,)
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _write_schema_version_pg(cur: Any, n: int) -> None:
+    await cur.execute(
+        "INSERT INTO meta_kv(key, value) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (SCHEMA_VERSION_KEY, str(n)),
+    )
+
 
 class _ConnectionContext:
     """``async with``-friendly wrapper that sets the schema search path per conn."""
@@ -1115,14 +1237,17 @@ class _ConnectionContext:
 
 
 def _row_to_document(row: Any) -> DocumentRecord:
+    # Column order matches every SELECT in postgres.py:
+    # doc_id, path, path_key, title, hash, mtime, layer, active
     return DocumentRecord(
         doc_id=row[0],
         path=row[1],
-        title=row[2],
-        hash=row[3],
-        mtime=float(row[4] or 0.0),
-        layer=Layer(row[5]),
-        active=bool(row[6]),
+        path_key=row[2],
+        title=row[3],
+        hash=row[4],
+        mtime=float(row[5] or 0.0),
+        layer=Layer(row[6]),
+        active=bool(row[7]),
     )
 
 

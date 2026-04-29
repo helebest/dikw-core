@@ -1,6 +1,6 @@
 -- dikw-core Postgres schema v1
--- The pg_trgm and vector extensions are enabled at connect-time in Python
--- (not here) so the pool can register pgvector types on first connection.
+-- The vector extension is enabled at connect-time in Python (not here)
+-- so the SQL below can use ``::vector`` casts on the first connection.
 -- Per-version vec_chunks_v<id> / vec_assets_v<id> tables are created
 -- lazily in Python so the engine can parameterise the embedding
 -- dimension at first insert. See storage/postgres.py.
@@ -12,14 +12,17 @@ CREATE TABLE IF NOT EXISTS meta_kv (
 
 -- ---- D layer -------------------------------------------------------------
 
+-- See migrations/sqlite/001_init.sql for the path / path_key split
+-- rationale.
 CREATE TABLE IF NOT EXISTS documents (
-    doc_id TEXT PRIMARY KEY,
-    path   TEXT UNIQUE NOT NULL,
-    title  TEXT,
-    hash   TEXT NOT NULL,
-    mtime  DOUBLE PRECISION,
-    layer  TEXT NOT NULL CHECK (layer IN ('source','wiki','wisdom')),
-    active BOOLEAN NOT NULL DEFAULT TRUE
+    doc_id   TEXT PRIMARY KEY,
+    path     TEXT NOT NULL,
+    path_key TEXT NOT NULL UNIQUE,
+    title    TEXT,
+    hash     TEXT NOT NULL,
+    mtime    DOUBLE PRECISION,
+    layer    TEXT NOT NULL CHECK (layer IN ('source','wiki','wisdom')),
+    active   BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE INDEX IF NOT EXISTS documents_layer_active ON documents(layer, active);

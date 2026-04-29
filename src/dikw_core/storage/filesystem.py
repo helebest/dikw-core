@@ -128,8 +128,13 @@ class FilesystemStorage:
                         line=int(obj["line"]),
                     )
                 )
-            # wiki log
-            for obj in _read_jsonl(self._p(self.WIKI_LOG_FILE)):
+            # wiki log — backfill an ascending id for legacy sidecars that
+            # were written before the SQL parity fix landed (entries
+            # without an ``id`` field). Position-in-file is a good
+            # proxy for insertion order at this scale.
+            for pos, obj in enumerate(_read_jsonl(self._p(self.WIKI_LOG_FILE)), start=1):
+                if obj.get("id") is None:
+                    obj["id"] = pos
                 self._wiki_log.append(WikiLogEntry(**obj))
             # wisdom
             for obj in _read_jsonl(self._p(self.WISDOM_ITEMS_FILE)):
@@ -342,15 +347,23 @@ class FilesystemStorage:
 
     async def append_wiki_log(self, entry: WikiLogEntry) -> None:
         async with self._lock:
-            self._wiki_log.append(entry)
+            # Assign a monotonic id for parity with sqlite/postgres adapters.
+            # 1-based; survives sidecar reload because we count the loaded
+            # list rather than re-reading the file.
+            assigned = entry.model_copy(update={"id": len(self._wiki_log) + 1})
+            self._wiki_log.append(assigned)
             await asyncio.to_thread(
-                _append_jsonl, self._p(self.WIKI_LOG_FILE), entry.model_dump(mode="json")
+                _append_jsonl,
+                self._p(self.WIKI_LOG_FILE),
+                assigned.model_dump(mode="json"),
             )
 
     async def list_wiki_log(
         self, *, since_ts: float | None = None, limit: int | None = None
     ) -> list[WikiLogEntry]:
-        rows = sorted(self._wiki_log, key=lambda e: e.ts)
+        # (ts, id) tie-break for events in the same float-second; mirrors
+        # the SQL adapters' ORDER BY clause.
+        rows = sorted(self._wiki_log, key=lambda e: (e.ts, e.id or 0))
         if since_ts is not None:
             rows = [r for r in rows if r.ts >= since_ts]
         if limit is not None:

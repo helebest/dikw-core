@@ -104,12 +104,96 @@ def _make_doc(path: str, layer: Layer = Layer.SOURCE) -> DocumentRecord:
     )
 
 
+def _has_schema_constraints(storage: Storage) -> bool:
+    """True for SQL-backed adapters (sqlite/postgres) where SCHEMA
+    CHECK / UNIQUE constraints fire at write time. The filesystem
+    backend persists DTOs as JSONL with no DB-level invariants, so
+    schema-shape tests skip it.
+    """
+    cls_name = type(storage).__name__
+    return cls_name in {"SQLiteStorage", "PostgresStorage"}
+
+
+def _integrity_error_types() -> tuple[type[BaseException], ...]:
+    """Adapter-specific integrity-error classes for ``pytest.raises``.
+
+    SQLite raises ``sqlite3.IntegrityError``; Postgres raises
+    ``psycopg.errors.IntegrityError``. The Postgres extra is optional,
+    so import it lazily and fall back to ``sqlite3`` only.
+    """
+    import sqlite3
+
+    types: list[type[BaseException]] = [sqlite3.IntegrityError]
+    try:
+        import psycopg
+
+        types.append(psycopg.errors.IntegrityError)
+    except ImportError:
+        pass
+    return tuple(types)
+
+
 async def test_migrate_is_idempotent(storage: Storage) -> None:
     await storage.migrate()
     await storage.migrate()
     counts = await storage.counts()
     assert counts.chunks == 0
     assert counts.documents_by_layer == {}
+
+
+async def test_migrate_records_schema_version(storage: Storage) -> None:
+    """After ``migrate()`` the SQL adapters must record the highest
+    applied migration number in ``meta_kv['schema_version']``. The
+    filesystem adapter has no DB-level metadata table and is skipped.
+    """
+    if not _has_schema_constraints(storage):
+        pytest.skip("backend has no meta_kv table")
+
+    await storage.migrate()
+
+    cls_name = type(storage).__name__
+    expected = _expected_max_migration(cls_name)
+    actual = await _read_schema_version(storage)
+    assert actual == expected, (
+        f"schema_version should equal max migration number "
+        f"({expected}); got {actual}"
+    )
+
+    # Re-running migrate must not regress the version.
+    await storage.migrate()
+    assert await _read_schema_version(storage) == expected
+
+
+def _expected_max_migration(adapter_name: str) -> int:
+    """Resolve the highest migration number the adapter currently ships."""
+    from dikw_core.storage._migrations import ordered_migrations
+
+    pkg = (
+        "dikw_core.storage.migrations.sqlite"
+        if adapter_name == "SQLiteStorage"
+        else "dikw_core.storage.migrations.postgres"
+    )
+    pairs = ordered_migrations(pkg)
+    return pairs[-1][0] if pairs else 0
+
+
+async def _read_schema_version(storage: Storage) -> int:
+    """Adapter-aware ``meta_kv['schema_version']`` reader for tests."""
+    cls_name = type(storage).__name__
+    if cls_name == "SQLiteStorage":
+        conn = storage._conn  # type: ignore[attr-defined]
+        row = conn.execute(
+            "SELECT value FROM meta_kv WHERE key = 'schema_version'"
+        ).fetchone()
+        return 0 if row is None else int(row["value"])
+    if cls_name == "PostgresStorage":
+        async with storage._acquire() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]
+            await cur.execute(
+                "SELECT value FROM meta_kv WHERE key = 'schema_version'"
+            )
+            row = await cur.fetchone()
+        return 0 if row is None else int(row[0])
+    raise AssertionError(f"unknown adapter {cls_name}")
 
 
 async def test_document_roundtrip(storage: Storage) -> None:
@@ -709,6 +793,28 @@ async def test_wiki_log_append(storage: Storage) -> None:
     assert counts.last_wiki_log_ts == pytest.approx(ts, abs=1.0)
 
 
+async def test_wiki_log_same_ts_tiebreak(storage: Storage) -> None:
+    """Events appended within the same float-second must come back in
+    insertion order; ts collisions are real (one ingest run can append
+    multiple entries inside a single second).
+    """
+    ts = time.time()
+    notes = [f"event-{i}" for i in range(5)]
+    for note in notes:
+        await storage.append_wiki_log(
+            WikiLogEntry(ts=ts, action="ingest", src="sources/a.md", note=note)
+        )
+
+    rows = await storage.list_wiki_log(since_ts=ts)
+    same_ts = [r for r in rows if r.ts == ts]
+    assert [r.note for r in same_ts] == notes
+    # storage layer must assign a non-None monotonic id per row
+    assigned_ids = [r.id for r in same_ts]
+    assert all(i is not None for i in assigned_ids)
+    assert assigned_ids == sorted(assigned_ids)
+    assert len(set(assigned_ids)) == len(assigned_ids)
+
+
 async def test_wisdom_lifecycle(storage: Storage) -> None:
     doc = _make_doc("wiki/concept.md", layer=Layer.WIKI)
     await storage.upsert_document(doc)
@@ -905,6 +1011,94 @@ async def test_chunk_asset_refs_replaced_on_reupsert(storage: Storage) -> None:
         pytest.skip("backend doesn't implement chunk_asset_refs yet")
 
     assert await storage.chunk_asset_refs_for_chunks([cid]) == {cid: []}
+
+
+async def test_chunk_asset_refs_constraint_zero_length_span(
+    storage: Storage,
+) -> None:
+    """The schema must reject ``start_in_chunk == end_in_chunk`` (degenerate
+    span). Today no chunker path produces these, but the CHECK is the
+    boundary safety net so a future refactor can't slip past silently."""
+    doc = _make_doc("sources/zero-span.md")
+    await storage.upsert_document(doc)
+    ids = await storage.replace_chunks(
+        doc.doc_id,
+        [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=10, text="hi")],
+    )
+    cid = ids[0]
+    a = _make_asset("ff" + "0" * 62)
+    try:
+        await storage.upsert_asset(a)
+    except NotSupported:
+        pytest.skip("backend doesn't implement chunk_asset_refs yet")
+
+    # Filesystem backend has no schema-level CHECK; document the
+    # SQL-only contract by skipping it.
+    if not _has_schema_constraints(storage):
+        pytest.skip("backend has no schema-level CHECK")
+
+    with pytest.raises(_integrity_error_types()):
+        await storage.replace_chunk_asset_refs(
+            cid,
+            [
+                ChunkAssetRef(
+                    chunk_id=cid,
+                    asset_id=a.asset_id,
+                    ord=0,
+                    alt="",
+                    start_in_chunk=5,
+                    end_in_chunk=5,
+                )
+            ],
+        )
+
+
+async def test_chunk_asset_refs_constraint_duplicate_span(
+    storage: Storage,
+) -> None:
+    """Two refs at the same ``[start, end)`` byte range within a single
+    chunk must be rejected. The chunker can't legitimately produce
+    duplicates; a violation indicates a regression worth catching loudly."""
+    doc = _make_doc("sources/dup-span.md")
+    await storage.upsert_document(doc)
+    ids = await storage.replace_chunks(
+        doc.doc_id,
+        [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=20, text="text")],
+    )
+    cid = ids[0]
+    a = _make_asset("11" + "0" * 62, original_path="x.png")
+    b = _make_asset("22" + "0" * 62, original_path="y.png")
+    try:
+        await storage.upsert_asset(a)
+        await storage.upsert_asset(b)
+    except NotSupported:
+        pytest.skip("backend doesn't implement chunk_asset_refs yet")
+
+    if not _has_schema_constraints(storage):
+        pytest.skip("backend has no schema-level UNIQUE")
+
+    with pytest.raises(_integrity_error_types()):
+        await storage.replace_chunk_asset_refs(
+            cid,
+            [
+                ChunkAssetRef(
+                    chunk_id=cid,
+                    asset_id=a.asset_id,
+                    ord=0,
+                    alt="",
+                    start_in_chunk=4,
+                    end_in_chunk=14,
+                ),
+                ChunkAssetRef(
+                    chunk_id=cid,
+                    asset_id=b.asset_id,
+                    ord=1,
+                    alt="",
+                    start_in_chunk=4,
+                    end_in_chunk=14,
+                ),
+            ],
+        )
 
 
 async def test_chunk_asset_refs_cascade_on_chunk_delete(storage: Storage) -> None:

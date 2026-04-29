@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Layer(StrEnum):
@@ -47,12 +47,36 @@ class AssetKind(StrEnum):
 
 class DocumentRecord(BaseModel):
     doc_id: str
+    # ``path`` is the user's spelling (display path); ``path_key`` is
+    # the engine's lookup key — NFC-normalised + casefolded so the same
+    # logical file under different macOS NFD / NTFS-case spellings
+    # collapses to one row. See ``data/path_norm.py``.
+    #
+    # ``path_key`` is auto-derived from ``path`` at construction when not
+    # supplied (model_validator below) so engine call sites don't have
+    # to thread the normalization through every construction. Adapters
+    # that round-trip a row out of storage pass the stored value
+    # explicitly, which then short-circuits the derivation.
     path: str
+    path_key: str = ""
     title: str | None = None
     hash: str
     mtime: float
     layer: Layer
     active: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_path_key(cls, values: object) -> object:
+        # Local import to avoid the data/ → schemas import cycle at
+        # module load time.
+        from .data.path_norm import normalize_path
+
+        if isinstance(values, dict) and not values.get("path_key"):
+            path = values.get("path")
+            if isinstance(path, str):
+                values = {**values, "path_key": normalize_path(path)}
+        return values
 
 
 class ChunkRecord(BaseModel):
@@ -129,6 +153,12 @@ class LinkRecord(BaseModel):
 
 
 class WikiLogEntry(BaseModel):
+    # ``id`` is None on construction; the storage layer assigns it on
+    # insert via SQLite AUTOINCREMENT / Postgres BIGSERIAL. Acts as a
+    # monotonic tiebreaker when two events land in the same float-second
+    # ``ts`` — ``list_wiki_log`` orders by ``(ts, id)`` so retrieval
+    # order matches insert order even within a sub-second burst.
+    id: int | None = None
     ts: float
     action: Literal["ingest", "synth", "distill", "review", "lint", "delete"]
     src: str | None = None

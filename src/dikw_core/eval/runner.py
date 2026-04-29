@@ -30,7 +30,6 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from importlib import resources
 from pathlib import Path
 from typing import Any, Literal, get_args
 
@@ -67,14 +66,10 @@ def _max_migration_number() -> int:
     every snapshot automatically — opening an old snapshot under a new
     code version would otherwise risk a broken migration.
     """
-    pkg = resources.files("dikw_core.storage.migrations.sqlite")
-    nums: list[int] = []
-    for r in pkg.iterdir():
-        if r.is_file() and r.name.endswith(".sql"):
-            head = r.name.split("_", 1)[0]
-            if head.isdigit():
-                nums.append(int(head))
-    return max(nums) if nums else 0
+    from ..storage._migrations import ordered_migrations
+
+    pairs = ordered_migrations("dikw_core.storage.migrations.sqlite")
+    return pairs[-1][0] if pairs else 0
 
 
 def _default_snapshot_root() -> Path:

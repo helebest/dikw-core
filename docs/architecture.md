@@ -163,6 +163,12 @@ adapter that translates SQLite's `'"foo" OR "bar"'` form into PG's
 re-tokenized the sanitizer output and treated `OR` as a literal
 search word — broken for any multi-word query.
 
+Both adapters now apply the `documents.active = TRUE` filter inside
+`fts_search` so soft-deleted documents never surface in BM25 hits.
+Pre-PR the SQLite adapter skipped this filter (PG always applied
+it); the post-PR JOIN on `documents` makes the alignment cheap and
+removes a silent recall divergence on inactive docs.
+
 `SQLiteStorage` also reports `notnull=0` on every `INTEGER`/`TEXT`
 PRIMARY KEY column via `PRAGMA table_info` (a documented SQLite quirk
 — PK columns implicitly enforce NOT NULL). Postgres `information_schema`

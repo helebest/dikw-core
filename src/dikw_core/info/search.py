@@ -44,7 +44,7 @@ from ..schemas import (
     VecHit,
 )
 from ..storage.base import NotSupported, Storage
-from .tokenize import CJK_CHAR_CLASS, CjkTokenizer, preprocess_for_fts
+from .tokenize import WORD_OR_CJK_CHARS, CjkTokenizer, preprocess_for_fts
 
 
 class RetrievalConfigLike(Protocol):
@@ -633,7 +633,7 @@ def _sanitize_fts(q: str, *, cjk_tokenizer: CjkTokenizer = "none") -> str:
     """
     if cjk_tokenizer != "none":
         q = preprocess_for_fts(q, tokenizer=cjk_tokenizer)
-    cleaned = re.sub(rf"[^\w\s{CJK_CHAR_CLASS}]", " ", q)
+    cleaned = re.sub(rf"[^{WORD_OR_CJK_CHARS}\s]", " ", q)
     tokens = [
         t for t in cleaned.split() if t and t.upper() not in _FTS_RESERVED
     ]

@@ -1524,13 +1524,17 @@ class SQLiteStorage:
         if row is None:
             return
         sql = row["sql"] or ""
-        # Legacy if shape diverges OR if tokenizer doesn't pin
-        # ``remove_diacritics 0``. ``unicode61`` without an explicit
-        # ``0`` defaults to ``remove_diacritics 1`` which still strips
-        # diacritics — that's the divergence we're closing.
+        # Legacy if the 4-column UNINDEXED shape is present, or the
+        # tokenizer doesn't pin ``remove_diacritics 0`` (``unicode61``
+        # without an explicit ``0`` defaults to ``1`` which still
+        # strips most diacritics — that's the divergence we're
+        # closing). The ``title`` column doesn't get its own check
+        # because the ``UNINDEXED`` neighbours uniquely identify the
+        # legacy shape, and a bare ``"title"`` substring would
+        # false-match any future tokenizer option containing that
+        # word.
         is_legacy = (
             "path UNINDEXED" in sql
-            or "title" in sql
             or "layer UNINDEXED" in sql
             or "remove_diacritics 0" not in sql
         )
@@ -1542,16 +1546,24 @@ class SQLiteStorage:
                 "CREATE VIRTUAL TABLE documents_fts USING fts5("
                 "  body, tokenize = \"unicode61 remove_diacritics 0\")"
             )
-            for row in conn.execute(
+            # Bulk-insert via executemany so a 100k-chunk legacy DB
+            # doesn't stall on N round-tripped INSERTs. preprocess_for_fts
+            # has to run in Python (jieba isn't available in SQL), so
+            # the chunk → preprocessed body materializes in memory
+            # first; at the design-bounded ≤ a few hundred pages
+            # scale of any single dikw-core wiki this is still fine.
+            rows = conn.execute(
                 "SELECT chunk_id, text FROM chunks ORDER BY chunk_id"
-            ).fetchall():
-                body = preprocess_for_fts(
-                    row["text"], tokenizer=self._cjk_tokenizer
-                )
-                conn.execute(
-                    "INSERT INTO documents_fts(rowid, body) VALUES (?, ?)",
-                    (int(row["chunk_id"]), body),
-                )
+            ).fetchall()
+            payload = [
+                (int(row["chunk_id"]),
+                 preprocess_for_fts(row["text"], tokenizer=self._cjk_tokenizer))
+                for row in rows
+            ]
+            conn.executemany(
+                "INSERT INTO documents_fts(rowid, body) VALUES (?, ?)",
+                payload,
+            )
 
     def _migrate_legacy_documents_path_key(self, conn: sqlite3.Connection) -> None:
         """Add the ``path_key`` column to a pre-normalization ``documents`` table.

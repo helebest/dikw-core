@@ -20,7 +20,7 @@ from collections.abc import Iterable, Sequence
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..info.tokenize import CJK_CHAR_CLASS
+from ..info.tokenize import WORD_OR_CJK_CHARS
 from ..schemas import (
     AssetEmbeddingRow,
     AssetKind,
@@ -1332,7 +1332,7 @@ def _row_to_wisdom(row: Any) -> WisdomItem:
 _TS_TOKEN_RE = re.compile(r'"([^"]+)"')
 # tsquery treats ``& | ! ()`` etc. as operators; strip anything that's
 # not a word/CJK char so the translated tokens never inject syntax.
-_TS_TOKEN_SAFE_RE = re.compile(rf"[^\w{CJK_CHAR_CLASS}]")
+_TS_TOKEN_SAFE_RE = re.compile(rf"[^{WORD_OR_CJK_CHARS}]")
 
 
 def _fts_to_tsquery_string(q: str) -> str:

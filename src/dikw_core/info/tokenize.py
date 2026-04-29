@@ -54,6 +54,15 @@ def _try_load_jieba() -> ModuleType | None:
 # and Japanese Han. Kana, Hangul, and extension-B ideographs aren't
 # covered; extending to JA/KO means widening this character class.
 CJK_CHAR_CLASS = r"一-鿿"
+
+# Token character class shared by every FTS-adjacent regex in the
+# codebase: ``\w`` (ASCII letters/digits/underscore + diacritic-bearing
+# Latin under ``re.UNICODE``) plus the basic CJK range. Use as
+# ``re.compile(rf"[{WORD_OR_CJK_CHARS}]+")`` for ``findall`` callers or
+# ``re.compile(rf"[^{WORD_OR_CJK_CHARS}\s]")`` for sanitizers that want
+# to scrub anything else.
+WORD_OR_CJK_CHARS = rf"\w{CJK_CHAR_CLASS}"
+
 _CJK_CHAR = re.compile(f"[{CJK_CHAR_CLASS}]")
 _CJK_RUN = re.compile(f"[{CJK_CHAR_CLASS}]+")
 

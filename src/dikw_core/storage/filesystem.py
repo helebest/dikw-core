@@ -33,7 +33,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from ..info.tokenize import CJK_CHAR_CLASS, CjkTokenizer, preprocess_for_fts
+from ..info.tokenize import WORD_OR_CJK_CHARS, CjkTokenizer, preprocess_for_fts
 from ..schemas import (
     AssetEmbeddingRow,
     AssetRecord,
@@ -62,7 +62,7 @@ from .base import NotSupported
 # range so Chinese tokens (post-jieba whitespace segmentation) survive
 # tokenization without being split per-character. ``\w`` under
 # ``re.UNICODE`` already matches diacritic-bearing latin letters.
-_WORD = re.compile(rf"[\w{CJK_CHAR_CLASS}]+", re.UNICODE)
+_WORD = re.compile(rf"[{WORD_OR_CJK_CHARS}]+", re.UNICODE)
 
 _DENSE_NOT_SUPPORTED = (
     "filesystem backend is FTS-only by design — switch to the sqlite "

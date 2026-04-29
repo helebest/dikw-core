@@ -438,9 +438,6 @@ async def test_sqlite_documents_fts_body_only(storage: Storage) -> None:
     assert "path UNINDEXED" not in sql, (
         f"documents_fts must not index path; got:\n{sql}"
     )
-    assert "title" not in sql, (
-        f"documents_fts must not index title; got:\n{sql}"
-    )
     assert "layer UNINDEXED" not in sql, (
         f"documents_fts must not index layer; got:\n{sql}"
     )
@@ -596,8 +593,8 @@ def test_pg_fts_to_tsquery_string_translates_or_form() -> None:
     # Stray non-FTS5 chars inside a token are stripped, not parsed as
     # tsquery operators
     assert _fts_to_tsquery_string('"foo&bar"') == "foobar"
-    # CJK passes through (the helper imports CJK_CHAR_CLASS so jieba-
-    # segmented Chinese tokens survive translation)
+    # CJK passes through (the helper imports WORD_OR_CJK_CHARS so
+    # jieba-segmented Chinese tokens survive translation)
     assert _fts_to_tsquery_string('"机器" OR "学习"') == "机器 | 学习"
 
 

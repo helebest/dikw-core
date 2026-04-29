@@ -645,6 +645,49 @@ async def test_pg_fts_search_multi_word_or(storage: Storage) -> None:
     )
 
 
+async def test_filesystem_constructor_accepts_cjk_tokenizer(tmp_path: Path) -> None:
+    """``FilesystemStorage`` must accept ``cjk_tokenizer`` so the
+    ingest path can pre-segment CJK text the same way the SQLite
+    adapter does. Pre-PR the constructor only took ``root``, so the
+    factory ``build_storage`` couldn't thread the wiki-level
+    ``RetrievalConfig.cjk_tokenizer`` through.
+    """
+    s = FilesystemStorage(tmp_path / "fs", cjk_tokenizer="jieba")
+    await s.connect()
+    try:
+        # Sanity check: the value made it onto the instance and isn't
+        # lost behind a default.
+        assert s._cjk_tokenizer == "jieba"  # type: ignore[attr-defined]
+    finally:
+        await s.close()
+
+
+async def test_filesystem_fts_segments_cjk_via_jieba(tmp_path: Path) -> None:
+    """End-to-end: with ``cjk_tokenizer='jieba'`` the filesystem FTS
+    can find a CJK word inside a longer run, mirroring SQLite's
+    ``preprocess_for_fts`` ingest path. Pre-PR ``_tokenise`` was
+    ``r"[A-Za-z][A-Za-z0-9']+"`` — Chinese characters never matched
+    so a CJK wiki was effectively unsearchable on the filesystem
+    backend.
+    """
+    s = FilesystemStorage(tmp_path / "fs", cjk_tokenizer="jieba")
+    await s.connect()
+    await s.migrate()
+    try:
+        doc = _make_doc("sources/zh.md")
+        await s.upsert_document(doc)
+        await s.replace_chunks(
+            doc.doc_id,
+            [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=6, text="机器学习入门")],
+        )
+        hits = await s.fts_search("机器", limit=5)
+        assert any(h.doc_id == doc.doc_id for h in hits), (
+            "CJK token must be searchable when cjk_tokenizer='jieba'"
+        )
+    finally:
+        await s.close()
+
+
 async def test_pg_fts_search_empty_query_returns_empty(storage: Storage) -> None:
     """Sanitizer can produce an empty string when every token is
     a reserved word or punctuation. PG ``fts_search`` must short-circuit

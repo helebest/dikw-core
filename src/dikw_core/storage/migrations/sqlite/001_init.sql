@@ -41,12 +41,21 @@ CREATE INDEX IF NOT EXISTS documents_hash_idx ON documents(hash);
 -- ---- I layer -------------------------------------------------------------
 
 -- FTS5 over chunk body; chunks.chunk_id aligns with fts rowid.
+-- Scope is intentionally narrow:
+--   * Only ``body`` is indexed — ``path`` / ``title`` / ``layer`` come
+--     back via a JOIN onto ``chunks`` + ``documents`` at search time,
+--     mirroring the PG side which indexes only ``chunks.text``.
+--   * ``unicode61 remove_diacritics 0`` so that ``café`` and ``cafe``
+--     are different tokens — same byte-level behavior as PG's
+--     ``to_tsvector('simple', ...)``. Aligning here avoids a silent
+--     cross-backend recall divergence on accented text. The ``0`` is
+--     intentional and explicit: ``unicode61`` defaults to
+--     ``remove_diacritics 1`` which still strips most diacritics.
+-- Legacy DBs built before this scoping ship through
+-- ``SQLiteStorage._migrate_legacy_documents_fts``.
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-    path UNINDEXED,
-    title,
     body,
-    layer UNINDEXED,
-    tokenize = "unicode61 remove_diacritics 2"
+    tokenize = "unicode61 remove_diacritics 0"
 );
 
 CREATE TABLE IF NOT EXISTS chunks (

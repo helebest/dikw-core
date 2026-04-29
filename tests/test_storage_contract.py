@@ -416,6 +416,168 @@ async def test_chunks_and_fts_search(storage: Storage) -> None:
     assert any(h.snippet and "brown" in h.snippet.lower() for h in hits)
 
 
+async def test_sqlite_documents_fts_body_only(storage: Storage) -> None:
+    """SQLite ``documents_fts`` must scope to ``body`` only — no
+    ``path UNINDEXED`` / ``title`` / ``layer UNINDEXED`` columns —
+    and use ``tokenize = "unicode61"`` (no ``remove_diacritics``).
+
+    The PG side has always indexed only ``chunks.text`` via the
+    generated ``chunks.fts`` tsvector; aligning SQLite to the same
+    column scope removes silent recall divergence on title-heavy
+    queries. Diacritics are preserved on both sides post-alignment.
+    """
+    if type(storage).__name__ != "SQLiteStorage":
+        pytest.skip("documents_fts is SQLite-only")
+    await storage.migrate()
+    conn = storage._conn  # type: ignore[attr-defined]
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'documents_fts'"
+    ).fetchone()
+    assert row is not None, "documents_fts virtual table missing"
+    sql = row["sql"]
+    assert "path UNINDEXED" not in sql, (
+        f"documents_fts must not index path; got:\n{sql}"
+    )
+    assert "title" not in sql, (
+        f"documents_fts must not index title; got:\n{sql}"
+    )
+    assert "layer UNINDEXED" not in sql, (
+        f"documents_fts must not index layer; got:\n{sql}"
+    )
+    # ``remove_diacritics 0`` must be explicit: unicode61 defaults to
+    # ``1`` which still strips diacritics. We want the byte-level
+    # behavior of PG's ``to_tsvector('simple', ...)``.
+    assert "remove_diacritics 0" in sql, (
+        f"documents_fts must explicitly pin remove_diacritics=0; got:\n{sql}"
+    )
+
+
+async def test_fts_preserves_diacritics(storage: Storage) -> None:
+    """Cross-adapter contract: FTS preserves diacritics. ``café`` is a
+    different token from ``cafe``. Searching ``"café"`` returns the
+    diacritic-bearing chunk; searching ``"cafe"`` does not.
+
+    Pre-PR SQLite stripped diacritics (``unicode61 remove_diacritics
+    2``); aligning to the PG/filesystem behavior (preserve as-is)
+    keeps cross-backend recall consistent without pulling in the
+    ``unaccent`` extension.
+    """
+    doc = _make_doc("sources/diacritics.md")
+    await storage.upsert_document(doc)
+    await storage.replace_chunks(
+        doc.doc_id,
+        [
+            ChunkRecord(
+                doc_id=doc.doc_id,
+                seq=0,
+                start=0,
+                end=18,
+                text="café au lait recipe",
+            ),
+        ],
+    )
+
+    hits_with_diacritic = await storage.fts_search('"café"', limit=5)
+    assert any(h.doc_id == doc.doc_id for h in hits_with_diacritic), (
+        "querying with the exact diacritic-bearing token must hit"
+    )
+
+    hits_without_diacritic = await storage.fts_search('"cafe"', limit=5)
+    assert not any(h.doc_id == doc.doc_id for h in hits_without_diacritic), (
+        "querying without the diacritic must NOT hit a diacritic-only "
+        "indexed token (i.e. no implicit unaccent / remove_diacritics)"
+    )
+
+
+async def test_sqlite_legacy_fts_rebuild_preserves_data(tmp_path: Path) -> None:
+    """A legacy DB whose ``documents_fts`` was built with the old
+    4-column shape + ``remove_diacritics 2`` tokenizer must survive
+    ``migrate()``: the table is rebuilt body-only with diacritics
+    preserved, and the stored chunk text remains searchable through
+    the new tokenizer.
+
+    Repopulating from ``chunks`` (which always carry the raw text) is
+    what makes the rebuild idempotent — the FTS table is purely
+    derived state.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "legacy.sqlite"
+
+    # Hand-craft the pre-PR shape: bare-bones documents + chunks +
+    # the old 4-column FTS5 virtual table with diacritic stripping.
+    raw = sqlite3.connect(str(db_path))
+    raw.row_factory = sqlite3.Row
+    raw.executescript(
+        """
+        CREATE TABLE documents (
+            doc_id   TEXT PRIMARY KEY,
+            path     TEXT NOT NULL UNIQUE,
+            path_key TEXT,
+            title    TEXT,
+            hash     TEXT,
+            mtime    REAL,
+            layer    TEXT,
+            active   INTEGER
+        );
+        CREATE TABLE chunks (
+            chunk_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id    TEXT NOT NULL,
+            seq       INTEGER NOT NULL,
+            start_off INTEGER NOT NULL,
+            end_off   INTEGER NOT NULL,
+            text      TEXT NOT NULL,
+            UNIQUE (doc_id, seq)
+        );
+        CREATE VIRTUAL TABLE documents_fts USING fts5(
+            path UNINDEXED,
+            title,
+            body,
+            layer UNINDEXED,
+            tokenize = "unicode61 remove_diacritics 2"
+        );
+        """
+    )
+    raw.execute(
+        "INSERT INTO documents(doc_id, path, path_key, title, hash, "
+        "mtime, layer, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("legacy::a.md", "a.md", "a.md", "a", "h", 0.0, "source", 1),
+    )
+    cur = raw.execute(
+        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("legacy::a.md", 0, 0, 18, "café au lait recipe"),
+    )
+    chunk_id = cur.lastrowid
+    raw.execute(
+        "INSERT INTO documents_fts(rowid, path, title, body, layer) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (chunk_id, "a.md", "a", "café au lait recipe", "source"),
+    )
+    raw.commit()
+    raw.close()
+
+    # Hand the legacy DB to SQLiteStorage and let migrate() rebuild it.
+    s = SQLiteStorage(db_path)
+    await s.connect()
+    await s.migrate()
+    try:
+        conn = s._conn  # type: ignore[attr-defined]
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'documents_fts'"
+        ).fetchone()["sql"]
+        assert "path UNINDEXED" not in sql
+        assert "remove_diacritics 0" in sql
+        # Data survived the rebuild — search the diacritic-bearing
+        # token and confirm we still hit the same chunk.
+        hits = await s.fts_search('"café"', limit=5)
+        assert any(h.doc_id == "legacy::a.md" for h in hits), (
+            "legacy chunk text must remain searchable after FTS rebuild"
+        )
+    finally:
+        await s.close()
+
+
 async def test_embeddings_and_vec_search(storage: Storage) -> None:
     doc = _make_doc("sources/vec.md")
     await storage.upsert_document(doc)

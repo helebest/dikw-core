@@ -590,20 +590,20 @@ def test_pg_fts_to_tsquery_string_translates_or_form() -> None:
     assert _fts_to_tsquery_string("") == ""
     # Empty token list (after stripping) → empty (caller short-circuits)
     assert _fts_to_tsquery_string('""') == ""
-    # Stray non-FTS5 chars inside a token are stripped, not parsed as
-    # tsquery operators
-    assert _fts_to_tsquery_string('"foo&bar"') == "foobar"
     # CJK passes through (the helper imports WORD_OR_CJK_CHARS so
     # jieba-segmented Chinese tokens survive translation)
     assert _fts_to_tsquery_string('"机器" OR "学习"') == "机器 | 学习"
     # Raw (un-sanitized) input must also work — direct callers like
     # ``test_chunks_and_fts_search`` pass plain words. Single token:
     assert _fts_to_tsquery_string("brown") == "brown"
-    # Multi-token raw input: whitespace-split → OR-joined
+    # Multi-token raw input: whitespace acts as token boundary
     assert _fts_to_tsquery_string("alpha bravo") == "alpha | bravo"
-    # Raw input with operator-significant chars gets scrubbed so
-    # tsquery doesn't blow up on them
-    assert _fts_to_tsquery_string("foo&bar") == "foobar"
+    # Punctuation is also a token boundary on the raw path — same as
+    # ``plainto_tsquery`` would split it. ``foo&bar`` and
+    # ``retrieval.rrf_k`` must become independent tokens, not a
+    # collapsed lexeme.
+    assert _fts_to_tsquery_string("foo&bar") == "foo | bar"
+    assert _fts_to_tsquery_string("retrieval.rrf_k") == "retrieval | rrf_k"
 
 
 async def test_pg_fts_search_multi_word_or(storage: Storage) -> None:

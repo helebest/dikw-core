@@ -1330,9 +1330,11 @@ def _row_to_wisdom(row: Any) -> WisdomItem:
 
 
 _TS_TOKEN_RE = re.compile(r'"([^"]+)"')
-# tsquery treats ``& | ! ()`` etc. as operators; strip anything that's
-# not a word/CJK char so the translated tokens never inject syntax.
-_TS_TOKEN_SAFE_RE = re.compile(rf"[^{WORD_OR_CJK_CHARS}]")
+# Word-or-CJK runs in the raw input become independent tokens. Anything
+# else (whitespace, punctuation, tsquery operators ``& | ! ( )``) is a
+# split boundary — never carried into a token, so user input can't be
+# parsed as tsquery syntax.
+_TS_RAW_TOKEN_RE = re.compile(rf"[{WORD_OR_CJK_CHARS}]+")
 
 
 def _fts_to_tsquery_string(q: str) -> str:
@@ -1342,25 +1344,23 @@ def _fts_to_tsquery_string(q: str) -> str:
 
     1. **Pre-sanitized form** from ``info/search.py:_sanitize_fts``:
        ``'"foo" OR "bar"'`` — the SQLite-flavored quoted bag-of-words.
-       Translate to ``'foo | bar'``.
+       Strip the quotes, join with ``' | '``.
     2. **Raw form** from any direct ``Storage.fts_search`` caller
        (e.g. the ``test_chunks_and_fts_search`` contract test passes
-       ``"brown"`` straight through). Tokenize on whitespace; same
-       escape + join as the sanitized path.
-
-    Either way: extract tokens, scrub any operator-significant chars
-    (``& | ! ( )`` etc. — tsquery would treat them as syntax), drop
-    empties, and join with ``' | '``.
+       ``"brown"`` straight through). Pull every word/CJK run out as
+       a token via ``re.findall`` so punctuation acts as a token
+       boundary the same way ``plainto_tsquery`` would split it —
+       ``"retrieval.rrf_k"`` becomes two tokens (``retrieval``,
+       ``rrf_k``), not one collapsed lexeme.
 
     Empty input → empty output; the caller must short-circuit because
     ``to_tsquery('')`` raises in PG.
     """
-    tokens = _TS_TOKEN_RE.findall(q)
-    if not tokens:
-        # Raw form: no quoted tokens to extract, so split on whitespace
-        # and run each piece through the same escape pass. Drops
-        # control chars and tsquery operators while keeping
-        # word + CJK content.
-        tokens = q.split()
-    safe = [_TS_TOKEN_SAFE_RE.sub("", t) for t in tokens]
-    return " | ".join(t for t in safe if t)
+    # Sanitized form (``'"foo" OR "bar"'``): lift tokens from inside
+    # the quotes. Raw form (``foo bar`` / ``foo&bar``): pull every
+    # word-or-CJK run out via the same regex the inverted character
+    # class would split on. Empty/whitespace inputs return an empty
+    # list either way; the caller short-circuits.
+    quoted = _TS_TOKEN_RE.findall(q)
+    tokens = [t for t in quoted if t] if quoted else _TS_RAW_TOKEN_RE.findall(q)
+    return " | ".join(tokens)

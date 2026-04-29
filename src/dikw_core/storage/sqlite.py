@@ -1514,6 +1514,18 @@ class SQLiteStorage:
         state). No FK concerns: FTS5 virtual tables are nothing
         REFERENCES, so no ``PRAGMA foreign_keys OFF`` dance.
 
+        The repopulate path uses ``tokenizer="none"`` deliberately —
+        the legacy DB doesn't record what ``cjk_tokenizer`` it was
+        originally indexed with, and ``RetrievalConfig.cjk_tokenizer``
+        is documented as requiring a wipe + reingest to switch
+        anyway. Re-applying the *current* process's tokenizer here
+        would silently rewrite the index into a different
+        tokenization than the one queries are about to use (e.g.
+        upgrading a legacy ``cjk_tokenizer="none"`` DB while running
+        as ``"jieba"``). Falling back to "no preprocessing" matches
+        the PG side (which never preprocesses in Python) and lets
+        the user's next ingest re-tokenize per the live config.
+
         Idempotent: detects the old shape (4-column or
         ``remove_diacritics`` in tokenize) and skips otherwise.
         Crash-safe: the whole rebuild runs in a single transaction.
@@ -1547,17 +1559,17 @@ class SQLiteStorage:
                 "  body, tokenize = \"unicode61 remove_diacritics 0\")"
             )
             # Bulk-insert via executemany so a 100k-chunk legacy DB
-            # doesn't stall on N round-tripped INSERTs. preprocess_for_fts
-            # has to run in Python (jieba isn't available in SQL), so
-            # the chunk → preprocessed body materializes in memory
-            # first; at the design-bounded ≤ a few hundred pages
-            # scale of any single dikw-core wiki this is still fine.
+            # doesn't stall on N round-tripped INSERTs. ``tokenizer=
+            # "none"`` is intentional — see the docstring above; we
+            # don't know what tokenizer the legacy index used, so we
+            # repopulate raw and let the user's next ingest apply
+            # whatever the live config wants.
             rows = conn.execute(
                 "SELECT chunk_id, text FROM chunks ORDER BY chunk_id"
             ).fetchall()
             payload = [
                 (int(row["chunk_id"]),
-                 preprocess_for_fts(row["text"], tokenizer=self._cjk_tokenizer))
+                 preprocess_for_fts(row["text"], tokenizer="none"))
                 for row in rows
             ]
             conn.executemany(

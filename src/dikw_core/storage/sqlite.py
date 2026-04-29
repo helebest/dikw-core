@@ -149,6 +149,7 @@ class SQLiteStorage:
             self._migrate_legacy_chunk_offset_columns(conn)
             self._migrate_legacy_assets_columns(conn)
             self._migrate_legacy_wiki_log_id(conn)
+            self._migrate_legacy_documents_path_key(conn)
 
         await asyncio.to_thread(_run)
 
@@ -160,10 +161,13 @@ class SQLiteStorage:
             with conn:
                 conn.execute(
                     """
-                    INSERT INTO documents(doc_id, path, title, hash, mtime, layer, active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO documents(
+                        doc_id, path, path_key, title, hash, mtime, layer, active
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(doc_id) DO UPDATE SET
                         path = excluded.path,
+                        path_key = excluded.path_key,
                         title = excluded.title,
                         hash = excluded.hash,
                         mtime = excluded.mtime,
@@ -173,6 +177,7 @@ class SQLiteStorage:
                     (
                         doc.doc_id,
                         doc.path,
+                        doc.path_key,
                         doc.title,
                         doc.hash,
                         doc.mtime,
@@ -1387,6 +1392,115 @@ class SQLiteStorage:
             conn.execute("ALTER TABLE wiki_log_new RENAME TO wiki_log")
             conn.execute("CREATE INDEX IF NOT EXISTS wiki_log_ts ON wiki_log(ts)")
 
+    def _migrate_legacy_documents_path_key(self, conn: sqlite3.Connection) -> None:
+        """Add the ``path_key`` column to a pre-normalization ``documents`` table.
+
+        Older DBs created before NFC + casefold uniqueness landed have
+        ``path TEXT UNIQUE`` and no ``path_key`` column. This helper:
+
+        1. ``ALTER TABLE ... ADD COLUMN path_key TEXT`` (no UNIQUE yet
+           because backfill must succeed first).
+        2. Backfills ``path_key`` from existing ``path`` rows via the
+           Python ``normalize_path`` helper — SQLite has no native
+           casefold, so the work has to happen in-process.
+        3. Detects case-only collisions before committing the UNIQUE
+           index. If two rows share a ``path_key``, fail loudly with
+           rebuild instructions — pre-alpha policy.
+        4. Builds the UNIQUE index and drops the legacy ``path UNIQUE``
+           constraint by rebuilding the table (SQLite can't drop a
+           column-level UNIQUE in place).
+
+        Idempotent: short-circuits when ``path_key`` is already present
+        on the table.
+        """
+        info = conn.execute("PRAGMA table_info('documents')").fetchall()
+        if not info:
+            return
+        cols = {row["name"] for row in info}
+        if "path_key" in cols:
+            return
+
+        # Local import keeps the storage layer free of a top-level
+        # dependency on data/ (which itself imports from schemas).
+        from ..data.path_norm import normalize_path
+
+        # SQLite documented procedure for table rebuild when FKs point
+        # at the table being rebuilt (chunks.doc_id REFERENCES documents):
+        # foreign_keys must be toggled OFF *outside* the transaction;
+        # then rebuild atomically; then run a foreign-key integrity check
+        # before turning FKs back on. See sqlite.org/lang_altertable.html
+        # ("Making other kinds of table schema changes").
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with conn:  # transaction: all-or-nothing rebuild
+                conn.execute("ALTER TABLE documents ADD COLUMN path_key TEXT")
+                rows = conn.execute("SELECT doc_id, path FROM documents").fetchall()
+                for r in rows:
+                    conn.execute(
+                        "UPDATE documents SET path_key = ? WHERE doc_id = ?",
+                        (normalize_path(r["path"]), r["doc_id"]),
+                    )
+                collision = conn.execute(
+                    "SELECT path_key, COUNT(*) AS n FROM documents "
+                    "GROUP BY path_key HAVING n > 1 LIMIT 1"
+                ).fetchone()
+                if collision is not None:
+                    raise StorageError(
+                        "documents.path_key collision detected during "
+                        f"legacy migration (path_key={collision['path_key']!r}, "
+                        "rows=" + str(int(collision["n"])) + "). The legacy DB "
+                        "had two case-only-different paths for what is now one "
+                        "logical document. Delete the SQLite file "
+                        "(`rm .dikw/dikw.sqlite`) and re-run `dikw ingest` to "
+                        "rebuild on the path_key-aware schema."
+                    )
+                # SQLite can't drop the legacy ``path UNIQUE`` column-level
+                # constraint in place — rebuild the table to land the new
+                # shape exactly. The new shape mirrors the migration file.
+                conn.execute("DROP INDEX IF EXISTS documents_layer_active")
+                conn.execute("DROP INDEX IF EXISTS documents_hash_idx")
+                conn.execute(
+                    "CREATE TABLE documents_new ("
+                    "  doc_id   TEXT PRIMARY KEY,"
+                    "  path     TEXT NOT NULL,"
+                    "  path_key TEXT NOT NULL UNIQUE,"
+                    "  title    TEXT,"
+                    "  hash     TEXT NOT NULL,"
+                    "  mtime    REAL,"
+                    "  layer    TEXT NOT NULL CHECK (layer IN ('source','wiki','wisdom')),"
+                    "  active   INTEGER NOT NULL DEFAULT 1"
+                    ")"
+                )
+                conn.execute(
+                    "INSERT INTO documents_new("
+                    "  doc_id, path, path_key, title, hash, mtime, layer, active"
+                    ") "
+                    "SELECT doc_id, path, path_key, title, hash, mtime, layer, active "
+                    "FROM documents"
+                )
+                conn.execute("DROP TABLE documents")
+                conn.execute("ALTER TABLE documents_new RENAME TO documents")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS documents_layer_active "
+                    "ON documents(layer, active)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS documents_hash_idx "
+                    "ON documents(hash)"
+                )
+                # Verify FKs survive the rebuild before we re-enable
+                # enforcement. ``foreign_key_check`` returns one row per
+                # violation; an empty result means the chunks→documents
+                # links still resolve.
+                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise StorageError(
+                        "documents rebuild left dangling foreign keys: "
+                        f"{violations}. Bailing out before FKs are re-enabled."
+                    )
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+
     def _ensure_vec_table(
         self,
         conn: sqlite3.Connection,
@@ -1448,6 +1562,7 @@ def _row_to_document(row: sqlite3.Row) -> DocumentRecord:
     return DocumentRecord(
         doc_id=row["doc_id"],
         path=row["path"],
+        path_key=row["path_key"],
         title=row["title"],
         hash=row["hash"],
         mtime=float(row["mtime"] or 0.0),

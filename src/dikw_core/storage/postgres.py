@@ -125,6 +125,7 @@ class PostgresStorage:
             await conn.commit()
             await self._verify_no_legacy_content_table(conn)
             await self._verify_no_legacy_text_embed_tables(conn)
+            await self._migrate_legacy_documents_path_key(conn)
 
     # ---- D layer ---------------------------------------------------------
 
@@ -133,10 +134,13 @@ class PostgresStorage:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    INSERT INTO documents(doc_id, path, title, hash, mtime, layer, active)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO documents(
+                        doc_id, path, path_key, title, hash, mtime, layer, active
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (doc_id) DO UPDATE SET
                         path = EXCLUDED.path,
+                        path_key = EXCLUDED.path_key,
                         title = EXCLUDED.title,
                         hash = EXCLUDED.hash,
                         mtime = EXCLUDED.mtime,
@@ -146,6 +150,7 @@ class PostgresStorage:
                     (
                         doc.doc_id,
                         doc.path,
+                        doc.path_key,
                         doc.title,
                         doc.hash,
                         doc.mtime,
@@ -158,7 +163,7 @@ class PostgresStorage:
     async def get_document(self, doc_id: str) -> DocumentRecord | None:
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT doc_id, path, title, hash, mtime, layer, active "
+                "SELECT doc_id, path, path_key, title, hash, mtime, layer, active "
                 "FROM documents WHERE doc_id = %s",
                 (doc_id,),
             )
@@ -173,7 +178,7 @@ class PostgresStorage:
             return []
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
-                "SELECT doc_id, path, title, hash, mtime, layer, active "
+                "SELECT doc_id, path, path_key, title, hash, mtime, layer, active "
                 "FROM documents WHERE doc_id = ANY(%s)",
                 (ids,),
             )
@@ -188,7 +193,7 @@ class PostgresStorage:
         since_ts: float | None = None,
     ) -> Iterable[DocumentRecord]:
         sql = (
-            "SELECT doc_id, path, title, hash, mtime, layer, active "
+            "SELECT doc_id, path, path_key, title, hash, mtime, layer, active "
             "FROM documents WHERE TRUE"
         )
         params: list[Any] = []
@@ -1094,6 +1099,77 @@ class PostgresStorage:
                         "embedding schema."
                     )
 
+    async def _migrate_legacy_documents_path_key(
+        self, conn: AsyncConnection
+    ) -> None:
+        """Add ``path_key`` to a pre-normalization ``documents`` table.
+
+        Older PG DBs have ``path TEXT UNIQUE NOT NULL`` and no
+        ``path_key``. This helper:
+
+        1. Adds ``path_key TEXT`` (no UNIQUE yet — backfill must run
+           first; the migration file's NOT NULL is satisfied via
+           backfill before the constraint flips on).
+        2. Backfills via ``normalize_path`` in Python; PG has no
+           Unicode-NFC normalization in core SQL (``normalize()`` exists
+           but no casefold equivalent), so the work happens in-process.
+        3. Detects case-only collisions and bails with rebuild
+           instructions if any are found — pre-alpha policy.
+        4. Adds the UNIQUE constraint and drops the legacy
+           ``documents_path_key`` column-equivalent UNIQUE on ``path``.
+
+        Idempotent: short-circuits when ``path_key`` already exists on
+        the table.
+        """
+        from ..data.path_norm import normalize_path
+
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'documents'"
+            )
+            cols = {r[0] for r in await cur.fetchall()}
+        if not cols or "path_key" in cols:
+            return
+
+        async with conn.cursor() as cur:
+            await cur.execute("ALTER TABLE documents ADD COLUMN path_key TEXT")
+            await cur.execute("SELECT doc_id, path FROM documents")
+            rows = await cur.fetchall()
+            for doc_id, path in rows:
+                await cur.execute(
+                    "UPDATE documents SET path_key = %s WHERE doc_id = %s",
+                    (normalize_path(path), doc_id),
+                )
+            await cur.execute(
+                "SELECT path_key, COUNT(*) FROM documents "
+                "GROUP BY path_key HAVING COUNT(*) > 1 LIMIT 1"
+            )
+            collision = await cur.fetchone()
+            if collision is not None:
+                await conn.rollback()
+                raise StorageError(
+                    "documents.path_key collision detected during legacy "
+                    f"migration (path_key={collision[0]!r}, rows={collision[1]}). "
+                    "The legacy DB had two case-only-different paths for what is "
+                    "now one logical document. Drop the schema "
+                    "(`DROP SCHEMA <schema> CASCADE`) and re-run `dikw ingest` "
+                    "to rebuild on the path_key-aware schema."
+                )
+            await cur.execute("ALTER TABLE documents ALTER COLUMN path_key SET NOT NULL")
+            await cur.execute("ALTER TABLE documents ADD UNIQUE (path_key)")
+            # Drop the legacy column-level UNIQUE on ``path``. PG names
+            # auto-generated single-column UNIQUEs ``<table>_<col>_key``,
+            # so the legacy one is ``documents_path_key`` (UNIQUE on the
+            # ``path`` column). DROP IF EXISTS is safe if an older
+            # install renamed it; the new uniqueness already lives on
+            # path_key by the time we get here.
+            await cur.execute(
+                "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_path_key"
+            )
+        await conn.commit()
+
 
 class _ConnectionContext:
     """``async with``-friendly wrapper that sets the schema search path per conn."""
@@ -1118,14 +1194,17 @@ class _ConnectionContext:
 
 
 def _row_to_document(row: Any) -> DocumentRecord:
+    # Column order matches every SELECT in postgres.py:
+    # doc_id, path, path_key, title, hash, mtime, layer, active
     return DocumentRecord(
         doc_id=row[0],
         path=row[1],
-        title=row[2],
-        hash=row[3],
-        mtime=float(row[4] or 0.0),
-        layer=Layer(row[5]),
-        active=bool(row[6]),
+        path_key=row[2],
+        title=row[3],
+        hash=row[4],
+        mtime=float(row[5] or 0.0),
+        layer=Layer(row[6]),
+        active=bool(row[7]),
     )
 
 

@@ -625,7 +625,14 @@ async def check_providers(
 
 
 def _doc_id_for(layer: Layer, logical_path: str) -> str:
-    return f"{layer.value}:{logical_path}"
+    # ``logical_path`` is normalized (NFC + casefold) so the same file
+    # written under different macOS NFD / NTFS-case spellings still
+    # resolves to the same doc_id. Without this, ``MyDoc.md`` and
+    # ``mydoc.md`` would each become their own row on re-ingest after
+    # a rename. See ``data/path_norm.py``.
+    from .data.path_norm import normalize_path
+
+    return f"{layer.value}:{normalize_path(logical_path)}"
 
 
 async def ingest(

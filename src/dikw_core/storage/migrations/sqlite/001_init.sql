@@ -3,14 +3,22 @@
 
 -- ---- D layer -------------------------------------------------------------
 
+-- ``path`` carries the user's spelling (display path); ``path_key`` is
+-- the engine's NFC + casefold lookup key. Splitting the two lets the
+-- same logical file under different macOS NFD / NTFS-case spellings
+-- resolve to a single row while ``dikw status`` still shows whichever
+-- spelling is on disk. Uniqueness moves to ``path_key`` accordingly;
+-- ``path`` stays NOT NULL but plain so a rename-with-case-change can
+-- update the display value in place. See data/path_norm.py.
 CREATE TABLE IF NOT EXISTS documents (
-    doc_id TEXT PRIMARY KEY,
-    path   TEXT UNIQUE NOT NULL,
-    title  TEXT,
-    hash   TEXT NOT NULL,
-    mtime  REAL,
-    layer  TEXT NOT NULL CHECK (layer IN ('source','wiki','wisdom')),
-    active INTEGER NOT NULL DEFAULT 1
+    doc_id   TEXT PRIMARY KEY,
+    path     TEXT NOT NULL,
+    path_key TEXT NOT NULL UNIQUE,
+    title    TEXT,
+    hash     TEXT NOT NULL,
+    mtime    REAL,
+    layer    TEXT NOT NULL CHECK (layer IN ('source','wiki','wisdom')),
+    active   INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS documents_layer_active

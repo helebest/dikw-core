@@ -575,6 +575,83 @@ async def test_sqlite_legacy_fts_rebuild_preserves_data(tmp_path: Path) -> None:
         await s.close()
 
 
+async def test_sqlite_legacy_fts_rebuild_preserves_cjk_search(tmp_path: Path) -> None:
+    """A legacy DB containing CJK chunks must remain CJK-searchable
+    after the rebuild when the live process runs ``cjk_tokenizer="jieba"``.
+
+    Index/query symmetry is the hard constraint here: queries go
+    through ``_sanitize_fts(q, cjk_tokenizer="jieba")`` which
+    whitespace-segments via jieba; the index has to be tokenized the
+    same way or "机器" never matches a row that's stored raw.
+    Repopulating with the live tokenizer keeps the two ends in
+    lockstep regardless of what the legacy DB was originally indexed
+    under (which isn't recorded).
+    """
+    import sqlite3
+
+    db_path = tmp_path / "legacy_cjk.sqlite"
+
+    raw = sqlite3.connect(str(db_path))
+    raw.row_factory = sqlite3.Row
+    raw.executescript(
+        """
+        CREATE TABLE documents (
+            doc_id   TEXT PRIMARY KEY,
+            path     TEXT NOT NULL UNIQUE,
+            path_key TEXT,
+            title    TEXT,
+            hash     TEXT,
+            mtime    REAL,
+            layer    TEXT,
+            active   INTEGER
+        );
+        CREATE TABLE chunks (
+            chunk_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id    TEXT NOT NULL,
+            seq       INTEGER NOT NULL,
+            start_off INTEGER NOT NULL,
+            end_off   INTEGER NOT NULL,
+            text      TEXT NOT NULL,
+            UNIQUE (doc_id, seq)
+        );
+        CREATE VIRTUAL TABLE documents_fts USING fts5(
+            path UNINDEXED, title, body, layer UNINDEXED,
+            tokenize = "unicode61 remove_diacritics 2"
+        );
+        """
+    )
+    raw.execute(
+        "INSERT INTO documents(doc_id, path, path_key, title, hash, "
+        "mtime, layer, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("legacy::zh.md", "zh.md", "zh.md", "z", "h", 0.0, "source", 1),
+    )
+    cur = raw.execute(
+        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("legacy::zh.md", 0, 0, 6, "机器学习入门"),
+    )
+    raw.execute(
+        "INSERT INTO documents_fts(rowid, path, title, body, layer) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (cur.lastrowid, "zh.md", "z", "机器学习入门", "source"),
+    )
+    raw.commit()
+    raw.close()
+
+    s = SQLiteStorage(db_path, cjk_tokenizer="jieba")
+    await s.connect()
+    await s.migrate()
+    try:
+        hits = await s.fts_search("机器", limit=5)
+        assert any(h.doc_id == "legacy::zh.md" for h in hits), (
+            "legacy CJK chunk must stay searchable after rebuild — "
+            "rebuild must apply the live cjk_tokenizer so queries "
+            "(also segmented by jieba) can find the indexed tokens"
+        )
+    finally:
+        await s.close()
+
+
 def test_pg_fts_to_tsquery_string_translates_or_form() -> None:
     """``_fts_to_tsquery_string`` translates the SQLite-flavored output
     of ``info/search.py:_sanitize_fts`` (``'"foo" OR "bar"'``) into the

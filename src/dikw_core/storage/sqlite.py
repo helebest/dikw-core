@@ -1514,17 +1514,21 @@ class SQLiteStorage:
         state). No FK concerns: FTS5 virtual tables are nothing
         REFERENCES, so no ``PRAGMA foreign_keys OFF`` dance.
 
-        The repopulate path uses ``tokenizer="none"`` deliberately —
-        the legacy DB doesn't record what ``cjk_tokenizer`` it was
-        originally indexed with, and ``RetrievalConfig.cjk_tokenizer``
-        is documented as requiring a wipe + reingest to switch
-        anyway. Re-applying the *current* process's tokenizer here
-        would silently rewrite the index into a different
-        tokenization than the one queries are about to use (e.g.
-        upgrading a legacy ``cjk_tokenizer="none"`` DB while running
-        as ``"jieba"``). Falling back to "no preprocessing" matches
-        the PG side (which never preprocesses in Python) and lets
-        the user's next ingest re-tokenize per the live config.
+        The repopulate path uses ``self._cjk_tokenizer`` (i.e. the
+        live config) deliberately, even though the legacy DB doesn't
+        record what tokenizer it was originally indexed with. The
+        priority is **index/query symmetry**: query construction in
+        ``info/search.py:_sanitize_fts`` runs every search through
+        the same live ``cjk_tokenizer``, so the rebuilt index has to
+        match or CJK searches lose every existing chunk. The
+        alternative — repopulating raw and waiting for a reingest —
+        leaves a window where a legacy ``jieba`` corpus is
+        unsearchable on CJK queries (already-segmented index rows
+        gone, raw rows in their place, query still segments). That's
+        the worse failure mode. ``RetrievalConfig.cjk_tokenizer``
+        being documented as "requires reingest to switch" still
+        holds for *changing* the tokenizer mid-life; this rebuild
+        just preserves whatever is currently configured.
 
         Idempotent: detects the old shape (4-column or
         ``remove_diacritics`` in tokenize) and skips otherwise.
@@ -1559,17 +1563,17 @@ class SQLiteStorage:
                 "  body, tokenize = \"unicode61 remove_diacritics 0\")"
             )
             # Bulk-insert via executemany so a 100k-chunk legacy DB
-            # doesn't stall on N round-tripped INSERTs. ``tokenizer=
-            # "none"`` is intentional — see the docstring above; we
-            # don't know what tokenizer the legacy index used, so we
-            # repopulate raw and let the user's next ingest apply
-            # whatever the live config wants.
+            # doesn't stall on N round-tripped INSERTs. Tokenizer
+            # choice (live ``self._cjk_tokenizer``) is justified at
+            # length in the docstring above — index/query symmetry
+            # trumps "preserve the legacy tokenization" because
+            # asymmetry guarantees the queries miss.
             rows = conn.execute(
                 "SELECT chunk_id, text FROM chunks ORDER BY chunk_id"
             ).fetchall()
             payload = [
                 (int(row["chunk_id"]),
-                 preprocess_for_fts(row["text"], tokenizer="none"))
+                 preprocess_for_fts(row["text"], tokenizer=self._cjk_tokenizer))
                 for row in rows
             ]
             conn.executemany(

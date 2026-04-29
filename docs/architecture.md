@@ -90,6 +90,40 @@ engine depends only on their Protocol / abstract interface:
    OpenAI-compatible endpoint are wired today; llama-cpp-python for local
    inference is a drop-in.
 
+## Storage migrations
+
+**Policy: pre-alpha "rebuild on incompatibility".** Each adapter ships
+numbered SQL files under `storage/migrations/{sqlite,postgres}/` (`001_init.sql`,
+`002_assets.sql`, `003_embed_cache.sql`). On every `migrate()` the
+adapter applies any whose numeric prefix is greater than the value
+recorded in `meta_kv['schema_version']`, then writes back the new high
+water mark. Existing `IF NOT EXISTS` guards inside each script make
+the body idempotent if the counter is missing — `meta_kv` is for
+audit / diagnostics, not a full migration upgrade framework.
+
+For schema changes that need actual data movement (column rename,
+constraint flip, in-place rebuild), each adapter has a
+`_verify_no_legacy_*` / `_migrate_legacy_*` helper family that runs
+after the SQL files. They detect the old shape via PRAGMA / `to_regclass`
+and either rebuild in place or fail loudly with rebuild instructions.
+Because these touch row data, the helpers stay separate from the
+numbered migration tracker.
+
+**Deprecated tables / columns** (kept here so a future change doesn't
+re-introduce a name collision; the legacy bail-out helpers reject any
+SQLite/Postgres DB still carrying these):
+
+| Name | Layer | Removed in | Replacement |
+|---|---|---|---|
+| `content` table | D | PR #19 | hash indexed on `documents.hash` |
+| `chunks_vec` (singleton vec table) | I | PR #27 | per-version `vec_chunks_v<id>` |
+| `embed_meta(chunk_id, model)` | I | PR #27 | `chunk_embed_meta(chunk_id, version_id)` |
+| `chunks.start` / `chunks."end"` | I | PR #23 | `chunks.start_off` / `end_off` |
+| `assets.width` / `height` | D | PR #25 | `media_meta` JSON discriminated union |
+| `assets.caption` / `caption_model` | D | PR #25 | (placeholder, never used) |
+| `assets.hash` | D | PR #37 | redundant with `asset_id` (= sha256 hex) |
+| `documents.path UNIQUE` (column-level) | D | this PR | `documents.path_key UNIQUE` (NFC + casefold) |
+
 ## What stays out of the adapters
 
 Hybrid search fusion (RRF), chunking, link-graph parsing, wisdom scoring,

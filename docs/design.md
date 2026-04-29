@@ -250,14 +250,21 @@ The logical model is backend-agnostic; the SQL below is the **SQLite reference s
 
 ```sql
 -- D
+-- ``path`` carries the user's spelling (display path); ``path_key`` is
+-- the engine's NFC + casefold lookup key. Splitting the two lets the
+-- same logical file under different macOS NFD / NTFS-case spellings
+-- resolve to a single row while ``dikw status`` still shows whichever
+-- spelling is on disk. ``data/path_norm.normalize_path`` is the single
+-- source of truth for the transformation.
 CREATE TABLE documents (
-    doc_id TEXT PRIMARY KEY,
-    path   TEXT UNIQUE NOT NULL,
-    title  TEXT,
-    hash   TEXT NOT NULL,                 -- sha256 of body; indexed for reverse lookup
-    mtime  REAL,
-    layer  TEXT CHECK (layer IN ('source','wiki','wisdom')) NOT NULL,
-    active INTEGER DEFAULT 1
+    doc_id   TEXT PRIMARY KEY,
+    path     TEXT NOT NULL,
+    path_key TEXT NOT NULL UNIQUE,
+    title    TEXT,
+    hash     TEXT NOT NULL,             -- sha256 of body; indexed for reverse lookup
+    mtime    REAL,
+    layer    TEXT CHECK (layer IN ('source','wiki','wisdom')) NOT NULL,
+    active   INTEGER DEFAULT 1
 );
 CREATE INDEX documents_hash_idx ON documents(hash);
 

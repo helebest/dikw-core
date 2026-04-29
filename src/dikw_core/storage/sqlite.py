@@ -1483,15 +1483,12 @@ class SQLiteStorage:
         writer (``_write_schema_version_*``) already supplies a non-null
         value, so the rebuild can never reject a real row.
         """
-        info = conn.execute("PRAGMA table_info('meta_kv')").fetchall()
-        if not info:
-            return
-        for row in info:
-            if row["name"] == "value":
-                if int(row["notnull"]) == 1:
-                    return
-                break
-        else:
+        cols_by_name = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info('meta_kv')")
+        }
+        value_col = cols_by_name.get("value")
+        if value_col is None or int(value_col["notnull"]) == 1:
             return
         with conn:
             conn.execute("DROP TABLE IF EXISTS meta_kv_new")

@@ -114,6 +114,32 @@ def _has_schema_constraints(storage: Storage) -> bool:
     return cls_name in {"SQLiteStorage", "PostgresStorage"}
 
 
+async def _column_info(storage: Storage, table: str) -> dict[str, dict[str, int]]:
+    """Return ``{col_name: {'notnull': 0|1}}`` for a SQL adapter's table.
+
+    Hides the SQLite (``PRAGMA table_info``) vs Postgres
+    (``information_schema.columns``) split so schema-shape contract
+    tests don't repeat the introspection branch every time. Caller
+    must guard with ``_has_schema_constraints`` — filesystem has no
+    SQL columns and this helper raises if asked.
+    """
+    cls_name = type(storage).__name__
+    if cls_name == "SQLiteStorage":
+        conn = storage._conn  # type: ignore[attr-defined]
+        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+        return {r["name"]: {"notnull": int(r["notnull"])} for r in rows}
+    if cls_name == "PostgresStorage":
+        async with storage._acquire() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]
+            await cur.execute(
+                "SELECT column_name, is_nullable FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = %s",
+                (table,),
+            )
+            rows = await cur.fetchall()
+        return {r[0]: {"notnull": 0 if r[1] == "YES" else 1} for r in rows}
+    raise AssertionError(f"_column_info unsupported for adapter {cls_name}")
+
+
 def _integrity_error_types() -> tuple[type[BaseException], ...]:
     """Adapter-specific integrity-error classes for ``pytest.raises``.
 
@@ -150,21 +176,11 @@ async def test_meta_kv_value_is_not_null(storage: Storage) -> None:
         pytest.skip("backend has no meta_kv table")
     await storage.migrate()
 
-    cls_name = type(storage).__name__
-    if cls_name == "SQLiteStorage":
-        conn = storage._conn  # type: ignore[attr-defined]
-        info = conn.execute("PRAGMA table_info('meta_kv')").fetchall()
-        nn_by_col = {r["name"]: int(r["notnull"]) for r in info}
-    else:
-        async with storage._acquire() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]
-            await cur.execute(
-                "SELECT column_name, is_nullable FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'meta_kv'"
-            )
-            rows = await cur.fetchall()
-        nn_by_col = {r[0]: 0 if r[1] == "YES" else 1 for r in rows}
-    assert nn_by_col.get("value") == 1, (
-        f"meta_kv.value must be NOT NULL; got nullable shape {nn_by_col!r}"
+    cols = await _column_info(storage, "meta_kv")
+    value_col = cols.get("value")
+    assert value_col is not None, "meta_kv.value column missing"
+    assert value_col["notnull"] == 1, (
+        f"meta_kv.value must be NOT NULL; got {value_col!r}"
     )
 
 
@@ -306,23 +322,10 @@ async def test_chunks_offset_columns_renamed(storage: Storage) -> None:
 
     Filesystem skips: no SQL columns.
     """
-    if isinstance(storage, FilesystemStorage):
+    if not _has_schema_constraints(storage):
         pytest.skip("filesystem adapter has no SQL columns")
 
-    if isinstance(storage, SQLiteStorage):
-        conn = storage._conn
-        assert conn is not None
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info('chunks')")}
-    else:  # PostgresStorage
-        async with storage._acquire() as conn, conn.cursor() as cur:
-            await cur.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'chunks' "
-                "AND table_schema = current_schema()"
-            )
-            rows = await cur.fetchall()
-        cols = {r[0] for r in rows}
-
+    cols = set((await _column_info(storage, "chunks")).keys())
     assert "start_off" in cols and "end_off" in cols, (
         f"expected start_off/end_off in chunks columns, got {sorted(cols)}"
     )

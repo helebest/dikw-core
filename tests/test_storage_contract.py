@@ -207,6 +207,30 @@ async def test_migrate_records_schema_version(storage: Storage) -> None:
     assert await _read_schema_version(storage) == expected
 
 
+def test_sqlite_001_init_declares_meta_kv() -> None:
+    """``meta_kv`` must be declared in the SQLite ``001_init.sql`` file
+    for parity with the Postgres migration. The Python-side inline
+    ``CREATE TABLE`` in ``SQLiteStorage.migrate()`` still runs first
+    (it has to, so ``_read_schema_version_sqlite`` can read the row
+    before any migration files apply), but a schema-diff between the
+    two adapters' ``migrations/`` trees should not surface a phantom
+    "Postgres has meta_kv, SQLite doesn't" because of where the table
+    happens to be declared.
+    """
+    from importlib import resources
+
+    sql = (
+        resources.files("dikw_core.storage.migrations.sqlite")
+        .joinpath("001_init.sql")
+        .read_text(encoding="utf-8")
+    )
+    assert "CREATE TABLE IF NOT EXISTS meta_kv" in sql, (
+        "001_init.sql must declare meta_kv for parity with the PG "
+        "migration; the inline create in sqlite.py:migrate() stays "
+        "but the .sql file is the documentation source of truth."
+    )
+
+
 def _expected_max_migration(adapter_name: str) -> int:
     """Resolve the highest migration number the adapter currently ships."""
     from dikw_core.storage._migrations import ordered_migrations

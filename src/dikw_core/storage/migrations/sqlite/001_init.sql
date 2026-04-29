@@ -1,6 +1,17 @@
 -- dikw-core SQLite schema v1
 -- sqlite-vec must be loaded into the connection before running this migration.
 
+-- ``meta_kv`` is also created inline in ``SQLiteStorage.migrate()`` before
+-- this file runs, because ``_read_schema_version_sqlite`` must read its
+-- row to decide whether to skip already-applied migration files. Declaring
+-- it here too keeps the SQLite schema's source-of-truth visible to anyone
+-- diffing the two adapters' ``migrations/`` trees; ``IF NOT EXISTS`` makes
+-- the second create a no-op.
+CREATE TABLE IF NOT EXISTS meta_kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- ---- D layer -------------------------------------------------------------
 
 -- ``path`` carries the user's spelling (display path); ``path_key`` is

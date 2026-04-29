@@ -578,6 +578,84 @@ async def test_sqlite_legacy_fts_rebuild_preserves_data(tmp_path: Path) -> None:
         await s.close()
 
 
+def test_pg_fts_to_tsquery_string_translates_or_form() -> None:
+    """``_fts_to_tsquery_string`` translates the SQLite-flavored output
+    of ``info/search.py:_sanitize_fts`` (``'"foo" OR "bar"'``) into the
+    PG ``to_tsquery`` form (``'foo | bar'``).
+
+    Pure function — exercised without a Postgres fixture so the
+    translation contract is locked even when CI runs without PG.
+    """
+    from dikw_core.storage.postgres import _fts_to_tsquery_string
+
+    assert _fts_to_tsquery_string('"foo" OR "bar"') == "foo | bar"
+    assert _fts_to_tsquery_string('"single"') == "single"
+    assert _fts_to_tsquery_string("") == ""
+    # Empty token list (after stripping) → empty (caller short-circuits)
+    assert _fts_to_tsquery_string('""') == ""
+    # Stray non-FTS5 chars inside a token are stripped, not parsed as
+    # tsquery operators
+    assert _fts_to_tsquery_string('"foo&bar"') == "foobar"
+    # CJK passes through (the helper imports CJK_CHAR_CLASS so jieba-
+    # segmented Chinese tokens survive translation)
+    assert _fts_to_tsquery_string('"机器" OR "学习"') == "机器 | 学习"
+
+
+async def test_pg_fts_search_multi_word_or(storage: Storage) -> None:
+    """PG ``fts_search`` must honor the ``OR``-joined sanitized query
+    that ``info/search.py:_sanitize_fts`` produces. Pre-PR PG used
+    ``plainto_tsquery('simple', q)`` which re-tokenized the literal
+    string ``'"alpha" OR "bravo"'`` and treated ``OR`` as a search
+    word — yielding 0 hits for any multi-word query.
+    """
+    if type(storage).__name__ != "PostgresStorage":
+        pytest.skip("PG-specific to_tsquery translation")
+    from dikw_core.info.search import _sanitize_fts
+
+    doc_a = _make_doc("sources/a.md")
+    doc_b = _make_doc("sources/b.md")
+    doc_c = _make_doc("sources/c.md")
+    await storage.upsert_document(doc_a)
+    await storage.upsert_document(doc_b)
+    await storage.upsert_document(doc_c)
+    await storage.replace_chunks(
+        doc_a.doc_id,
+        [ChunkRecord(doc_id=doc_a.doc_id, seq=0, start=0, end=5, text="alpha")],
+    )
+    await storage.replace_chunks(
+        doc_b.doc_id,
+        [ChunkRecord(doc_id=doc_b.doc_id, seq=0, start=0, end=5, text="bravo")],
+    )
+    await storage.replace_chunks(
+        doc_c.doc_id,
+        [ChunkRecord(doc_id=doc_c.doc_id, seq=0, start=0, end=7, text="charlie")],
+    )
+
+    sanitized = _sanitize_fts("alpha bravo")
+    assert " OR " in sanitized, (
+        f"_sanitize_fts contract changed; helper expects OR form: {sanitized!r}"
+    )
+
+    hits = await storage.fts_search(sanitized, limit=10)
+    hit_doc_ids = {h.doc_id for h in hits}
+    assert doc_a.doc_id in hit_doc_ids, "alpha-only doc must hit on OR query"
+    assert doc_b.doc_id in hit_doc_ids, "bravo-only doc must hit on OR query"
+    assert doc_c.doc_id not in hit_doc_ids, (
+        "charlie has neither token; must not hit"
+    )
+
+
+async def test_pg_fts_search_empty_query_returns_empty(storage: Storage) -> None:
+    """Sanitizer can produce an empty string when every token is
+    a reserved word or punctuation. PG ``fts_search`` must short-circuit
+    rather than feeding ``''`` to ``to_tsquery`` (which would raise).
+    """
+    if type(storage).__name__ != "PostgresStorage":
+        pytest.skip("PG-specific to_tsquery short-circuit")
+    hits = await storage.fts_search("", limit=5)
+    assert hits == []
+
+
 async def test_embeddings_and_vec_search(storage: Storage) -> None:
     doc = _make_doc("sources/vec.md")
     await storage.upsert_document(doc)

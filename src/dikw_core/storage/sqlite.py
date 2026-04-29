@@ -132,17 +132,30 @@ class SQLiteStorage:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS meta_kv (key TEXT PRIMARY KEY, value TEXT)"
                 )
-                for name in sorted(
-                    r.name
-                    for r in resources.files(MIGRATIONS_PACKAGE).iterdir()
-                    if r.is_file() and r.name.endswith(".sql")
-                ):
+                applied = _read_schema_version_sqlite(conn)
+                # Apply migration files in numeric prefix order, skipping
+                # any whose number ``<= applied``. Existing IF NOT EXISTS
+                # guards mean the body is idempotent if a transitional
+                # DB lands here without ``schema_version`` set, so
+                # re-running every file is safe — the version-skip is a
+                # diagnostic optimization, not a correctness gate.
+                applied_in_run = applied
+                for name in _ordered_migration_files(MIGRATIONS_PACKAGE):
+                    n = _migration_number(name)
+                    if n <= applied:
+                        continue
                     sql = (
                         resources.files(MIGRATIONS_PACKAGE)
                         .joinpath(name)
                         .read_text(encoding="utf-8")
                     )
                     conn.executescript(sql)
+                    applied_in_run = max(applied_in_run, n)
+                # Always rewrite the version, even when no new migration
+                # ran — pre-tracker DBs that just survived the IF NOT
+                # EXISTS replay should still record the highest number
+                # they're known to be at.
+                _write_schema_version_sqlite(conn, applied_in_run)
             self._verify_vec_tables_use_cosine(conn)
             self._verify_no_legacy_content_table(conn)
             self._verify_no_legacy_text_embed_tables(conn)
@@ -1521,6 +1534,51 @@ class SQLiteStorage:
 
 
 # ---- module-level helpers ------------------------------------------------
+
+
+SCHEMA_VERSION_KEY = "schema_version"
+
+
+def _ordered_migration_files(pkg_name: str) -> list[str]:
+    """Return migration filenames sorted by their numeric prefix.
+
+    Files outside the ``NNN_*.sql`` shape are skipped. Sort key is the
+    integer prefix so ``002`` lands before ``010`` regardless of
+    lexicographic surprise.
+    """
+    names: list[str] = []
+    for r in resources.files(pkg_name).iterdir():
+        if r.is_file() and r.name.endswith(".sql"):
+            head = r.name.split("_", 1)[0]
+            if head.isdigit():
+                names.append(r.name)
+    names.sort(key=_migration_number)
+    return names
+
+
+def _migration_number(name: str) -> int:
+    return int(name.split("_", 1)[0])
+
+
+def _read_schema_version_sqlite(conn: sqlite3.Connection) -> int:
+    """Read ``meta_kv['schema_version']`` as an int. Missing row → 0."""
+    row = conn.execute(
+        "SELECT value FROM meta_kv WHERE key = ?", (SCHEMA_VERSION_KEY,)
+    ).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_schema_version_sqlite(conn: sqlite3.Connection, n: int) -> None:
+    conn.execute(
+        "INSERT INTO meta_kv(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (SCHEMA_VERSION_KEY, str(n)),
+    )
 
 
 def _knn(

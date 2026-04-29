@@ -120,8 +120,24 @@ class PostgresStorage:
         scripts = self._load_migration_scripts()
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
-                for sql_text in scripts:
+                # Ensure meta_kv exists before reading schema_version.
+                # SQLite creates it inline in migrate(); the PG version
+                # is in 001_init.sql but legacy DBs may have skipped it
+                # if they predate meta_kv — guard with IF NOT EXISTS so
+                # the read below never trips a "no such table" error.
+                await cur.execute(
+                    "CREATE TABLE IF NOT EXISTS meta_kv ("
+                    "  key TEXT PRIMARY KEY, value TEXT NOT NULL"
+                    ")"
+                )
+                applied = await _read_schema_version_pg(cur)
+                applied_in_run = applied
+                for n, sql_text in scripts:
+                    if n <= applied:
+                        continue
                     await cur.execute(sql_text)
+                    applied_in_run = max(applied_in_run, n)
+                await _write_schema_version_pg(cur, applied_in_run)
             await conn.commit()
             await self._verify_no_legacy_content_table(conn)
             await self._verify_no_legacy_text_embed_tables(conn)
@@ -1030,14 +1046,23 @@ class PostgresStorage:
             raise StorageError("PostgresStorage is not connected; call `connect()` first")
         return _ConnectionContext(self._pool, self._schema)
 
-    def _load_migration_scripts(self) -> list[str]:
+    def _load_migration_scripts(self) -> list[tuple[int, str]]:
+        """Return ``(number, body)`` pairs sorted by numeric prefix.
+
+        Files whose name doesn't match ``NNN_*.sql`` are skipped silently
+        (mirrors the SQLite adapter's helper).
+        """
         pkg = resources.files(MIGRATIONS_PACKAGE)
-        names = sorted(
-            r.name
-            for r in pkg.iterdir()
-            if r.is_file() and r.name.endswith(".sql")
-        )
-        return [pkg.joinpath(n).read_text(encoding="utf-8") for n in names]
+        out: list[tuple[int, str]] = []
+        for r in pkg.iterdir():
+            if not (r.is_file() and r.name.endswith(".sql")):
+                continue
+            head = r.name.split("_", 1)[0]
+            if not head.isdigit():
+                continue
+            out.append((int(head), pkg.joinpath(r.name).read_text(encoding="utf-8")))
+        out.sort(key=lambda t: t[0])
+        return out
 
     async def _ensure_vec_table(
         self,
@@ -1169,6 +1194,31 @@ class PostgresStorage:
                 "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_path_key"
             )
         await conn.commit()
+
+
+SCHEMA_VERSION_KEY = "schema_version"
+
+
+async def _read_schema_version_pg(cur: Any) -> int:
+    """Read ``meta_kv['schema_version']`` as an int. Missing row → 0."""
+    await cur.execute(
+        "SELECT value FROM meta_kv WHERE key = %s", (SCHEMA_VERSION_KEY,)
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _write_schema_version_pg(cur: Any, n: int) -> None:
+    await cur.execute(
+        "INSERT INTO meta_kv(key, value) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (SCHEMA_VERSION_KEY, str(n)),
+    )
 
 
 class _ConnectionContext:

@@ -70,7 +70,7 @@ src/dikw_core/
 │   ├── filesystem.py        DB-less JSONL sidecars + in-proc FTS (zero deps)
 │   └── migrations/
 │       ├── sqlite/          schema SQL
-│       └── postgres/        schema SQL (pg_trgm + vector extensions)
+│       └── postgres/        schema SQL (vector extension)
 ├── prompts/               versioned LLM prompts loaded via importlib.resources
 ├── mcp_server.py          MCP tools grouped by layer
 └── cli.py                 typer app

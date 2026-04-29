@@ -82,13 +82,12 @@ class PostgresStorage:
                 "install via `uv pip install dikw-core[postgres]`"
             ) from e
 
-        # Extensions must exist before the pool hands out connections,
-        # because ``configure`` below registers pgvector types on each
-        # new connection — which needs the ``vector`` type present.
+        # The vector extension must exist before the pool hands out
+        # connections because the SQL below uses ``::vector`` casts;
+        # those need the extension type to be present.
         boot = await psycopg.AsyncConnection.connect(self._dsn, autocommit=True)
         try:
             async with boot.cursor() as cur:
-                await cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
                 await cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 await cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
         finally:

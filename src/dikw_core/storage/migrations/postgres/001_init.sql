@@ -1,6 +1,6 @@
 -- dikw-core Postgres schema v1
--- The pg_trgm and vector extensions are enabled at connect-time in Python
--- (not here) so the pool can register pgvector types on first connection.
+-- The vector extension is enabled at connect-time in Python (not here)
+-- so the SQL below can use ``::vector`` casts on the first connection.
 -- Per-version vec_chunks_v<id> / vec_assets_v<id> tables are created
 -- lazily in Python so the engine can parameterise the embedding
 -- dimension at first insert. See storage/postgres.py.

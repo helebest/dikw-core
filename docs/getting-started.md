@@ -223,7 +223,7 @@ storage:
 ```
 
 Enterprise / multi-user via Postgres (requires `pip install dikw-core[postgres]`
-and a database with the `pg_trgm` + `vector` extensions):
+and a database with the `vector` extension):
 
 ```yaml
 storage:

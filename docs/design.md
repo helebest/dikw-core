@@ -81,7 +81,7 @@ Module boundaries are chosen so each subpackage fits in a single reading pass an
 - **Language**: Python 3.12+
 - **Packaging**: `uv` → `pyproject.toml` (PEP 621), `uv.lock` committed; single source layout under `src/dikw_core/`
 - **Storage (MVP, default)**: stdlib `sqlite3` + `sqlite-vec` (pip) for vectors; FTS5 built into SQLite. Behind a `Storage` Protocol.
-- **Storage (planned, enterprise)**: Postgres 15+ with `pgvector` ≥0.6 and `tsvector`/`pg_trgm` for full-text, via `psycopg[binary,pool]`. Optional extra: `uv pip install dikw-core[postgres]`.
+- **Storage (planned, enterprise)**: Postgres 15+ with `pgvector` ≥0.6 and `tsvector` + GIN for full-text, via `psycopg[binary,pool]`. Optional extra: `uv pip install dikw-core[postgres]`.
 - **Storage (planned, vault-native)**: Filesystem backend — the vault IS the index. No DB. Chunks/links/wisdom-items live in `.dikw/` JSON sidecars; retrieval is FTS + LLM-driven navigation over `index.md` + link graph (no dense retrieval — users who outgrow lexical-only flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest). Matches Karpathy's "scoping deterministic, reasoning probabilistic" claim at ≤~200 pages. No extra dep footprint.
 - **Schemas**: Pydantic v2 for config, records, tool I/O
 - **Markdown**: `markdown-it-py` + `python-frontmatter`; wiki-link parsing via a small in-repo module (not a heavy dep)
@@ -244,7 +244,7 @@ sources:
 
 ## Data Model
 
-The logical model is backend-agnostic; the SQL below is the **SQLite reference schema** used by the MVP adapter. The Postgres adapter maps the same logical entities to equivalent structures — `tsvector` + GIN + `pg_trgm` for FTS, `pgvector` for embeddings, regular tables for the rest — behind the same `Storage` Protocol.
+The logical model is backend-agnostic; the SQL below is the **SQLite reference schema** used by the MVP adapter. The Postgres adapter maps the same logical entities to equivalent structures — `tsvector` + GIN for FTS, `pgvector` for embeddings, regular tables for the rest — behind the same `Storage` Protocol.
 
 ### SQLite reference schema (MVP)
 

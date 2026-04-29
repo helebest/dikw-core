@@ -269,7 +269,12 @@ CREATE TABLE documents (
 CREATE INDEX documents_hash_idx ON documents(hash);
 
 -- I
-CREATE VIRTUAL TABLE documents_fts USING fts5(path, title, body, content='');
+-- Body-only FTS5 over chunk text; rowid aligns with chunks.chunk_id.
+-- ``remove_diacritics 0`` is intentional and matches PG's
+-- ``to_tsvector('simple', text)`` byte-level behavior.
+CREATE VIRTUAL TABLE documents_fts USING fts5(
+    body, tokenize = "unicode61 remove_diacritics 0"
+);
 CREATE TABLE chunks (
     chunk_id  INTEGER PRIMARY KEY,
     doc_id    TEXT REFERENCES documents(doc_id),

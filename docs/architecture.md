@@ -122,7 +122,8 @@ SQLite/Postgres DB still carrying these):
 | `assets.width` / `height` | D | PR #25 | `media_meta` JSON discriminated union |
 | `assets.caption` / `caption_model` | D | PR #25 | (placeholder, never used) |
 | `assets.hash` | D | PR #37 | redundant with `asset_id` (= sha256 hex) |
-| `documents.path UNIQUE` (column-level) | D | this PR | `documents.path_key UNIQUE` (NFC + casefold) |
+| `documents.path UNIQUE` (column-level) | D | PR #39 | `documents.path_key UNIQUE` (NFC + casefold) |
+| `documents_fts.{path,title,layer}` columns | I | this PR | body-only; doc/layer come from JOIN through `chunks` + `documents` |
 
 ### Cross-adapter shape: where the two SQL backends intentionally differ
 
@@ -134,13 +135,33 @@ different mechanisms:
 
 | Where text indexing lives | SQLite | Postgres |
 |---|---|---|
-| Search index | separate FTS5 virtual table `documents_fts` (chunk-keyed by rowid) | generated `chunks.fts tsvector` column with a `GIN` index |
+| Search index | separate FTS5 virtual table `documents_fts` (body-only; `rowid` aligns with `chunks.chunk_id`) | generated `chunks.fts tsvector` column over `chunks.text` with a `GIN` index |
 
 Both adapters expose the same `fts_search` method on the `Storage`
 Protocol returning the same `FTSHit` DTOs — the engine never sees the
 divergence. Schema-parity diff tools should treat `chunks.fts` (PG-only)
 and `documents_fts` (SQLite-only) as the dual implementations of the
-same logical capability.
+same logical capability. Their **column scope** is now identical
+(both index only chunk body text); legacy SQLite DBs that carry the
+old 4-column shape are auto-rebuilt by
+`_migrate_legacy_documents_fts`.
+
+**Tokenization** is also aligned: SQLite uses `unicode61
+remove_diacritics 0` (the `0` is explicit because the unicode61
+default is `1`, which still strips diacritics) so `café` and `cafe`
+are different tokens — same byte-level behavior as PG's
+`to_tsvector('simple', text)`. CJK input on the SQLite + filesystem
+adapters flows through `info.tokenize.preprocess_for_fts` (jieba
+when `cjk_tokenizer="jieba"`) on both ingest and query; PG does its
+tokenization inside `to_tsvector` and is unaffected by the Python-
+side preprocessor.
+
+The PG `fts_search` consumes the `info/search.py:_sanitize_fts`
+output via `to_tsquery` (with a small `_fts_to_tsquery_string`
+adapter that translates SQLite's `'"foo" OR "bar"'` form into PG's
+`'foo | bar'`). Earlier versions used `plainto_tsquery`, which
+re-tokenized the sanitizer output and treated `OR` as a literal
+search word — broken for any multi-word query.
 
 `SQLiteStorage` also reports `notnull=0` on every `INTEGER`/`TEXT`
 PRIMARY KEY column via `PRAGMA table_info` (a documented SQLite quirk

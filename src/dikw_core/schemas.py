@@ -167,6 +167,11 @@ class WikiLogEntry(BaseModel):
 
 
 class WisdomEvidence(BaseModel):
+    # ``id`` is None on construction; the storage layer assigns it on
+    # insert via SQLite AUTOINCREMENT / Postgres BIGSERIAL. Mirrors the
+    # ``WikiLogEntry.id`` pattern — ``get_wisdom_evidence`` orders by
+    # this so insertion order survives across adapters.
+    id: int | None = None
     doc_id: str
     excerpt: str
     line: int | None = None

@@ -124,6 +124,30 @@ SQLite/Postgres DB still carrying these):
 | `assets.hash` | D | PR #37 | redundant with `asset_id` (= sha256 hex) |
 | `documents.path UNIQUE` (column-level) | D | this PR | `documents.path_key UNIQUE` (NFC + casefold) |
 
+### Cross-adapter shape: where the two SQL backends intentionally differ
+
+The SQLite and Postgres tables match column-for-column with the
+expected dialect aliases (`INTEGER`/`BIGINT`, `REAL`/`DOUBLE PRECISION`,
+`BLOB`/`BYTEA`, `INTEGER 0/1`/`BOOLEAN`). One table is shaped
+differently **on purpose** because the two engines implement FTS via
+different mechanisms:
+
+| Where text indexing lives | SQLite | Postgres |
+|---|---|---|
+| Search index | separate FTS5 virtual table `documents_fts` (chunk-keyed by rowid) | generated `chunks.fts tsvector` column with a `GIN` index |
+
+Both adapters expose the same `fts_search` method on the `Storage`
+Protocol returning the same `FTSHit` DTOs — the engine never sees the
+divergence. Schema-parity diff tools should treat `chunks.fts` (PG-only)
+and `documents_fts` (SQLite-only) as the dual implementations of the
+same logical capability.
+
+`SQLiteStorage` also reports `notnull=0` on every `INTEGER`/`TEXT`
+PRIMARY KEY column via `PRAGMA table_info` (a documented SQLite quirk
+— PK columns implicitly enforce NOT NULL). Postgres `information_schema`
+reports `notnull=1` for the same columns, which is the actual contract
+both adapters honor at write time.
+
 ## What stays out of the adapters
 
 Hybrid search fusion (RRF), chunking, link-graph parsing, wisdom scoring,

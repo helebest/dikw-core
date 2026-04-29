@@ -131,7 +131,8 @@ class SQLiteStorage:
             conn = self._require_conn()
             with conn:
                 conn.execute(
-                    "CREATE TABLE IF NOT EXISTS meta_kv (key TEXT PRIMARY KEY, value TEXT)"
+                    "CREATE TABLE IF NOT EXISTS meta_kv ("
+                    "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
                 )
                 applied = _read_schema_version_sqlite(conn)
                 # Apply migration files in numeric prefix order, skipping
@@ -163,6 +164,8 @@ class SQLiteStorage:
             self._migrate_legacy_assets_columns(conn)
             self._migrate_legacy_wiki_log_id(conn)
             self._migrate_legacy_documents_path_key(conn)
+            self._migrate_legacy_wisdom_evidence_id(conn)
+            self._migrate_legacy_meta_kv_value_notnull(conn)
 
         await asyncio.to_thread(_run)
 
@@ -781,12 +784,13 @@ class SQLiteStorage:
         def _run() -> list[WisdomEvidence]:
             conn = self._require_conn()
             rows = conn.execute(
-                "SELECT doc_id, excerpt, line FROM wisdom_evidence "
-                "WHERE item_id = ? ORDER BY rowid ASC",
+                "SELECT id, doc_id, excerpt, line FROM wisdom_evidence "
+                "WHERE item_id = ? ORDER BY id ASC",
                 (item_id,),
             ).fetchall()
             return [
                 WisdomEvidence(
+                    id=int(r["id"]),
                     doc_id=r["doc_id"],
                     excerpt=r["excerpt"],
                     line=int(r["line"]) if r["line"] is not None else None,
@@ -1404,6 +1408,104 @@ class SQLiteStorage:
             conn.execute("DROP TABLE wiki_log")
             conn.execute("ALTER TABLE wiki_log_new RENAME TO wiki_log")
             conn.execute("CREATE INDEX IF NOT EXISTS wiki_log_ts ON wiki_log(ts)")
+
+    def _migrate_legacy_wisdom_evidence_id(self, conn: sqlite3.Connection) -> None:
+        """Add the explicit ``id`` column to a pre-parity ``wisdom_evidence``.
+
+        Older DBs were schema-typed without ``id`` and relied on the
+        implicit rowid for ordering. Same shape as the wiki_log
+        migration: copy-rebuild inside one transaction so AUTOINCREMENT
+        ids align with the original insertion order, with the FK
+        toggle around it because ``wisdom_items.item_id`` is the
+        parent of ``wisdom_evidence.item_id``.
+
+        Idempotent and crash-safe — drops any orphan
+        ``wisdom_evidence_new`` from a prior partial attempt and
+        verifies foreign-key integrity before re-enabling enforcement.
+        """
+        info = conn.execute("PRAGMA table_info('wisdom_evidence')").fetchall()
+        if not info:
+            return
+        cols = {row["name"] for row in info}
+        if "id" in cols:
+            conn.execute("DROP TABLE IF EXISTS wisdom_evidence_new")
+            return
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with conn:
+                conn.execute("DROP TABLE IF EXISTS wisdom_evidence_new")
+                conn.execute("DROP INDEX IF EXISTS wisdom_evidence_item")
+                conn.execute(
+                    "CREATE TABLE wisdom_evidence_new ("
+                    "  id      INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "  item_id TEXT NOT NULL REFERENCES wisdom_items(item_id) "
+                    "          ON DELETE CASCADE,"
+                    "  doc_id  TEXT NOT NULL REFERENCES documents(doc_id),"
+                    "  excerpt TEXT NOT NULL,"
+                    "  line    INTEGER"
+                    ")"
+                )
+                # Copy in rowid order so AUTOINCREMENT ids match the
+                # original insertion timeline (per-item ordering is
+                # what get_wisdom_evidence's ORDER BY id ASC reads).
+                conn.execute(
+                    "INSERT INTO wisdom_evidence_new(item_id, doc_id, excerpt, line) "
+                    "SELECT item_id, doc_id, excerpt, line FROM wisdom_evidence "
+                    "ORDER BY rowid ASC"
+                )
+                conn.execute("DROP TABLE wisdom_evidence")
+                conn.execute(
+                    "ALTER TABLE wisdom_evidence_new RENAME TO wisdom_evidence"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS wisdom_evidence_item "
+                    "ON wisdom_evidence(item_id)"
+                )
+                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise StorageError(
+                        "wisdom_evidence rebuild left dangling foreign keys: "
+                        f"{violations}. Bailing out before FKs are re-enabled."
+                    )
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+
+    def _migrate_legacy_meta_kv_value_notnull(self, conn: sqlite3.Connection) -> None:
+        """Add ``NOT NULL`` to ``meta_kv.value`` on a pre-parity table.
+
+        SQLite cannot ALTER an existing column's nullability in place,
+        so legacy DBs that landed before this commit shipped
+        ``value TEXT`` without the constraint. The Postgres adapter has
+        always declared it ``NOT NULL`` — this brings them in line.
+
+        Idempotent: skips when the column is already NOT NULL or when
+        the table doesn't exist. Safe at runtime because every existing
+        writer (``_write_schema_version_*``) already supplies a non-null
+        value, so the rebuild can never reject a real row.
+        """
+        cols_by_name = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info('meta_kv')")
+        }
+        value_col = cols_by_name.get("value")
+        if value_col is None or int(value_col["notnull"]) == 1:
+            return
+        with conn:
+            conn.execute("DROP TABLE IF EXISTS meta_kv_new")
+            conn.execute(
+                "CREATE TABLE meta_kv_new ("
+                "  key TEXT PRIMARY KEY, value TEXT NOT NULL"
+                ")"
+            )
+            # Filter NULLs defensively; the writer never inserts them
+            # but a hand-edited DB might. Dropping a NULL row is the
+            # only sensible recovery when the new constraint forbids it.
+            conn.execute(
+                "INSERT INTO meta_kv_new(key, value) "
+                "SELECT key, value FROM meta_kv WHERE value IS NOT NULL"
+            )
+            conn.execute("DROP TABLE meta_kv")
+            conn.execute("ALTER TABLE meta_kv_new RENAME TO meta_kv")
 
     def _migrate_legacy_documents_path_key(self, conn: sqlite3.Connection) -> None:
         """Add the ``path_key`` column to a pre-normalization ``documents`` table.

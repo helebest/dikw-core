@@ -1336,16 +1336,31 @@ _TS_TOKEN_SAFE_RE = re.compile(rf"[^{WORD_OR_CJK_CHARS}]")
 
 
 def _fts_to_tsquery_string(q: str) -> str:
-    """Translate ``info/search.py:_sanitize_fts`` output into PG to_tsquery.
+    """Translate any ``Storage.fts_search`` query into PG to_tsquery form.
 
-    Sanitizer hands back the SQLite-flavored bag-of-words string
-    ``'"foo" OR "bar"'``; PG's ``to_tsquery`` expects ``'foo | bar'``.
-    Quote-extract each token, escape any operator-significant chars,
-    drop empty results, and join with ``' | '``.
+    Two input shapes flow into this helper:
+
+    1. **Pre-sanitized form** from ``info/search.py:_sanitize_fts``:
+       ``'"foo" OR "bar"'`` — the SQLite-flavored quoted bag-of-words.
+       Translate to ``'foo | bar'``.
+    2. **Raw form** from any direct ``Storage.fts_search`` caller
+       (e.g. the ``test_chunks_and_fts_search`` contract test passes
+       ``"brown"`` straight through). Tokenize on whitespace; same
+       escape + join as the sanitized path.
+
+    Either way: extract tokens, scrub any operator-significant chars
+    (``& | ! ( )`` etc. — tsquery would treat them as syntax), drop
+    empties, and join with ``' | '``.
 
     Empty input → empty output; the caller must short-circuit because
-    ``to_tsquery('')`` is a runtime error in PG.
+    ``to_tsquery('')`` raises in PG.
     """
     tokens = _TS_TOKEN_RE.findall(q)
+    if not tokens:
+        # Raw form: no quoted tokens to extract, so split on whitespace
+        # and run each piece through the same escape pass. Drops
+        # control chars and tsquery operators while keeping
+        # word + CJK content.
+        tokens = q.split()
     safe = [_TS_TOKEN_SAFE_RE.sub("", t) for t in tokens]
     return " | ".join(t for t in safe if t)

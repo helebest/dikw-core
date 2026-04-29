@@ -596,6 +596,14 @@ def test_pg_fts_to_tsquery_string_translates_or_form() -> None:
     # CJK passes through (the helper imports WORD_OR_CJK_CHARS so
     # jieba-segmented Chinese tokens survive translation)
     assert _fts_to_tsquery_string('"机器" OR "学习"') == "机器 | 学习"
+    # Raw (un-sanitized) input must also work — direct callers like
+    # ``test_chunks_and_fts_search`` pass plain words. Single token:
+    assert _fts_to_tsquery_string("brown") == "brown"
+    # Multi-token raw input: whitespace-split → OR-joined
+    assert _fts_to_tsquery_string("alpha bravo") == "alpha | bravo"
+    # Raw input with operator-significant chars gets scrubbed so
+    # tsquery doesn't blow up on them
+    assert _fts_to_tsquery_string("foo&bar") == "foobar"
 
 
 async def test_pg_fts_search_multi_word_or(storage: Storage) -> None:

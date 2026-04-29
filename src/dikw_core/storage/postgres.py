@@ -44,6 +44,7 @@ from ..schemas import (
     dump_media_meta,
     load_media_meta,
 )
+from ._migrations import SCHEMA_VERSION_KEY, ordered_migrations
 from ._vec_codec import deserialize_vec, serialize_vec
 from .base import NotSupported, StorageError
 
@@ -1049,20 +1050,15 @@ class PostgresStorage:
     def _load_migration_scripts(self) -> list[tuple[int, str]]:
         """Return ``(number, body)`` pairs sorted by numeric prefix.
 
-        Files whose name doesn't match ``NNN_*.sql`` are skipped silently
-        (mirrors the SQLite adapter's helper).
+        Body is read eagerly because callers iterate the list multiple
+        times during version-aware application; ``ordered_migrations``
+        only yields filenames and stays cheap to call standalone.
         """
         pkg = resources.files(MIGRATIONS_PACKAGE)
-        out: list[tuple[int, str]] = []
-        for r in pkg.iterdir():
-            if not (r.is_file() and r.name.endswith(".sql")):
-                continue
-            head = r.name.split("_", 1)[0]
-            if not head.isdigit():
-                continue
-            out.append((int(head), pkg.joinpath(r.name).read_text(encoding="utf-8")))
-        out.sort(key=lambda t: t[0])
-        return out
+        return [
+            (n, pkg.joinpath(name).read_text(encoding="utf-8"))
+            for n, name in ordered_migrations(MIGRATIONS_PACKAGE)
+        ]
 
     async def _ensure_vec_table(
         self,
@@ -1194,9 +1190,6 @@ class PostgresStorage:
                 "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_path_key"
             )
         await conn.commit()
-
-
-SCHEMA_VERSION_KEY = "schema_version"
 
 
 async def _read_schema_version_pg(cur: Any) -> int:

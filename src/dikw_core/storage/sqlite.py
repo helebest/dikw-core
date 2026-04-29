@@ -47,6 +47,7 @@ from ..schemas import (
     dump_media_meta,
     load_media_meta,
 )
+from ._migrations import SCHEMA_VERSION_KEY, ordered_migrations
 from ._vec_codec import deserialize_vec as _deserialize_vec
 from ._vec_codec import serialize_vec as _serialize_vec
 from .base import NotSupported, StorageError
@@ -140,8 +141,7 @@ class SQLiteStorage:
                 # re-running every file is safe — the version-skip is a
                 # diagnostic optimization, not a correctness gate.
                 applied_in_run = applied
-                for name in _ordered_migration_files(MIGRATIONS_PACKAGE):
-                    n = _migration_number(name)
+                for n, name in ordered_migrations(MIGRATIONS_PACKAGE):
                     if n <= applied:
                         continue
                     sql = (
@@ -1534,30 +1534,6 @@ class SQLiteStorage:
 
 
 # ---- module-level helpers ------------------------------------------------
-
-
-SCHEMA_VERSION_KEY = "schema_version"
-
-
-def _ordered_migration_files(pkg_name: str) -> list[str]:
-    """Return migration filenames sorted by their numeric prefix.
-
-    Files outside the ``NNN_*.sql`` shape are skipped. Sort key is the
-    integer prefix so ``002`` lands before ``010`` regardless of
-    lexicographic surprise.
-    """
-    names: list[str] = []
-    for r in resources.files(pkg_name).iterdir():
-        if r.is_file() and r.name.endswith(".sql"):
-            head = r.name.split("_", 1)[0]
-            if head.isdigit():
-                names.append(r.name)
-    names.sort(key=_migration_number)
-    return names
-
-
-def _migration_number(name: str) -> int:
-    return int(name.split("_", 1)[0])
 
 
 def _read_schema_version_sqlite(conn: sqlite3.Connection) -> int:

@@ -165,26 +165,16 @@ async def test_migrate_records_schema_version(storage: Storage) -> None:
 
 
 def _expected_max_migration(adapter_name: str) -> int:
-    """Resolve the highest migration number the adapter currently ships.
-
-    Mirror of ``dikw_core.eval.runner._max_migration_number`` but
-    parameterized on the adapter so the test stays decoupled from the
-    eval cache module.
-    """
-    from importlib import resources
+    """Resolve the highest migration number the adapter currently ships."""
+    from dikw_core.storage._migrations import ordered_migrations
 
     pkg = (
         "dikw_core.storage.migrations.sqlite"
         if adapter_name == "SQLiteStorage"
         else "dikw_core.storage.migrations.postgres"
     )
-    nums: list[int] = []
-    for r in resources.files(pkg).iterdir():
-        if r.is_file() and r.name.endswith(".sql"):
-            head = r.name.split("_", 1)[0]
-            if head.isdigit():
-                nums.append(int(head))
-    return max(nums) if nums else 0
+    pairs = ordered_migrations(pkg)
+    return pairs[-1][0] if pairs else 0
 
 
 async def _read_schema_version(storage: Storage) -> int:

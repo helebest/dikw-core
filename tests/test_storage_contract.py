@@ -104,6 +104,35 @@ def _make_doc(path: str, layer: Layer = Layer.SOURCE) -> DocumentRecord:
     )
 
 
+def _has_schema_constraints(storage: Storage) -> bool:
+    """True for SQL-backed adapters (sqlite/postgres) where SCHEMA
+    CHECK / UNIQUE constraints fire at write time. The filesystem
+    backend persists DTOs as JSONL with no DB-level invariants, so
+    schema-shape tests skip it.
+    """
+    cls_name = type(storage).__name__
+    return cls_name in {"SQLiteStorage", "PostgresStorage"}
+
+
+def _integrity_error_types() -> tuple[type[BaseException], ...]:
+    """Adapter-specific integrity-error classes for ``pytest.raises``.
+
+    SQLite raises ``sqlite3.IntegrityError``; Postgres raises
+    ``psycopg.errors.IntegrityError``. The Postgres extra is optional,
+    so import it lazily and fall back to ``sqlite3`` only.
+    """
+    import sqlite3
+
+    types: list[type[BaseException]] = [sqlite3.IntegrityError]
+    try:
+        import psycopg
+
+        types.append(psycopg.errors.IntegrityError)
+    except ImportError:
+        pass
+    return tuple(types)
+
+
 async def test_migrate_is_idempotent(storage: Storage) -> None:
     await storage.migrate()
     await storage.migrate()
@@ -927,6 +956,94 @@ async def test_chunk_asset_refs_replaced_on_reupsert(storage: Storage) -> None:
         pytest.skip("backend doesn't implement chunk_asset_refs yet")
 
     assert await storage.chunk_asset_refs_for_chunks([cid]) == {cid: []}
+
+
+async def test_chunk_asset_refs_constraint_zero_length_span(
+    storage: Storage,
+) -> None:
+    """The schema must reject ``start_in_chunk == end_in_chunk`` (degenerate
+    span). Today no chunker path produces these, but the CHECK is the
+    boundary safety net so a future refactor can't slip past silently."""
+    doc = _make_doc("sources/zero-span.md")
+    await storage.upsert_document(doc)
+    ids = await storage.replace_chunks(
+        doc.doc_id,
+        [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=10, text="hi")],
+    )
+    cid = ids[0]
+    a = _make_asset("ff" + "0" * 62)
+    try:
+        await storage.upsert_asset(a)
+    except NotSupported:
+        pytest.skip("backend doesn't implement chunk_asset_refs yet")
+
+    # Filesystem backend has no schema-level CHECK; document the
+    # SQL-only contract by skipping it.
+    if not _has_schema_constraints(storage):
+        pytest.skip("backend has no schema-level CHECK")
+
+    with pytest.raises(_integrity_error_types()):
+        await storage.replace_chunk_asset_refs(
+            cid,
+            [
+                ChunkAssetRef(
+                    chunk_id=cid,
+                    asset_id=a.asset_id,
+                    ord=0,
+                    alt="",
+                    start_in_chunk=5,
+                    end_in_chunk=5,
+                )
+            ],
+        )
+
+
+async def test_chunk_asset_refs_constraint_duplicate_span(
+    storage: Storage,
+) -> None:
+    """Two refs at the same ``[start, end)`` byte range within a single
+    chunk must be rejected. The chunker can't legitimately produce
+    duplicates; a violation indicates a regression worth catching loudly."""
+    doc = _make_doc("sources/dup-span.md")
+    await storage.upsert_document(doc)
+    ids = await storage.replace_chunks(
+        doc.doc_id,
+        [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=20, text="text")],
+    )
+    cid = ids[0]
+    a = _make_asset("11" + "0" * 62, original_path="x.png")
+    b = _make_asset("22" + "0" * 62, original_path="y.png")
+    try:
+        await storage.upsert_asset(a)
+        await storage.upsert_asset(b)
+    except NotSupported:
+        pytest.skip("backend doesn't implement chunk_asset_refs yet")
+
+    if not _has_schema_constraints(storage):
+        pytest.skip("backend has no schema-level UNIQUE")
+
+    with pytest.raises(_integrity_error_types()):
+        await storage.replace_chunk_asset_refs(
+            cid,
+            [
+                ChunkAssetRef(
+                    chunk_id=cid,
+                    asset_id=a.asset_id,
+                    ord=0,
+                    alt="",
+                    start_in_chunk=4,
+                    end_in_chunk=14,
+                ),
+                ChunkAssetRef(
+                    chunk_id=cid,
+                    asset_id=b.asset_id,
+                    ord=1,
+                    alt="",
+                    start_in_chunk=4,
+                    end_in_chunk=14,
+                ),
+            ],
+        )
 
 
 async def test_chunk_asset_refs_cascade_on_chunk_delete(storage: Storage) -> None:

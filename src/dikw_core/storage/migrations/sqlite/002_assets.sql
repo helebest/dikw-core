@@ -28,7 +28,13 @@ CREATE TABLE IF NOT EXISTS chunk_asset_refs (
     alt             TEXT    NOT NULL DEFAULT '',
     start_in_chunk  INTEGER NOT NULL,
     end_in_chunk    INTEGER NOT NULL,
-    PRIMARY KEY (chunk_id, ord)
+    PRIMARY KEY (chunk_id, ord),
+    -- CHECK guarantees a non-degenerate span; the markdown image regex
+    -- already enforces this, so the constraint is the schema-level
+    -- safety net. UNIQUE forbids two refs landing in the same byte range
+    -- within one chunk — duplicates would indicate a chunker bug.
+    CHECK (start_in_chunk < end_in_chunk),
+    UNIQUE (chunk_id, start_in_chunk, end_in_chunk)
 );
 
 CREATE INDEX IF NOT EXISTS chunk_asset_refs_asset

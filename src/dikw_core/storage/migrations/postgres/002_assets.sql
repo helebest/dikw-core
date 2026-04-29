@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS chunk_asset_refs (
     alt             TEXT    NOT NULL DEFAULT '',
     start_in_chunk  INTEGER NOT NULL,
     end_in_chunk    INTEGER NOT NULL,
-    PRIMARY KEY (chunk_id, ord)
+    PRIMARY KEY (chunk_id, ord),
+    -- See migrations/sqlite/002_assets.sql for the rationale.
+    CHECK (start_in_chunk < end_in_chunk),
+    UNIQUE (chunk_id, start_in_chunk, end_in_chunk)
 );
 
 CREATE INDEX IF NOT EXISTS chunk_asset_refs_asset

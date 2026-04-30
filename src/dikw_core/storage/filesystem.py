@@ -51,10 +51,12 @@ from ..schemas import (
     StorageCounts,
     VecHit,
     WikiLogEntry,
+    WisdomEmbeddingRow,
     WisdomEvidence,
     WisdomItem,
     WisdomKind,
     WisdomStatus,
+    WisdomVecHit,
 )
 from .base import NotSupported
 
@@ -509,6 +511,22 @@ class FilesystemStorage:
         limit: int = 20,
         layer: Layer | None = None,
     ) -> list[AssetVecHit]:
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
+
+    async def upsert_wisdom_embeddings(
+        self, rows: Sequence[WisdomEmbeddingRow]
+    ) -> None:
+        del rows
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
+
+    async def vec_search_wisdom(
+        self,
+        embedding: list[float],
+        *,
+        version_id: int,
+        limit: int = 20,
+    ) -> list[WisdomVecHit]:
+        del embedding, version_id, limit
         raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def upsert_embed_version(self, v: EmbeddingVersion) -> int:

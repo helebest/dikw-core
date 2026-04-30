@@ -332,6 +332,28 @@ class AssetVecHit(BaseModel):
     distance: float  # smaller = more similar (cosine distance, by default)
 
 
+class WisdomEmbeddingRow(BaseModel):
+    """One wisdom-item-level embedding, written to ``vec_wisdom_v<version_id>``.
+
+    Wisdom rides on the active text ``embed_versions`` row (chunks and
+    wisdom share one cosine space so apply-at-query can compare a chunk
+    embedding against a wisdom embedding directly). The dim must match
+    that version's ``dim``; mismatched rows are rejected at the storage
+    boundary, mirroring ``EmbeddingRow`` and ``AssetEmbeddingRow``.
+    """
+
+    item_id: str
+    version_id: int
+    embedding: list[float]
+
+
+class WisdomVecHit(BaseModel):
+    """One result row from ``Storage.vec_search_wisdom``."""
+
+    item_id: str
+    distance: float  # smaller = more similar (cosine distance, by default)
+
+
 # ---- Embedding versioning ------------------------------------------------
 
 

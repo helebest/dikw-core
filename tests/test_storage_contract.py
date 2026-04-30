@@ -30,6 +30,7 @@ from dikw_core.schemas import (
     LinkRecord,
     LinkType,
     WikiLogEntry,
+    WisdomEmbeddingRow,
     WisdomEvidence,
     WisdomItem,
     WisdomKind,
@@ -1076,6 +1077,14 @@ async def test_filesystem_rejects_all_dense_methods(tmp_path: Path) -> None:
                 "vec_search_assets",
                 lambda: fs.vec_search_assets([1.0, 0.0, 0.0, 0.0], version_id=1),
             ),
+            (
+                "upsert_wisdom_embeddings",
+                lambda: fs.upsert_wisdom_embeddings([]),
+            ),
+            (
+                "vec_search_wisdom",
+                lambda: fs.vec_search_wisdom([1.0, 0.0, 0.0, 0.0], version_id=1),
+            ),
         ]
         for label, factory in cases:
             with pytest.raises(NotSupported) as excinfo:
@@ -1714,6 +1723,268 @@ async def test_asset_embeddings_dim_mismatch_raises(storage: Storage) -> None:
                 )
             ]
         )
+
+
+# ---- Wisdom embeddings (P0) ---------------------------------------------
+
+
+async def _seed_wisdom_item(
+    storage: Storage, item_id: str, *, body: str = "...", title: str = "T"
+) -> str:
+    """Create a wiki-layer doc + a candidate wisdom item with two evidence
+    entries and return the item_id. Used by every wisdom-embedding test
+    so they don't repeat the boilerplate.
+    """
+    doc = _make_doc(f"wiki/{item_id.lower()}.md", layer=Layer.WIKI)
+    await storage.upsert_document(doc)
+    item = WisdomItem(
+        item_id=item_id,
+        kind=WisdomKind.PRINCIPLE,
+        title=title,
+        body=body,
+        confidence=0.7,
+        created_ts=time.time(),
+    )
+    evidence = [
+        WisdomEvidence(doc_id=doc.doc_id, excerpt="e1", line=1),
+        WisdomEvidence(doc_id=doc.doc_id, excerpt="e2", line=2),
+    ]
+    await storage.put_wisdom(item, evidence)
+    return item_id
+
+
+async def test_wisdom_embeddings_upsert_and_search(storage: Storage) -> None:
+    """End-to-end mirror of ``test_asset_embeddings_upsert_and_search``:
+    register text version → put_wisdom → upsert wisdom embedding →
+    ``vec_search_wisdom`` finds it. Modality is reused: wisdom rides on
+    the active text ``embed_versions`` row (chunks and wisdom share one
+    cosine space)."""
+    try:
+        version_id = await register_text_version(
+            storage, dim=4, model="fake-text-v1-wisdom"
+        )
+        item_id = await _seed_wisdom_item(storage, "W-EMB-001")
+        await storage.upsert_wisdom_embeddings(
+            [
+                WisdomEmbeddingRow(
+                    item_id=item_id,
+                    version_id=version_id,
+                    embedding=[1.0, 0.0, 0.0, 0.0],
+                )
+            ]
+        )
+        hits = await storage.vec_search_wisdom(
+            [1.0, 0.0, 0.0, 0.0], version_id=version_id, limit=5
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement wisdom embeddings")
+
+    assert len(hits) == 1
+    assert hits[0].item_id == item_id
+    assert hits[0].distance == pytest.approx(0.0, abs=1e-6)
+
+
+async def test_wisdom_embeddings_dim_mismatch_raises(storage: Storage) -> None:
+    """Embedding dim must match the dim recorded on ``embed_versions`` —
+    same invariant as chunk and asset embeddings."""
+    try:
+        version_id = await register_text_version(
+            storage, dim=4, model="fake-text-v1-wisdom-dim"
+        )
+        item_id = await _seed_wisdom_item(storage, "W-DIM-001")
+    except NotSupported:
+        pytest.skip("backend doesn't implement wisdom embeddings")
+
+    from dikw_core.storage.base import StorageError
+
+    with pytest.raises(StorageError):
+        await storage.upsert_wisdom_embeddings(
+            [
+                WisdomEmbeddingRow(
+                    item_id=item_id,
+                    version_id=version_id,
+                    embedding=[1.0, 0.0],  # wrong dim
+                )
+            ]
+        )
+
+
+async def test_wisdom_embeddings_idempotent_on_reupsert(
+    storage: Storage,
+) -> None:
+    """Writing the same ``(item_id, version_id)`` twice must replace
+    in-place (no duplicate vec rows). Mirror of asset/chunk semantics."""
+    try:
+        version_id = await register_text_version(
+            storage, dim=4, model="fake-text-v1-wisdom-idem"
+        )
+        item_id = await _seed_wisdom_item(storage, "W-IDEM-001")
+        await storage.upsert_wisdom_embeddings(
+            [
+                WisdomEmbeddingRow(
+                    item_id=item_id,
+                    version_id=version_id,
+                    embedding=[1.0, 0.0, 0.0, 0.0],
+                )
+            ]
+        )
+        # Re-upsert with a different vector — should overwrite, not duplicate.
+        await storage.upsert_wisdom_embeddings(
+            [
+                WisdomEmbeddingRow(
+                    item_id=item_id,
+                    version_id=version_id,
+                    embedding=[0.0, 1.0, 0.0, 0.0],
+                )
+            ]
+        )
+        hits_a = await storage.vec_search_wisdom(
+            [1.0, 0.0, 0.0, 0.0], version_id=version_id, limit=5
+        )
+        hits_b = await storage.vec_search_wisdom(
+            [0.0, 1.0, 0.0, 0.0], version_id=version_id, limit=5
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement wisdom embeddings")
+
+    # Exactly one wisdom row across the two probes; the second probe
+    # (matching the most recently written vector) is the close hit.
+    assert len(hits_b) == 1
+    assert hits_b[0].item_id == item_id
+    assert hits_b[0].distance == pytest.approx(0.0, abs=1e-6)
+    # The first probe should now be far (orthogonal), not zero — proves
+    # the original vector was overwritten rather than duplicated.
+    assert len(hits_a) == 1
+    assert hits_a[0].distance > 0.5
+
+
+async def test_vec_search_wisdom_returns_in_distance_order(
+    storage: Storage,
+) -> None:
+    """KNN ranking parity with ``test_vec_search_returns_in_distance_order``:
+    multiple wisdom embeddings → ``vec_search_wisdom`` returns them sorted
+    by ascending cosine distance against the query vector.
+
+    Vectors are constructed so the angle from the query (1,0,0,0) grows
+    monotonically across items; the returned ranking must mirror that.
+    """
+    # 4 wisdom items at angles 0°, 30°, 60°, 90° from the query.
+    import math as _math
+
+    angles_deg = [0.0, 30.0, 60.0, 90.0]
+    embeddings: list[list[float]] = [
+        [_math.cos(_math.radians(a)), _math.sin(_math.radians(a)), 0.0, 0.0]
+        for a in angles_deg
+    ]
+    item_ids = [f"W-ORD-{i}" for i in range(len(angles_deg))]
+    try:
+        version_id = await register_text_version(
+            storage, dim=4, model="fake-text-v1-wisdom-order"
+        )
+        for iid in item_ids:
+            await _seed_wisdom_item(storage, iid)
+        await storage.upsert_wisdom_embeddings(
+            [
+                WisdomEmbeddingRow(item_id=iid, version_id=version_id, embedding=emb)
+                for iid, emb in zip(item_ids, embeddings, strict=True)
+            ]
+        )
+        hits = await storage.vec_search_wisdom(
+            [1.0, 0.0, 0.0, 0.0], version_id=version_id, limit=10
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement wisdom embeddings")
+
+    # All items returned; ranking matches insertion (=angle) order; distances
+    # strictly increasing.
+    from itertools import pairwise
+
+    assert [h.item_id for h in hits] == item_ids
+    distances = [h.distance for h in hits]
+    assert distances == sorted(distances)
+    assert all(d_b > d_a for d_a, d_b in pairwise(distances))
+
+
+async def test_upsert_wisdom_embeddings_rejects_non_text_modality(
+    storage: Storage,
+) -> None:
+    """Wisdom rides on the text modality; upserting against a multimodal
+    version must raise ``StorageError`` instead of silently mixing
+    cosine spaces. Without this guard, dims-happen-to-match would let
+    multimodal vectors leak into ``vec_wisdom_v<id>`` and
+    ``vec_search_wisdom`` would return meaningless rankings.
+    """
+    mm_v = EmbeddingVersion(
+        provider="fake_mm",
+        model="fake-mm-v1-wisdom-modality",
+        dim=4,
+        normalize=True,
+        distance="cosine",
+        modality="multimodal",
+    )
+    try:
+        version_id = await storage.upsert_embed_version(mm_v)
+        item_id = await _seed_wisdom_item(storage, "W-MM-001")
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning")
+
+    from dikw_core.storage.base import StorageError
+
+    with pytest.raises(StorageError, match="modality"):
+        await storage.upsert_wisdom_embeddings(
+            [
+                WisdomEmbeddingRow(
+                    item_id=item_id,
+                    version_id=version_id,
+                    embedding=[1.0, 0.0, 0.0, 0.0],
+                )
+            ]
+        )
+
+
+async def test_vec_search_wisdom_rejects_non_text_modality(
+    storage: Storage,
+) -> None:
+    """Same invariant as upsert: searching wisdom against a multimodal
+    version must fail loudly, not return silently wrong results."""
+    mm_v = EmbeddingVersion(
+        provider="fake_mm",
+        model="fake-mm-v1-wisdom-modality-search",
+        dim=4,
+        normalize=True,
+        distance="cosine",
+        modality="multimodal",
+    )
+    try:
+        version_id = await storage.upsert_embed_version(mm_v)
+    except NotSupported:
+        pytest.skip("backend doesn't implement embed versioning")
+
+    from dikw_core.storage.base import StorageError
+
+    with pytest.raises(StorageError, match="modality"):
+        await storage.vec_search_wisdom(
+            [1.0, 0.0, 0.0, 0.0], version_id=version_id, limit=5
+        )
+
+
+async def test_vec_search_wisdom_empty_index_returns_empty(
+    storage: Storage,
+) -> None:
+    """Querying before any wisdom embedding has been written must return
+    an empty list, not raise — same shape as ``vec_search`` /
+    ``vec_search_assets`` over an empty index."""
+    try:
+        version_id = await register_text_version(
+            storage, dim=4, model="fake-text-v1-wisdom-empty"
+        )
+        hits = await storage.vec_search_wisdom(
+            [1.0, 0.0, 0.0, 0.0], version_id=version_id, limit=5
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement wisdom embeddings")
+
+    assert hits == []
 
 
 # ---- T6 + text-versioning regression tests ------------------------------

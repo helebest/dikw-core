@@ -39,10 +39,12 @@ from ..schemas import (
     StorageCounts,
     VecHit,
     WikiLogEntry,
+    WisdomEmbeddingRow,
     WisdomEvidence,
     WisdomItem,
     WisdomKind,
     WisdomStatus,
+    WisdomVecHit,
     dump_media_meta,
     load_media_meta,
 )
@@ -949,6 +951,101 @@ class PostgresStorage:
             if r[1] is not None and not math.isnan(r[1])
         ]
 
+    # ---- W layer: wisdom embeddings --------------------------------------
+
+    async def upsert_wisdom_embeddings(
+        self, rows: Sequence[WisdomEmbeddingRow]
+    ) -> None:
+        if not rows:
+            return
+        by_version: dict[int, list[WisdomEmbeddingRow]] = {}
+        for r in rows:
+            by_version.setdefault(r.version_id, []).append(r)
+        async with self._acquire() as conn:
+            for version_id, batch in by_version.items():
+                version = await _fetch_version_pg(conn, version_id)
+                if version is None:
+                    raise StorageError(
+                        f"unknown embed version_id={version_id}; "
+                        "call upsert_embed_version first"
+                    )
+                if version.modality != "text":
+                    raise StorageError(
+                        f"wisdom embeddings require modality='text'; "
+                        f"version {version_id} has modality={version.modality!r} "
+                        "— wisdom rides on the active text version so chunks "
+                        "and wisdom share one cosine space"
+                    )
+                for r in batch:
+                    if len(r.embedding) != version.dim:
+                        raise StorageError(
+                            f"wisdom embedding dim {len(r.embedding)} != "
+                            f"version {version_id} dim {version.dim}"
+                        )
+                await self._ensure_vec_table(conn, "wisdom", version_id, version.dim)
+                vec_table = f"vec_wisdom_v{version_id}"
+                async with conn.cursor() as cur:
+                    for r in batch:
+                        await cur.execute(
+                            "INSERT INTO wisdom_embed_meta(item_id, version_id) "
+                            "VALUES (%s, %s) "
+                            "ON CONFLICT (item_id, version_id) DO NOTHING",
+                            (r.item_id, version_id),
+                        )
+                        await cur.execute(
+                            f"INSERT INTO {vec_table}(item_id, embedding) "
+                            "VALUES (%s, %s::vector) "
+                            "ON CONFLICT (item_id) DO UPDATE "
+                            "SET embedding = EXCLUDED.embedding",
+                            (r.item_id, list(r.embedding)),
+                        )
+            await conn.commit()
+
+    async def vec_search_wisdom(
+        self,
+        embedding: list[float],
+        *,
+        version_id: int,
+        limit: int = 20,
+    ) -> list[WisdomVecHit]:
+        async with self._acquire() as conn:
+            version = await _fetch_version_pg(conn, version_id)
+            if version is None:
+                raise NotSupported(
+                    f"no wisdom embeddings for version_id={version_id}"
+                )
+            if version.modality != "text":
+                raise StorageError(
+                    f"vec_search_wisdom requires modality='text'; "
+                    f"version {version_id} has modality={version.modality!r}"
+                )
+            if len(embedding) != version.dim:
+                raise StorageError(
+                    f"query embedding dim {len(embedding)} != "
+                    f"version {version_id} dim {version.dim}"
+                )
+            vec_table = f"vec_wisdom_v{version_id}"
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT to_regclass(%s)", (vec_table,))
+                exists_row = await cur.fetchone()
+            if exists_row is None or exists_row[0] is None:
+                return []
+            vec = list(embedding)
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT wv.item_id, (wv.embedding <=> %s::vector) AS dist "
+                    f"FROM {vec_table} wv "
+                    f"WHERE (wv.embedding <=> %s::vector) IS NOT NULL "
+                    f"ORDER BY dist ASC LIMIT %s",
+                    (vec, vec, limit),
+                )
+                rows = await cur.fetchall()
+        return [
+            WisdomVecHit(item_id=r[0], distance=float(r[1]))
+            for r in rows
+            if r[1] is not None and not math.isnan(r[1])
+        ]
+
     async def upsert_embed_version(self, v: EmbeddingVersion) -> int:
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
@@ -1075,7 +1172,7 @@ class PostgresStorage:
     async def _ensure_vec_table(
         self,
         conn: AsyncConnection,
-        kind: Literal["chunks", "assets"],
+        kind: Literal["chunks", "assets", "wisdom"],
         version_id: int,
         dim: int,
     ) -> None:
@@ -1083,11 +1180,17 @@ class PostgresStorage:
         embedding dim parameterised into the column type, so each version
         gets its own dim-locked table — switching model creates a new
         version + new table, leaving prior data intact.
+
+        ``kind`` widens to include ``"wisdom"`` so the W layer can ride
+        on the active text version's vector space (see SQLite mirror's
+        rationale).
         """
         if kind == "chunks":
             pk_col, fk_table = "chunk_id BIGINT", "chunks(chunk_id)"
-        else:
+        elif kind == "assets":
             pk_col, fk_table = "asset_id TEXT", "assets(asset_id)"
+        else:  # wisdom
+            pk_col, fk_table = "item_id TEXT", "wisdom_items(item_id)"
         async with conn.cursor() as cur:
             await cur.execute(
                 f"CREATE TABLE IF NOT EXISTS vec_{kind}_v{version_id} ("

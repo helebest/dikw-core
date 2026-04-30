@@ -489,7 +489,7 @@ async def test_corpus_cache_key_is_deterministic_and_path_stable(
     assert k4 != k1
     # Format sanity.
     assert k1.startswith("toy/fake__64__")
-    assert "__mig" in k1
+    assert "__sf" in k1
 
 
 async def test_eval_snapshot_cache_hit_skips_ingest(

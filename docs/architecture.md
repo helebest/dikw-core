@@ -90,40 +90,34 @@ engine depends only on their Protocol / abstract interface:
    OpenAI-compatible endpoint are wired today; llama-cpp-python for local
    inference is a drop-in.
 
-## Storage migrations
+## Storage schema
 
-**Policy: pre-alpha "rebuild on incompatibility".** Each adapter ships
-numbered SQL files under `storage/migrations/{sqlite,postgres}/` (`001_init.sql`,
-`002_assets.sql`, `003_embed_cache.sql`). On every `migrate()` the
-adapter applies any whose numeric prefix is greater than the value
-recorded in `meta_kv['schema_version']`, then writes back the new high
-water mark. Existing `IF NOT EXISTS` guards inside each script make
-the body idempotent if the counter is missing — `meta_kv` is for
-audit / diagnostics, not a full migration upgrade framework.
+**Policy: pre-alpha "rebuild on incompatibility".** Each adapter ships a
+single `schema.sql` under `storage/migrations/{sqlite,postgres}/` that
+represents the desired shape. `migrate()` applies the file verbatim to
+a fresh DB and writes the code's `SCHEMA_VERSION` constant
+(`storage/_schema.py`) into `meta_kv['schema_version']`. On a subsequent
+connect:
 
-For schema changes that need actual data movement (column rename,
-constraint flip, in-place rebuild), each adapter has a
-`_verify_no_legacy_*` / `_migrate_legacy_*` helper family that runs
-after the SQL files. They detect the old shape via PRAGMA / `to_regclass`
-and either rebuild in place or fail loudly with rebuild instructions.
-Because these touch row data, the helpers stay separate from the
-numbered migration tracker.
+* fingerprint matches → no-op,
+* fingerprint missing → fresh-DB branch (apply schema.sql, record version),
+* fingerprint differs → loud `StorageError` telling the user to
+  delete the storage directory and re-ingest.
 
-**Deprecated tables / columns** (kept here so a future change doesn't
-re-introduce a name collision; the legacy bail-out helpers reject any
-SQLite/Postgres DB still carrying these):
+There is **no in-place upgrade path** — bumping `SCHEMA_VERSION` in code
+invalidates every existing DB at the next connect. This is fit for
+pre-alpha (`CLAUDE.md` warns "APIs and on-disk formats will change");
+when we declare alpha we'll introduce a real migration framework.
+Schema history lives in `git log` on `migrations/`, not in a
+deprecated-tables inventory.
 
-| Name | Layer | Removed in | Replacement |
-|---|---|---|---|
-| `content` table | D | PR #19 | hash indexed on `documents.hash` |
-| `chunks_vec` (singleton vec table) | I | PR #27 | per-version `vec_chunks_v<id>` |
-| `embed_meta(chunk_id, model)` | I | PR #27 | `chunk_embed_meta(chunk_id, version_id)` |
-| `chunks.start` / `chunks."end"` | I | PR #23 | `chunks.start_off` / `end_off` |
-| `assets.width` / `height` | D | PR #25 | `media_meta` JSON discriminated union |
-| `assets.caption` / `caption_model` | D | PR #25 | (placeholder, never used) |
-| `assets.hash` | D | PR #37 | redundant with `asset_id` (= sha256 hex) |
-| `documents.path UNIQUE` (column-level) | D | PR #39 | `documents.path_key UNIQUE` (NFC + casefold) |
-| `documents_fts.{path,title,layer}` columns | I | this PR | body-only; doc/layer come from JOIN through `chunks` + `documents` |
+The runtime-created vector tables (`vec_chunks_v<id>` / `vec_assets_v<id>`)
+are intentionally NOT in `schema.sql` — sqlite-vec / pgvector both need
+the embedding dim parameterised into the CREATE statement, so each
+`embed_versions` row materialises its own dim-locked vec table on first
+upsert. `SQLiteStorage._verify_vec_tables_use_cosine` is a defensive
+runtime invariant check (not a legacy migration) that refuses to open
+a DB whose vec0 tables predate the cosine-distance fix.
 
 ### Cross-adapter shape: where the two SQL backends intentionally differ
 
@@ -141,10 +135,8 @@ Both adapters expose the same `fts_search` method on the `Storage`
 Protocol returning the same `FTSHit` DTOs — the engine never sees the
 divergence. Schema-parity diff tools should treat `chunks.fts` (PG-only)
 and `documents_fts` (SQLite-only) as the dual implementations of the
-same logical capability. Their **column scope** is now identical
-(both index only chunk body text); legacy SQLite DBs that carry the
-old 4-column shape are auto-rebuilt by
-`_migrate_legacy_documents_fts`.
+same logical capability. Their **column scope** is identical: both
+index only chunk body text.
 
 **Tokenization** is also aligned: SQLite uses `unicode61
 remove_diacritics 0` (the `0` is explicit because the unicode61

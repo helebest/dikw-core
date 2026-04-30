@@ -23,7 +23,6 @@ public-benchmark baselines (BEIR, CMTEB).
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import os
@@ -40,6 +39,7 @@ from ..config import CONFIG_FILENAME, ProviderConfig, RetrievalConfig, dump_conf
 from ..info.search import HybridSearcher, RetrievalMode
 from ..providers import EmbeddingProvider
 from ..storage import build_storage
+from ..storage._schema import SCHEMA_VERSION
 from .dataset import DatasetSpec
 from .fake_embedder import FakeEmbeddings
 from .metrics import (
@@ -56,20 +56,6 @@ SEARCH_LIMIT = 100
 EvalMode = RetrievalMode | Literal["all"]
 
 CacheMode = Literal["read_write", "rebuild", "off"]
-
-
-@functools.cache
-def _max_migration_number() -> int:
-    """Highest numeric prefix in storage/migrations/sqlite/*.sql.
-
-    Used in the eval-snapshot cache key so any schema bump invalidates
-    every snapshot automatically — opening an old snapshot under a new
-    code version would otherwise risk a broken migration.
-    """
-    from ..storage._migrations import ordered_migrations
-
-    pairs = ordered_migrations("dikw_core.storage.migrations.sqlite")
-    return pairs[-1][0] if pairs else 0
 
 
 def _default_snapshot_root() -> Path:
@@ -113,8 +99,13 @@ def _corpus_cache_key(spec: DatasetSpec, model: str, dim: int | None) -> str:
         h.update(b"\0")
     digest = h.hexdigest()[:8]
     dim_str = str(dim if dim is not None else 0)
-    mig_n = _max_migration_number()
-    return f"{spec.name}/{model}__{dim_str}__{digest}__mig{mig_n}"
+    # ``sf`` = schema fingerprint. Any change to ``SCHEMA_VERSION`` (or
+    # the key name behind it) must invalidate every snapshot — opening
+    # an old snapshot under a new code version would risk a fingerprint
+    # mismatch error or silent schema drift. The ``sf`` prefix is also
+    # distinct from the legacy ``mig`` prefix so caches stamped before
+    # the per-migration-counter framework was deleted never match.
+    return f"{spec.name}/{model}__{dim_str}__{digest}__sf{SCHEMA_VERSION}"
 
 
 class EvalError(RuntimeError):

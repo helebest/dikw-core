@@ -48,7 +48,7 @@ from ..schemas import (
     dump_media_meta,
     load_media_meta,
 )
-from ._migrations import SCHEMA_VERSION_KEY, ordered_migrations
+from ._schema import SCHEMA_VERSION, SCHEMA_VERSION_KEY, mismatch_message
 from ._vec_codec import deserialize_vec, serialize_vec
 from .base import NotSupported, StorageError
 
@@ -58,6 +58,13 @@ if TYPE_CHECKING:  # imports happen in connect() so base install works without p
 
 
 MIGRATIONS_PACKAGE = "dikw_core.storage.migrations.postgres"
+
+_REBUILD_HINT = (
+    "dikw-core is pre-alpha — the on-disk format is allowed to change, "
+    "and there is no in-place upgrade path. Drop the configured Postgres "
+    "schema (e.g. ``DROP SCHEMA <schema> CASCADE``) and re-run "
+    "``dikw ingest`` to rebuild."
+)
 
 
 class PostgresStorage:
@@ -117,36 +124,50 @@ class PostgresStorage:
             self._pool = None
 
     async def migrate(self) -> None:
-        # Extensions + schema are created in ``connect()`` so the pool can
-        # register pgvector. Migrations here just apply tables/indexes;
-        # apply every *.sql file under MIGRATIONS_PACKAGE in sorted order
-        # so additions like 002_embed_cache.sql land automatically (mirrors
-        # the sqlite adapter's discovery).
-        scripts = self._load_migration_scripts()
+        """Apply ``schema.sql`` to a fresh DB, or refuse a stale fingerprint.
+
+        See ``storage/_schema.py`` for the rebuild-on-incompatibility
+        policy and the ``SCHEMA_VERSION`` fingerprint contract.
+        Extensions + the search-path schema were already created in
+        ``connect()`` so the pool can register pgvector before this
+        method runs.
+        """
         async with self._acquire() as conn:
             async with conn.cursor() as cur:
-                # Ensure meta_kv exists before reading schema_version.
-                # SQLite creates it inline in migrate(); the PG version
-                # is in 001_init.sql but legacy DBs may have skipped it
-                # if they predate meta_kv — guard with IF NOT EXISTS so
-                # the read below never trips a "no such table" error.
+                # meta_kv must exist before the version-read query.
                 await cur.execute(
                     "CREATE TABLE IF NOT EXISTS meta_kv ("
                     "  key TEXT PRIMARY KEY, value TEXT NOT NULL"
                     ")"
                 )
-                applied = await _read_schema_version_pg(cur)
-                applied_in_run = applied
-                for n, sql_text in scripts:
-                    if n <= applied:
-                        continue
-                    await cur.execute(sql_text)
-                    applied_in_run = max(applied_in_run, n)
-                await _write_schema_version_pg(cur, applied_in_run)
+                stored = await _read_schema_version_pg(cur)
+                if stored is None:
+                    # ``stored is None`` should mean "fresh DB" but a
+                    # pre-fingerprint install has the same shape:
+                    # tables exist, no version row. ``schema.sql`` is
+                    # all ``CREATE … IF NOT EXISTS``, so silently
+                    # applying it would leave legacy tables in place
+                    # and stamp the DB as current. Loud-fail instead,
+                    # consistent with the rebuild-on-incompatibility
+                    # policy.
+                    await cur.execute("SELECT to_regclass('documents')")
+                    legacy_row = await cur.fetchone()
+                    if legacy_row is not None and legacy_row[0] is not None:
+                        raise StorageError(
+                            "DB has tables but no schema_version row — "
+                            "likely a pre-fingerprint install. "
+                            f"{_REBUILD_HINT}"
+                        )
+                    sql = (
+                        resources.files(MIGRATIONS_PACKAGE)
+                        .joinpath("schema.sql")
+                        .read_text(encoding="utf-8")
+                    )
+                    await cur.execute(sql)
+                    await _write_schema_version_pg(cur, SCHEMA_VERSION)
+                elif stored != SCHEMA_VERSION:
+                    raise StorageError(mismatch_message(stored, _REBUILD_HINT))
             await conn.commit()
-            await self._verify_no_legacy_content_table(conn)
-            await self._verify_no_legacy_text_embed_tables(conn)
-            await self._migrate_legacy_documents_path_key(conn)
 
     # ---- D layer ---------------------------------------------------------
 
@@ -1156,19 +1177,6 @@ class PostgresStorage:
             raise StorageError("PostgresStorage is not connected; call `connect()` first")
         return _ConnectionContext(self._pool, self._schema)
 
-    def _load_migration_scripts(self) -> list[tuple[int, str]]:
-        """Return ``(number, body)`` pairs sorted by numeric prefix.
-
-        Body is read eagerly because callers iterate the list multiple
-        times during version-aware application; ``ordered_migrations``
-        only yields filenames and stays cheap to call standalone.
-        """
-        pkg = resources.files(MIGRATIONS_PACKAGE)
-        return [
-            (n, pkg.joinpath(name).read_text(encoding="utf-8"))
-            for n, name in ordered_migrations(MIGRATIONS_PACKAGE)
-        ]
-
     async def _ensure_vec_table(
         self,
         conn: AsyncConnection,
@@ -1201,124 +1209,21 @@ class PostgresStorage:
             )
         await conn.commit()
 
-    async def _verify_no_legacy_content_table(self, conn: AsyncConnection) -> None:
-        """Bail if a pre-refactor ``content`` table is still present.
 
-        See ``SQLiteStorage._verify_no_legacy_content_table`` for the rationale.
-        """
-        async with conn.cursor() as cur:
-            await cur.execute("SELECT to_regclass('content')")
-            row = await cur.fetchone()
-        if row is not None and row[0] is not None:
-            raise StorageError(
-                "legacy `content` table detected from a pre-refactor schema. "
-                "Drop the schema (`DROP SCHEMA <schema> CASCADE`) and re-run "
-                "`dikw ingest` to rebuild on the new D-layer schema."
-            )
-
-    async def _verify_no_legacy_text_embed_tables(
-        self, conn: AsyncConnection
-    ) -> None:
-        """Bail if pre-versioning text embedding tables are still present.
-
-        Mirror of ``SQLiteStorage._verify_no_legacy_text_embed_tables``.
-        """
-        async with conn.cursor() as cur:
-            for legacy in ("chunks_vec", "embed_meta"):
-                await cur.execute("SELECT to_regclass(%s)", (legacy,))
-                row = await cur.fetchone()
-                if row is not None and row[0] is not None:
-                    raise StorageError(
-                        f"legacy `{legacy}` table detected from a pre-versioning "
-                        "schema. Drop the schema (`DROP SCHEMA <schema> CASCADE`) "
-                        "and re-run `dikw ingest` to rebuild on the version-aware "
-                        "embedding schema."
-                    )
-
-    async def _migrate_legacy_documents_path_key(
-        self, conn: AsyncConnection
-    ) -> None:
-        """Add ``path_key`` to a pre-normalization ``documents`` table.
-
-        Older PG DBs have ``path TEXT UNIQUE NOT NULL`` and no
-        ``path_key``. This helper:
-
-        1. Adds ``path_key TEXT`` (no UNIQUE yet — backfill must run
-           first; the migration file's NOT NULL is satisfied via
-           backfill before the constraint flips on).
-        2. Backfills via ``normalize_path`` in Python; PG has no
-           Unicode-NFC normalization in core SQL (``normalize()`` exists
-           but no casefold equivalent), so the work happens in-process.
-        3. Detects case-only collisions and bails with rebuild
-           instructions if any are found — pre-alpha policy.
-        4. Adds the UNIQUE constraint and drops the legacy
-           ``documents_path_key`` column-equivalent UNIQUE on ``path``.
-
-        Idempotent: short-circuits when ``path_key`` already exists on
-        the table.
-        """
-        from ..data.path_norm import normalize_path
-
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() "
-                "AND table_name = 'documents'"
-            )
-            cols = {r[0] for r in await cur.fetchall()}
-        if not cols or "path_key" in cols:
-            return
-
-        async with conn.cursor() as cur:
-            await cur.execute("ALTER TABLE documents ADD COLUMN path_key TEXT")
-            await cur.execute("SELECT doc_id, path FROM documents")
-            rows = await cur.fetchall()
-            for doc_id, path in rows:
-                await cur.execute(
-                    "UPDATE documents SET path_key = %s WHERE doc_id = %s",
-                    (normalize_path(path), doc_id),
-                )
-            await cur.execute(
-                "SELECT path_key, COUNT(*) FROM documents "
-                "GROUP BY path_key HAVING COUNT(*) > 1 LIMIT 1"
-            )
-            collision = await cur.fetchone()
-            if collision is not None:
-                await conn.rollback()
-                raise StorageError(
-                    "documents.path_key collision detected during legacy "
-                    f"migration (path_key={collision[0]!r}, rows={collision[1]}). "
-                    "The legacy DB had two case-only-different paths for what is "
-                    "now one logical document. Drop the schema "
-                    "(`DROP SCHEMA <schema> CASCADE`) and re-run `dikw ingest` "
-                    "to rebuild on the path_key-aware schema."
-                )
-            await cur.execute("ALTER TABLE documents ALTER COLUMN path_key SET NOT NULL")
-            await cur.execute("ALTER TABLE documents ADD UNIQUE (path_key)")
-            # Drop the legacy column-level UNIQUE on ``path``. PG names
-            # auto-generated single-column UNIQUEs ``<table>_<col>_key``,
-            # so the legacy one is ``documents_path_key`` (UNIQUE on the
-            # ``path`` column). DROP IF EXISTS is safe if an older
-            # install renamed it; the new uniqueness already lives on
-            # path_key by the time we get here.
-            await cur.execute(
-                "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_path_key"
-            )
-        await conn.commit()
-
-
-async def _read_schema_version_pg(cur: Any) -> int:
-    """Read ``meta_kv['schema_version']`` as an int. Missing row → 0."""
+async def _read_schema_version_pg(cur: Any) -> int | None:
+    """Return ``meta_kv['schema_version']`` as an int, or ``None`` if absent
+    or unparseable. ``None`` keys the fresh-DB branch in ``migrate()``.
+    """
     await cur.execute(
         "SELECT value FROM meta_kv WHERE key = %s", (SCHEMA_VERSION_KEY,)
     )
     row = await cur.fetchone()
     if row is None:
-        return 0
+        return None
     try:
         return int(row[0])
     except (TypeError, ValueError):
-        return 0
+        return None
 
 
 async def _write_schema_version_pg(cur: Any, n: int) -> None:

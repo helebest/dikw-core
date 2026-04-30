@@ -124,10 +124,9 @@ dikw-core/
 │   │   ├── sqlite.py         # SQLite + sqlite-vec + FTS5 implementation (MVP)
 │   │   ├── postgres.py       # Phase 5 — tsvector + pgvector (optional extra)
 │   │   ├── filesystem.py     # Phase 5 — DB-less, Obsidian-vault-native
-│   │   ├── migrations/       # per-backend schema migrations
-│   │   │   ├── sqlite/       #   001_init.sql … (MVP)
-│   │   │   └── postgres/     #   placeholder, populated in Phase 5
-│   │   └── _sql/             # backend-specific query fragments, kept out of engine code
+│   │   └── migrations/       # per-backend schema (single schema.sql each)
+│   │       ├── sqlite/       #   schema.sql
+│   │       └── postgres/     #   schema.sql
 │   │
 │   ├── data/                 # D layer
 │   │   ├── sources.py        # source registry, hashing, mtime tracking
@@ -553,7 +552,7 @@ Each tool validates input with Pydantic and returns structured JSON plus a markd
 - **Phase 3 — W (wisdom, the differentiator):** `distill` prompt + worker, `wisdom_items` table, `_candidates/` flow, interactive `review`, `wisdom.apply` at query time, tests covering candidate→approved transitions and the "at least N=2 evidence" invariant.
 - **Phase 4 — Polish:** OpenAI-compat provider completeness (Ollama and Azure verified), prompt-caching on Anthropic paths, packaging for PyPI (`pip install dikw-core`), docs site, GitHub Actions release automation, source-backend extension point exercised with one additional backend (likely `html` since it's trivial — keeps the seam real without committing to MinerU).
 - **Phase 5 — Alternate storage adapters:**
-  - **Postgres (enterprise):** `storage/postgres.py` using `psycopg[binary,pool]` + `pgvector`, `migrations/postgres/001_init.sql` with `tsvector`+GIN for FTS and `vector(N)` for embeddings. Contract test suite runs green against a `postgres:16`+`pgvector` container in CI. Packaged as `dikw-core[postgres]` optional extra.
+  - **Postgres (enterprise):** `storage/postgres.py` using `psycopg[binary,pool]` + `pgvector`, `migrations/postgres/schema.sql` with `tsvector`+GIN for FTS and `vector(N)` for embeddings. Contract test suite runs green against a `postgres:16`+`pgvector` container in CI. Packaged as `dikw-core[postgres]` optional extra.
   - **Filesystem / vault (Obsidian-native):** `storage/filesystem.py` — JSON sidecars under `.dikw/fs/`, in-process FTS, and LLM-navigation fallback. No extra deps. **FTS-only by design** — no vector search; users who outgrow lexical-only flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest.
   - Acceptance: the Phase 1–3 verification script runs end-to-end against each adapter with only `storage.backend` flipped in `dikw.yml`.
 
@@ -565,7 +564,7 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 - `src/dikw_core/config.py` — Pydantic config + YAML loader (includes `storage:` block)
 - `src/dikw_core/storage/base.py` — `Storage` Protocol + DTOs
 - `src/dikw_core/storage/sqlite.py` — SQLite + sqlite-vec + FTS5 implementation
-- `src/dikw_core/storage/migrations/sqlite/001_init.sql` — reference schema
+- `src/dikw_core/storage/migrations/sqlite/schema.sql` — reference schema
 - `src/dikw_core/storage/__init__.py` — factory resolving backend from config
 - `src/dikw_core/data/backends/markdown.py` — MD parser + front-matter
 - `src/dikw_core/info/chunk.py` — heading-aware chunker (port logic from qmd `store.ts:257–310`)

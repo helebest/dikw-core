@@ -36,6 +36,7 @@ from dikw_core.schemas import (
     WisdomKind,
     WisdomStatus,
 )
+from dikw_core.storage._schema import SCHEMA_VERSION, SCHEMA_VERSION_KEY
 from dikw_core.storage.base import NotSupported, Storage
 from dikw_core.storage.filesystem import FilesystemStorage
 from dikw_core.storage.sqlite import SQLiteStorage
@@ -186,34 +187,28 @@ async def test_meta_kv_value_is_not_null(storage: Storage) -> None:
 
 
 async def test_migrate_records_schema_version(storage: Storage) -> None:
-    """After ``migrate()`` the SQL adapters must record the highest
-    applied migration number in ``meta_kv['schema_version']``. The
-    filesystem adapter has no DB-level metadata table and is skipped.
+    """After ``migrate()`` the SQL adapters must record ``SCHEMA_VERSION``
+    in ``meta_kv['schema_version']`` so a subsequent connect that sees a
+    matching fingerprint short-circuits to a no-op. The filesystem
+    adapter has no DB-level metadata table and is skipped.
     """
     if not _has_schema_constraints(storage):
         pytest.skip("backend has no meta_kv table")
 
     await storage.migrate()
-
-    cls_name = type(storage).__name__
-    expected = _expected_max_migration(cls_name)
-    actual = await _read_schema_version(storage)
-    assert actual == expected, (
-        f"schema_version should equal max migration number "
-        f"({expected}); got {actual}"
-    )
+    assert await _read_schema_version(storage) == SCHEMA_VERSION
 
     # Re-running migrate must not regress the version.
     await storage.migrate()
-    assert await _read_schema_version(storage) == expected
+    assert await _read_schema_version(storage) == SCHEMA_VERSION
 
 
-def test_sqlite_001_init_declares_meta_kv() -> None:
-    """``meta_kv`` must be declared in the SQLite ``001_init.sql`` file
-    for parity with the Postgres migration. The Python-side inline
+def test_sqlite_schema_declares_meta_kv() -> None:
+    """``meta_kv`` must be declared in the SQLite ``schema.sql`` file
+    for parity with the Postgres schema. The Python-side inline
     ``CREATE TABLE`` in ``SQLiteStorage.migrate()`` still runs first
-    (it has to, so ``_read_schema_version_sqlite`` can read the row
-    before any migration files apply), but a schema-diff between the
+    (it has to, so the schema-version reader can hit the row before
+    ``schema.sql`` applies on a fresh DB), but a schema-diff between the
     two adapters' ``migrations/`` trees should not surface a phantom
     "Postgres has meta_kv, SQLite doesn't" because of where the table
     happens to be declared.
@@ -222,27 +217,61 @@ def test_sqlite_001_init_declares_meta_kv() -> None:
 
     sql = (
         resources.files("dikw_core.storage.migrations.sqlite")
-        .joinpath("001_init.sql")
+        .joinpath("schema.sql")
         .read_text(encoding="utf-8")
     )
     assert "CREATE TABLE IF NOT EXISTS meta_kv" in sql, (
-        "001_init.sql must declare meta_kv for parity with the PG "
-        "migration; the inline create in sqlite.py:migrate() stays "
-        "but the .sql file is the documentation source of truth."
+        "schema.sql must declare meta_kv for parity with the PG schema; "
+        "the inline create in sqlite.py:migrate() stays but the .sql "
+        "file is the documentation source of truth."
     )
 
 
-def _expected_max_migration(adapter_name: str) -> int:
-    """Resolve the highest migration number the adapter currently ships."""
-    from dikw_core.storage._migrations import ordered_migrations
+async def test_schema_version_mismatch_raises(storage: Storage) -> None:
+    """A DB whose ``meta_kv['schema_version']`` doesn't match the code's
+    ``SCHEMA_VERSION`` must be refused at ``migrate()`` time with
+    rebuild instructions. Pre-alpha policy is rebuild-on-incompatibility.
 
-    pkg = (
-        "dikw_core.storage.migrations.sqlite"
-        if adapter_name == "SQLiteStorage"
-        else "dikw_core.storage.migrations.postgres"
-    )
-    pairs = ordered_migrations(pkg)
-    return pairs[-1][0] if pairs else 0
+    The filesystem backend has no schema-version row and is skipped.
+    """
+    if not _has_schema_constraints(storage):
+        pytest.skip("backend has no meta_kv table")
+    from dikw_core.storage.base import StorageError
+
+    await storage.migrate()
+    await _write_schema_version(storage, 99999)
+
+    with pytest.raises(StorageError) as excinfo:
+        await storage.migrate()
+    msg = str(excinfo.value)
+    assert "rebuild" in msg.lower(), msg
+    # Mentions both numbers so log readers can tell what they're looking at.
+    assert "v99999" in msg, msg
+
+
+async def test_legacy_unfingerprinted_db_raises(storage: Storage) -> None:
+    """A pre-fingerprint DB (tables present, no ``schema_version`` row)
+    must be refused at ``migrate()`` time. The fresh-DB branch in
+    ``migrate()`` keys off ``stored is None``, which is the same shape
+    a legacy install presents — silently applying ``schema.sql``
+    against legacy tables would stamp the DB as current and let later
+    reads fail on missing columns. Loud-fail instead, consistent with
+    the rebuild-on-incompatibility policy.
+
+    The filesystem backend has no schema-version row and is skipped.
+    """
+    if not _has_schema_constraints(storage):
+        pytest.skip("backend has no meta_kv table")
+    from dikw_core.storage.base import StorageError
+
+    await storage.migrate()  # creates documents/etc + writes fingerprint
+    await _delete_schema_version(storage)  # simulate pre-fingerprint shape
+
+    with pytest.raises(StorageError) as excinfo:
+        await storage.migrate()
+    msg = str(excinfo.value)
+    assert "rebuild" in msg.lower(), msg
+    assert "schema_version" in msg, msg
 
 
 async def _read_schema_version(storage: Storage) -> int:
@@ -251,16 +280,64 @@ async def _read_schema_version(storage: Storage) -> int:
     if cls_name == "SQLiteStorage":
         conn = storage._conn  # type: ignore[attr-defined]
         row = conn.execute(
-            "SELECT value FROM meta_kv WHERE key = 'schema_version'"
+            "SELECT value FROM meta_kv WHERE key = ?", (SCHEMA_VERSION_KEY,)
         ).fetchone()
         return 0 if row is None else int(row["value"])
     if cls_name == "PostgresStorage":
         async with storage._acquire() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]
             await cur.execute(
-                "SELECT value FROM meta_kv WHERE key = 'schema_version'"
+                "SELECT value FROM meta_kv WHERE key = %s", (SCHEMA_VERSION_KEY,)
             )
             row = await cur.fetchone()
         return 0 if row is None else int(row[0])
+    raise AssertionError(f"unknown adapter {cls_name}")
+
+
+async def _write_schema_version(storage: Storage, value: int) -> None:
+    """Adapter-aware ``meta_kv['schema_version']`` writer for tests.
+
+    Mirrors ``_read_schema_version`` so legacy/mismatch scenarios can be
+    set up without re-doing the cls_name + private-member dance inline.
+    """
+    cls_name = type(storage).__name__
+    if cls_name == "SQLiteStorage":
+        conn = storage._conn  # type: ignore[attr-defined]
+        with conn:
+            conn.execute(
+                "UPDATE meta_kv SET value = ? WHERE key = ?",
+                (str(value), SCHEMA_VERSION_KEY),
+            )
+        return
+    if cls_name == "PostgresStorage":
+        async with storage._acquire() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]
+            await cur.execute(
+                "UPDATE meta_kv SET value = %s WHERE key = %s",
+                (str(value), SCHEMA_VERSION_KEY),
+            )
+            await conn.commit()
+        return
+    raise AssertionError(f"unknown adapter {cls_name}")
+
+
+async def _delete_schema_version(storage: Storage) -> None:
+    """Drop the ``meta_kv['schema_version']`` row to simulate a
+    pre-fingerprint install for the legacy-DB regression test.
+    """
+    cls_name = type(storage).__name__
+    if cls_name == "SQLiteStorage":
+        conn = storage._conn  # type: ignore[attr-defined]
+        with conn:
+            conn.execute(
+                "DELETE FROM meta_kv WHERE key = ?", (SCHEMA_VERSION_KEY,)
+            )
+        return
+    if cls_name == "PostgresStorage":
+        async with storage._acquire() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]
+            await cur.execute(
+                "DELETE FROM meta_kv WHERE key = %s", (SCHEMA_VERSION_KEY,)
+            )
+            await conn.commit()
+        return
     raise AssertionError(f"unknown adapter {cls_name}")
 
 
@@ -338,24 +415,6 @@ async def test_documents_hash_indexed(storage: Storage) -> None:
 
     assert "documents_hash_idx" in names, (
         f"expected documents_hash_idx among {sorted(names)}"
-    )
-
-
-async def test_chunks_offset_columns_renamed(storage: Storage) -> None:
-    """The DTO field names ``ChunkRecord.start``/``.end`` are unaffected —
-    adapters translate at the SQL boundary.
-
-    Filesystem skips: no SQL columns.
-    """
-    if not _has_schema_constraints(storage):
-        pytest.skip("filesystem adapter has no SQL columns")
-
-    cols = set((await _column_info(storage, "chunks")).keys())
-    assert "start_off" in cols and "end_off" in cols, (
-        f"expected start_off/end_off in chunks columns, got {sorted(cols)}"
-    )
-    assert "start" not in cols and "end" not in cols, (
-        f"legacy start/\"end\" columns must be gone, got {sorted(cols)}"
     )
 
 
@@ -486,171 +545,6 @@ async def test_fts_preserves_diacritics(storage: Storage) -> None:
         "indexed token (i.e. no implicit unaccent / remove_diacritics)"
     )
 
-
-async def test_sqlite_legacy_fts_rebuild_preserves_data(tmp_path: Path) -> None:
-    """A legacy DB whose ``documents_fts`` was built with the old
-    4-column shape + ``remove_diacritics 2`` tokenizer must survive
-    ``migrate()``: the table is rebuilt body-only with diacritics
-    preserved, and the stored chunk text remains searchable through
-    the new tokenizer.
-
-    Repopulating from ``chunks`` (which always carry the raw text) is
-    what makes the rebuild idempotent — the FTS table is purely
-    derived state.
-    """
-    import sqlite3
-
-    db_path = tmp_path / "legacy.sqlite"
-
-    # Hand-craft the pre-PR shape: bare-bones documents + chunks +
-    # the old 4-column FTS5 virtual table with diacritic stripping.
-    raw = sqlite3.connect(str(db_path))
-    raw.row_factory = sqlite3.Row
-    raw.executescript(
-        """
-        CREATE TABLE documents (
-            doc_id   TEXT PRIMARY KEY,
-            path     TEXT NOT NULL UNIQUE,
-            path_key TEXT,
-            title    TEXT,
-            hash     TEXT,
-            mtime    REAL,
-            layer    TEXT,
-            active   INTEGER
-        );
-        CREATE TABLE chunks (
-            chunk_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-            doc_id    TEXT NOT NULL,
-            seq       INTEGER NOT NULL,
-            start_off INTEGER NOT NULL,
-            end_off   INTEGER NOT NULL,
-            text      TEXT NOT NULL,
-            UNIQUE (doc_id, seq)
-        );
-        CREATE VIRTUAL TABLE documents_fts USING fts5(
-            path UNINDEXED,
-            title,
-            body,
-            layer UNINDEXED,
-            tokenize = "unicode61 remove_diacritics 2"
-        );
-        """
-    )
-    raw.execute(
-        "INSERT INTO documents(doc_id, path, path_key, title, hash, "
-        "mtime, layer, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("legacy::a.md", "a.md", "a.md", "a", "h", 0.0, "source", 1),
-    )
-    cur = raw.execute(
-        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("legacy::a.md", 0, 0, 18, "café au lait recipe"),
-    )
-    chunk_id = cur.lastrowid
-    raw.execute(
-        "INSERT INTO documents_fts(rowid, path, title, body, layer) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (chunk_id, "a.md", "a", "café au lait recipe", "source"),
-    )
-    raw.commit()
-    raw.close()
-
-    # Hand the legacy DB to SQLiteStorage and let migrate() rebuild it.
-    s = SQLiteStorage(db_path)
-    await s.connect()
-    await s.migrate()
-    try:
-        conn = s._conn  # type: ignore[attr-defined]
-        sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name = 'documents_fts'"
-        ).fetchone()["sql"]
-        assert "path UNINDEXED" not in sql
-        assert "remove_diacritics 0" in sql
-        # Data survived the rebuild — search the diacritic-bearing
-        # token and confirm we still hit the same chunk.
-        hits = await s.fts_search('"café"', limit=5)
-        assert any(h.doc_id == "legacy::a.md" for h in hits), (
-            "legacy chunk text must remain searchable after FTS rebuild"
-        )
-    finally:
-        await s.close()
-
-
-async def test_sqlite_legacy_fts_rebuild_preserves_cjk_search(tmp_path: Path) -> None:
-    """A legacy DB containing CJK chunks must remain CJK-searchable
-    after the rebuild when the live process runs ``cjk_tokenizer="jieba"``.
-
-    Index/query symmetry is the hard constraint here: queries go
-    through ``_sanitize_fts(q, cjk_tokenizer="jieba")`` which
-    whitespace-segments via jieba; the index has to be tokenized the
-    same way or "机器" never matches a row that's stored raw.
-    Repopulating with the live tokenizer keeps the two ends in
-    lockstep regardless of what the legacy DB was originally indexed
-    under (which isn't recorded).
-    """
-    import sqlite3
-
-    db_path = tmp_path / "legacy_cjk.sqlite"
-
-    raw = sqlite3.connect(str(db_path))
-    raw.row_factory = sqlite3.Row
-    raw.executescript(
-        """
-        CREATE TABLE documents (
-            doc_id   TEXT PRIMARY KEY,
-            path     TEXT NOT NULL UNIQUE,
-            path_key TEXT,
-            title    TEXT,
-            hash     TEXT,
-            mtime    REAL,
-            layer    TEXT,
-            active   INTEGER
-        );
-        CREATE TABLE chunks (
-            chunk_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-            doc_id    TEXT NOT NULL,
-            seq       INTEGER NOT NULL,
-            start_off INTEGER NOT NULL,
-            end_off   INTEGER NOT NULL,
-            text      TEXT NOT NULL,
-            UNIQUE (doc_id, seq)
-        );
-        CREATE VIRTUAL TABLE documents_fts USING fts5(
-            path UNINDEXED, title, body, layer UNINDEXED,
-            tokenize = "unicode61 remove_diacritics 2"
-        );
-        """
-    )
-    raw.execute(
-        "INSERT INTO documents(doc_id, path, path_key, title, hash, "
-        "mtime, layer, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("legacy::zh.md", "zh.md", "zh.md", "z", "h", 0.0, "source", 1),
-    )
-    cur = raw.execute(
-        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("legacy::zh.md", 0, 0, 6, "机器学习入门"),
-    )
-    raw.execute(
-        "INSERT INTO documents_fts(rowid, path, title, body, layer) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (cur.lastrowid, "zh.md", "z", "机器学习入门", "source"),
-    )
-    raw.commit()
-    raw.close()
-
-    s = SQLiteStorage(db_path, cjk_tokenizer="jieba")
-    await s.connect()
-    await s.migrate()
-    try:
-        hits = await s.fts_search("机器", limit=5)
-        assert any(h.doc_id == "legacy::zh.md" for h in hits), (
-            "legacy CJK chunk must stay searchable after rebuild — "
-            "rebuild must apply the live cjk_tokenizer so queries "
-            "(also segmented by jieba) can find the indexed tokens"
-        )
-    finally:
-        await s.close()
 
 
 def test_pg_fts_to_tsquery_string_translates_or_form() -> None:

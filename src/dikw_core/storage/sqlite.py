@@ -34,7 +34,6 @@ from ..schemas import (
     EmbeddingRow,
     EmbeddingVersion,
     FTSHit,
-    ImageMediaMeta,
     Layer,
     LinkRecord,
     LinkType,
@@ -50,12 +49,19 @@ from ..schemas import (
     dump_media_meta,
     load_media_meta,
 )
-from ._migrations import SCHEMA_VERSION_KEY, ordered_migrations
+from ._schema import SCHEMA_VERSION, SCHEMA_VERSION_KEY, mismatch_message
 from ._vec_codec import deserialize_vec as _deserialize_vec
 from ._vec_codec import serialize_vec as _serialize_vec
 from .base import NotSupported, StorageError
 
 MIGRATIONS_PACKAGE = "dikw_core.storage.migrations.sqlite"
+
+_REBUILD_HINT = (
+    "dikw-core is pre-alpha — the on-disk format is allowed to change, "
+    "and there is no in-place upgrade path. Delete the SQLite database "
+    "file (the path SQLiteStorage was constructed with, typically "
+    "``.dikw/dikw.sqlite``) and re-run ``dikw ingest`` to rebuild."
+)
 
 # vec0 defaults to L2; we want cosine for parity with the legacy
 # ``vec_distance_cosine`` ranking so existing BASELINES.md thresholds
@@ -130,46 +136,54 @@ class SQLiteStorage:
         await asyncio.to_thread(conn.close)
 
     async def migrate(self) -> None:
+        """Apply ``schema.sql`` to a fresh DB, or refuse a stale fingerprint.
+
+        See ``storage/_schema.py`` for the rebuild-on-incompatibility
+        policy and the ``SCHEMA_VERSION`` fingerprint contract.
+        """
+
         def _run() -> None:
             conn = self._require_conn()
             with conn:
+                # meta_kv must exist before the version-read query.
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS meta_kv ("
                     "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
                 )
-                applied = _read_schema_version_sqlite(conn)
-                # Apply migration files in numeric prefix order, skipping
-                # any whose number ``<= applied``. Existing IF NOT EXISTS
-                # guards mean the body is idempotent if a transitional
-                # DB lands here without ``schema_version`` set, so
-                # re-running every file is safe — the version-skip is a
-                # diagnostic optimization, not a correctness gate.
-                applied_in_run = applied
-                for n, name in ordered_migrations(MIGRATIONS_PACKAGE):
-                    if n <= applied:
-                        continue
+                stored = _read_schema_version_sqlite(conn)
+                if stored is None:
+                    # ``stored is None`` should mean "fresh DB" but a
+                    # pre-fingerprint install (older than PR #39) has
+                    # the same shape: tables exist, no version row.
+                    # ``schema.sql`` is all ``CREATE … IF NOT EXISTS``,
+                    # so silently applying it would leave the legacy
+                    # tables in place and stamp the DB as current —
+                    # later reads against new columns would fail with
+                    # opaque SQL errors. Loud-fail instead, consistent
+                    # with the rebuild-on-incompatibility policy.
+                    legacy = conn.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type = 'table' AND name = 'documents'"
+                    ).fetchone()
+                    if legacy is not None:
+                        raise StorageError(
+                            "DB has tables but no schema_version row — "
+                            "likely a pre-fingerprint install. "
+                            f"{_REBUILD_HINT}"
+                        )
                     sql = (
                         resources.files(MIGRATIONS_PACKAGE)
-                        .joinpath(name)
+                        .joinpath("schema.sql")
                         .read_text(encoding="utf-8")
                     )
                     conn.executescript(sql)
-                    applied_in_run = max(applied_in_run, n)
-                # Always rewrite the version, even when no new migration
-                # ran — pre-tracker DBs that just survived the IF NOT
-                # EXISTS replay should still record the highest number
-                # they're known to be at.
-                _write_schema_version_sqlite(conn, applied_in_run)
+                    _write_schema_version_sqlite(conn, SCHEMA_VERSION)
+                elif stored != SCHEMA_VERSION:
+                    raise StorageError(mismatch_message(stored, _REBUILD_HINT))
+            # Vec tables are runtime-created and not in schema.sql, so
+            # the cosine invariant is checked outside the version-branch
+            # logic. Cheap fixed-cost lookup.
             self._verify_vec_tables_use_cosine(conn)
-            self._verify_no_legacy_content_table(conn)
-            self._verify_no_legacy_text_embed_tables(conn)
-            self._migrate_legacy_chunk_offset_columns(conn)
-            self._migrate_legacy_assets_columns(conn)
-            self._migrate_legacy_wiki_log_id(conn)
-            self._migrate_legacy_documents_path_key(conn)
-            self._migrate_legacy_wisdom_evidence_id(conn)
-            self._migrate_legacy_meta_kv_value_notnull(conn)
-            self._migrate_legacy_documents_fts(conn)
 
         await asyncio.to_thread(_run)
 
@@ -1371,471 +1385,8 @@ class SQLiteStorage:
                 raise StorageError(
                     f"vector table {row['name']!r} was created without "
                     f"distance_metric={_VEC_DISTANCE_METRIC} and would rank "
-                    "by sqlite-vec's L2 default. Delete the SQLite file "
-                    "(`rm .dikw/dikw.sqlite`) and re-run `dikw ingest` to "
-                    "rebuild the index."
+                    f"by sqlite-vec's L2 default. {_REBUILD_HINT}"
                 )
-
-    def _verify_no_legacy_text_embed_tables(self, conn: sqlite3.Connection) -> None:
-        """Bail if pre-versioning text embedding tables are still present.
-
-        The unversioned ``chunks_vec`` singleton + ``embed_meta(chunk_id, model)``
-        table predate ``embed_versions``. ``CREATE TABLE IF NOT EXISTS``
-        won't drop them, and silently leaving them around would mean
-        ``upsert_embeddings`` writes to the new ``vec_chunks_v<id>``
-        tables while the old singleton + meta rows linger as dead state.
-        Fail loudly with rebuild instructions — pre-alpha policy.
-        """
-        for legacy in ("chunks_vec", "embed_meta"):
-            row = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE name = ?",
-                (legacy,),
-            ).fetchone()
-            if row is not None:
-                raise StorageError(
-                    f"legacy `{legacy}` table detected from a pre-versioning "
-                    "schema. Delete the SQLite file (`rm .dikw/index.sqlite`) "
-                    "and re-run `dikw ingest` to rebuild on the version-aware "
-                    "embedding schema."
-                )
-
-    def _verify_no_legacy_content_table(self, conn: sqlite3.Connection) -> None:
-        """Bail if a pre-refactor ``content`` table is still present.
-
-        ``CREATE TABLE IF NOT EXISTS`` won't remove it, so the FK on
-        ``documents.hash`` would silently re-engage and break ingest.
-        """
-        row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content'"
-        ).fetchone()
-        if row is not None:
-            raise StorageError(
-                "legacy `content` table detected from a pre-refactor schema. "
-                "Delete the SQLite file (`rm .dikw/dikw.sqlite`) and re-run "
-                "`dikw ingest` to rebuild on the new D-layer schema."
-            )
-
-    def _migrate_legacy_chunk_offset_columns(
-        self, conn: sqlite3.Connection
-    ) -> None:
-        """Rename pre-Phase-X chunks columns ``start``/``"end"`` to
-        ``start_off``/``end_off`` in place.
-
-        ``CREATE TABLE IF NOT EXISTS`` in 001_init.sql is a no-op against an
-        existing chunks table, so a fresh checkout against a populated DB
-        would otherwise keep the old columns and break every chunk SQL.
-
-        ``ALTER TABLE RENAME COLUMN`` (SQLite ≥3.25, shipped with Python
-        3.12's bundled sqlite) leaves chunk_ids untouched, so embed_meta
-        FKs and chunks_vec rowid alignment survive — preserving the
-        ``wiki_log`` audit stream and other K/W state that a rebuild
-        would otherwise drop.
-        """
-        cols = {
-            row["name"] for row in conn.execute("PRAGMA table_info('chunks')")
-        }
-        if "start" in cols:
-            conn.execute("ALTER TABLE chunks RENAME COLUMN start TO start_off")
-        if "end" in cols:
-            conn.execute('ALTER TABLE chunks RENAME COLUMN "end" TO end_off')
-
-    def _migrate_legacy_assets_columns(self, conn: sqlite3.Connection) -> None:
-        """Migrate legacy ``assets`` columns to the per-kind ``media_meta`` JSON.
-
-        Drops ``width``/``height``/``caption``/``caption_model`` and adds
-        ``media_meta`` for DBs created before the per-kind JSON refactor;
-        any populated ``width``/``height`` is backfilled into ``media_meta``
-        first so an upgrade doesn't silently lose dimensions captured by
-        ``_probe_dimensions`` on real PNG/JPEG/GIF assets.
-
-        ``caption`` / ``caption_model`` are dropped without backfill because
-        they were unused placeholders on every prior install. ``DROP COLUMN``
-        is SQLite ≥3.35 (Python 3.12 ships 3.35+); asset_id stays the
-        primary key throughout, so chunk_asset_refs / asset_embed_meta FKs
-        survive untouched.
-
-        Idempotent: each step short-circuits when the prior shape is gone,
-        and the backfill only writes into ``media_meta`` rows that are still
-        NULL — so re-running on a partially-migrated DB never clobbers
-        already-converted JSON.
-        """
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info('assets')")}
-        if not cols:
-            return
-        if "media_meta" not in cols:
-            conn.execute("ALTER TABLE assets ADD COLUMN media_meta TEXT")
-        # The select + filter use the same expressions so a crashed prior
-        # migration that dropped only ``width`` (or only ``height``) still
-        # backfills cleanly — referencing a column that no longer exists
-        # would otherwise raise ``no such column`` and brick the upgrade.
-        width_expr = "width" if "width" in cols else "NULL"
-        height_expr = "height" if "height" in cols else "NULL"
-        if "width" in cols or "height" in cols:
-            rows = conn.execute(
-                f"SELECT asset_id, {width_expr} AS width, "
-                f"{height_expr} AS height FROM assets "
-                "WHERE media_meta IS NULL "
-                f"AND ({width_expr} IS NOT NULL OR {height_expr} IS NOT NULL)"
-            ).fetchall()
-            for r in rows:
-                meta = ImageMediaMeta(width=r["width"], height=r["height"])
-                conn.execute(
-                    "UPDATE assets SET media_meta = ? WHERE asset_id = ?",
-                    (meta.model_dump_json(), r["asset_id"]),
-                )
-        for legacy in ("caption", "caption_model", "height", "width"):
-            if legacy in cols:
-                conn.execute(f"ALTER TABLE assets DROP COLUMN {legacy}")
-
-    def _migrate_legacy_wiki_log_id(self, conn: sqlite3.Connection) -> None:
-        """Add the explicit ``id`` column to a pre-parity ``wiki_log`` table.
-
-        Older DBs created before the SQLite/Postgres parity fix have no
-        explicit ``id`` and rely on the implicit rowid for ordering.
-        ``CREATE TABLE IF NOT EXISTS`` is a no-op against an existing
-        table, so without this helper an upgrade leaves ``id`` missing
-        and ``list_wiki_log``'s ``ORDER BY ts ASC, id ASC`` would fail.
-
-        Idempotent and crash-safe:
-        * skips when the table is absent or already has ``id``;
-        * drops a stale ``wiki_log_new`` from a prior crashed attempt
-          before re-creating it, so re-running on a partially-migrated
-          DB never trips on "table already exists";
-        * runs the rebuild in a single transaction so a crash midway
-          rolls back to the original shape rather than leaving a
-          half-built table around.
-
-        SQLite cannot add an INTEGER PRIMARY KEY column via
-        ``ALTER TABLE`` (rowid aliasing requires the column at CREATE
-        time), so this does a copy-rebuild: create new table, copy rows
-        in rowid order so AUTOINCREMENT ids match the original event
-        order, swap the names. chunk-level FKs reference ``chunks`` not
-        ``wiki_log``, so the rebuild is structurally safe.
-        """
-        info = conn.execute("PRAGMA table_info('wiki_log')").fetchall()
-        if not info:
-            return
-        cols = {row["name"] for row in info}
-        if "id" in cols:
-            # Defensive cleanup: a prior crashed attempt may have left
-            # ``wiki_log_new`` around even though the rename never
-            # happened. A current ``id``-bearing wiki_log means the
-            # rebuild is no longer needed; drop the orphan to keep the
-            # DB tidy.
-            conn.execute("DROP TABLE IF EXISTS wiki_log_new")
-            return
-        with conn:  # transaction: all-or-nothing rebuild
-            conn.execute("DROP TABLE IF EXISTS wiki_log_new")
-            conn.execute("DROP INDEX IF EXISTS wiki_log_ts")
-            conn.execute(
-                "CREATE TABLE wiki_log_new ("
-                "  id     INTEGER PRIMARY KEY AUTOINCREMENT,"
-                "  ts     REAL NOT NULL,"
-                "  action TEXT NOT NULL,"
-                "  src    TEXT,"
-                "  dst    TEXT,"
-                "  note   TEXT"
-                ")"
-            )
-            # Copy rows in original rowid order so AUTOINCREMENT ids
-            # increase along the original event timeline.
-            conn.execute(
-                "INSERT INTO wiki_log_new(ts, action, src, dst, note) "
-                "SELECT ts, action, src, dst, note FROM wiki_log "
-                "ORDER BY rowid ASC"
-            )
-            conn.execute("DROP TABLE wiki_log")
-            conn.execute("ALTER TABLE wiki_log_new RENAME TO wiki_log")
-            conn.execute("CREATE INDEX IF NOT EXISTS wiki_log_ts ON wiki_log(ts)")
-
-    def _migrate_legacy_wisdom_evidence_id(self, conn: sqlite3.Connection) -> None:
-        """Add the explicit ``id`` column to a pre-parity ``wisdom_evidence``.
-
-        Older DBs were schema-typed without ``id`` and relied on the
-        implicit rowid for ordering. Same shape as the wiki_log
-        migration: copy-rebuild inside one transaction so AUTOINCREMENT
-        ids align with the original insertion order, with the FK
-        toggle around it because ``wisdom_items.item_id`` is the
-        parent of ``wisdom_evidence.item_id``.
-
-        Idempotent and crash-safe — drops any orphan
-        ``wisdom_evidence_new`` from a prior partial attempt and
-        verifies foreign-key integrity before re-enabling enforcement.
-        """
-        info = conn.execute("PRAGMA table_info('wisdom_evidence')").fetchall()
-        if not info:
-            return
-        cols = {row["name"] for row in info}
-        if "id" in cols:
-            conn.execute("DROP TABLE IF EXISTS wisdom_evidence_new")
-            return
-        conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            with conn:
-                conn.execute("DROP TABLE IF EXISTS wisdom_evidence_new")
-                conn.execute("DROP INDEX IF EXISTS wisdom_evidence_item")
-                conn.execute(
-                    "CREATE TABLE wisdom_evidence_new ("
-                    "  id      INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "  item_id TEXT NOT NULL REFERENCES wisdom_items(item_id) "
-                    "          ON DELETE CASCADE,"
-                    "  doc_id  TEXT NOT NULL REFERENCES documents(doc_id),"
-                    "  excerpt TEXT NOT NULL,"
-                    "  line    INTEGER"
-                    ")"
-                )
-                # Copy in rowid order so AUTOINCREMENT ids match the
-                # original insertion timeline (per-item ordering is
-                # what get_wisdom_evidence's ORDER BY id ASC reads).
-                conn.execute(
-                    "INSERT INTO wisdom_evidence_new(item_id, doc_id, excerpt, line) "
-                    "SELECT item_id, doc_id, excerpt, line FROM wisdom_evidence "
-                    "ORDER BY rowid ASC"
-                )
-                conn.execute("DROP TABLE wisdom_evidence")
-                conn.execute(
-                    "ALTER TABLE wisdom_evidence_new RENAME TO wisdom_evidence"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS wisdom_evidence_item "
-                    "ON wisdom_evidence(item_id)"
-                )
-                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
-                if violations:
-                    raise StorageError(
-                        "wisdom_evidence rebuild left dangling foreign keys: "
-                        f"{violations}. Bailing out before FKs are re-enabled."
-                    )
-        finally:
-            conn.execute("PRAGMA foreign_keys = ON")
-
-    def _migrate_legacy_meta_kv_value_notnull(self, conn: sqlite3.Connection) -> None:
-        """Add ``NOT NULL`` to ``meta_kv.value`` on a pre-parity table.
-
-        SQLite cannot ALTER an existing column's nullability in place,
-        so legacy DBs that landed before this commit shipped
-        ``value TEXT`` without the constraint. The Postgres adapter has
-        always declared it ``NOT NULL`` — this brings them in line.
-
-        Idempotent: skips when the column is already NOT NULL or when
-        the table doesn't exist. Safe at runtime because every existing
-        writer (``_write_schema_version_*``) already supplies a non-null
-        value, so the rebuild can never reject a real row.
-        """
-        cols_by_name = {
-            row["name"]: row
-            for row in conn.execute("PRAGMA table_info('meta_kv')")
-        }
-        value_col = cols_by_name.get("value")
-        if value_col is None or int(value_col["notnull"]) == 1:
-            return
-        with conn:
-            conn.execute("DROP TABLE IF EXISTS meta_kv_new")
-            conn.execute(
-                "CREATE TABLE meta_kv_new ("
-                "  key TEXT PRIMARY KEY, value TEXT NOT NULL"
-                ")"
-            )
-            # Filter NULLs defensively; the writer never inserts them
-            # but a hand-edited DB might. Dropping a NULL row is the
-            # only sensible recovery when the new constraint forbids it.
-            conn.execute(
-                "INSERT INTO meta_kv_new(key, value) "
-                "SELECT key, value FROM meta_kv WHERE value IS NOT NULL"
-            )
-            conn.execute("DROP TABLE meta_kv")
-            conn.execute("ALTER TABLE meta_kv_new RENAME TO meta_kv")
-
-    def _migrate_legacy_documents_fts(self, conn: sqlite3.Connection) -> None:
-        """Rebuild ``documents_fts`` body-only without diacritic stripping.
-
-        Pre-PR shape was an FTS5 virtual table over ``(path UNINDEXED,
-        title, body, layer UNINDEXED)`` with ``tokenize = "unicode61
-        remove_diacritics 2"``. Post-PR is body-only with plain
-        ``unicode61`` so SQLite's column scope and tokenizer behavior
-        match Postgres' ``chunks.fts`` ``to_tsvector('simple', text)``.
-
-        FTS5 cannot ALTER columns or change tokenizer in place, so the
-        rebuild is a DROP + CREATE + repopulate from ``chunks`` (which
-        always carry the raw text — the FTS table is purely derived
-        state). No FK concerns: FTS5 virtual tables are nothing
-        REFERENCES, so no ``PRAGMA foreign_keys OFF`` dance.
-
-        The repopulate path uses ``self._cjk_tokenizer`` (i.e. the
-        live config) deliberately, even though the legacy DB doesn't
-        record what tokenizer it was originally indexed with. The
-        priority is **index/query symmetry**: query construction in
-        ``info/search.py:_sanitize_fts`` runs every search through
-        the same live ``cjk_tokenizer``, so the rebuilt index has to
-        match or CJK searches lose every existing chunk. The
-        alternative — repopulating raw and waiting for a reingest —
-        leaves a window where a legacy ``jieba`` corpus is
-        unsearchable on CJK queries (already-segmented index rows
-        gone, raw rows in their place, query still segments). That's
-        the worse failure mode. ``RetrievalConfig.cjk_tokenizer``
-        being documented as "requires reingest to switch" still
-        holds for *changing* the tokenizer mid-life; this rebuild
-        just preserves whatever is currently configured.
-
-        Idempotent: detects the old shape (4-column or
-        ``remove_diacritics`` in tokenize) and skips otherwise.
-        Crash-safe: the whole rebuild runs in a single transaction.
-        """
-        row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name = 'documents_fts'"
-        ).fetchone()
-        if row is None:
-            return
-        sql = row["sql"] or ""
-        # Legacy if the 4-column UNINDEXED shape is present, or the
-        # tokenizer doesn't pin ``remove_diacritics 0`` (``unicode61``
-        # without an explicit ``0`` defaults to ``1`` which still
-        # strips most diacritics — that's the divergence we're
-        # closing). The ``title`` column doesn't get its own check
-        # because the ``UNINDEXED`` neighbours uniquely identify the
-        # legacy shape, and a bare ``"title"`` substring would
-        # false-match any future tokenizer option containing that
-        # word.
-        is_legacy = (
-            "path UNINDEXED" in sql
-            or "layer UNINDEXED" in sql
-            or "remove_diacritics 0" not in sql
-        )
-        if not is_legacy:
-            return
-        with conn:
-            conn.execute("DROP TABLE documents_fts")
-            conn.execute(
-                "CREATE VIRTUAL TABLE documents_fts USING fts5("
-                "  body, tokenize = \"unicode61 remove_diacritics 0\")"
-            )
-            # Bulk-insert via executemany so a 100k-chunk legacy DB
-            # doesn't stall on N round-tripped INSERTs. Tokenizer
-            # choice (live ``self._cjk_tokenizer``) is justified at
-            # length in the docstring above — index/query symmetry
-            # trumps "preserve the legacy tokenization" because
-            # asymmetry guarantees the queries miss.
-            rows = conn.execute(
-                "SELECT chunk_id, text FROM chunks ORDER BY chunk_id"
-            ).fetchall()
-            payload = [
-                (int(row["chunk_id"]),
-                 preprocess_for_fts(row["text"], tokenizer=self._cjk_tokenizer))
-                for row in rows
-            ]
-            conn.executemany(
-                "INSERT INTO documents_fts(rowid, body) VALUES (?, ?)",
-                payload,
-            )
-
-    def _migrate_legacy_documents_path_key(self, conn: sqlite3.Connection) -> None:
-        """Add the ``path_key`` column to a pre-normalization ``documents`` table.
-
-        Older DBs created before NFC + casefold uniqueness landed have
-        ``path TEXT UNIQUE`` and no ``path_key`` column. This helper:
-
-        1. ``ALTER TABLE ... ADD COLUMN path_key TEXT`` (no UNIQUE yet
-           because backfill must succeed first).
-        2. Backfills ``path_key`` from existing ``path`` rows via the
-           Python ``normalize_path`` helper — SQLite has no native
-           casefold, so the work has to happen in-process.
-        3. Detects case-only collisions before committing the UNIQUE
-           index. If two rows share a ``path_key``, fail loudly with
-           rebuild instructions — pre-alpha policy.
-        4. Builds the UNIQUE index and drops the legacy ``path UNIQUE``
-           constraint by rebuilding the table (SQLite can't drop a
-           column-level UNIQUE in place).
-
-        Idempotent: short-circuits when ``path_key`` is already present
-        on the table.
-        """
-        info = conn.execute("PRAGMA table_info('documents')").fetchall()
-        if not info:
-            return
-        cols = {row["name"] for row in info}
-        if "path_key" in cols:
-            return
-
-        # Local import keeps the storage layer free of a top-level
-        # dependency on data/ (which itself imports from schemas).
-        from ..data.path_norm import normalize_path
-
-        # SQLite documented procedure for table rebuild when FKs point
-        # at the table being rebuilt (chunks.doc_id REFERENCES documents):
-        # foreign_keys must be toggled OFF *outside* the transaction;
-        # then rebuild atomically; then run a foreign-key integrity check
-        # before turning FKs back on. See sqlite.org/lang_altertable.html
-        # ("Making other kinds of table schema changes").
-        conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            with conn:  # transaction: all-or-nothing rebuild
-                conn.execute("ALTER TABLE documents ADD COLUMN path_key TEXT")
-                rows = conn.execute("SELECT doc_id, path FROM documents").fetchall()
-                for r in rows:
-                    conn.execute(
-                        "UPDATE documents SET path_key = ? WHERE doc_id = ?",
-                        (normalize_path(r["path"]), r["doc_id"]),
-                    )
-                collision = conn.execute(
-                    "SELECT path_key, COUNT(*) AS n FROM documents "
-                    "GROUP BY path_key HAVING n > 1 LIMIT 1"
-                ).fetchone()
-                if collision is not None:
-                    raise StorageError(
-                        "documents.path_key collision detected during "
-                        f"legacy migration (path_key={collision['path_key']!r}, "
-                        "rows=" + str(int(collision["n"])) + "). The legacy DB "
-                        "had two case-only-different paths for what is now one "
-                        "logical document. Delete the SQLite file "
-                        "(`rm .dikw/dikw.sqlite`) and re-run `dikw ingest` to "
-                        "rebuild on the path_key-aware schema."
-                    )
-                # SQLite can't drop the legacy ``path UNIQUE`` column-level
-                # constraint in place — rebuild the table to land the new
-                # shape exactly. The new shape mirrors the migration file.
-                conn.execute("DROP INDEX IF EXISTS documents_layer_active")
-                conn.execute("DROP INDEX IF EXISTS documents_hash_idx")
-                conn.execute(
-                    "CREATE TABLE documents_new ("
-                    "  doc_id   TEXT PRIMARY KEY,"
-                    "  path     TEXT NOT NULL,"
-                    "  path_key TEXT NOT NULL UNIQUE,"
-                    "  title    TEXT,"
-                    "  hash     TEXT NOT NULL,"
-                    "  mtime    REAL,"
-                    "  layer    TEXT NOT NULL CHECK (layer IN ('source','wiki','wisdom')),"
-                    "  active   INTEGER NOT NULL DEFAULT 1"
-                    ")"
-                )
-                conn.execute(
-                    "INSERT INTO documents_new("
-                    "  doc_id, path, path_key, title, hash, mtime, layer, active"
-                    ") "
-                    "SELECT doc_id, path, path_key, title, hash, mtime, layer, active "
-                    "FROM documents"
-                )
-                conn.execute("DROP TABLE documents")
-                conn.execute("ALTER TABLE documents_new RENAME TO documents")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS documents_layer_active "
-                    "ON documents(layer, active)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS documents_hash_idx "
-                    "ON documents(hash)"
-                )
-                # Verify FKs survive the rebuild before we re-enable
-                # enforcement. ``foreign_key_check`` returns one row per
-                # violation; an empty result means the chunks→documents
-                # links still resolve.
-                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
-                if violations:
-                    raise StorageError(
-                        "documents rebuild left dangling foreign keys: "
-                        f"{violations}. Bailing out before FKs are re-enabled."
-                    )
-        finally:
-            conn.execute("PRAGMA foreign_keys = ON")
 
     def _ensure_vec_table(
         self,
@@ -1864,17 +1415,19 @@ class SQLiteStorage:
 # ---- module-level helpers ------------------------------------------------
 
 
-def _read_schema_version_sqlite(conn: sqlite3.Connection) -> int:
-    """Read ``meta_kv['schema_version']`` as an int. Missing row → 0."""
+def _read_schema_version_sqlite(conn: sqlite3.Connection) -> int | None:
+    """Return ``meta_kv['schema_version']`` as an int, or ``None`` if absent
+    or unparseable. ``None`` keys the fresh-DB branch in ``migrate()``.
+    """
     row = conn.execute(
         "SELECT value FROM meta_kv WHERE key = ?", (SCHEMA_VERSION_KEY,)
     ).fetchone()
     if row is None:
-        return 0
+        return None
     try:
         return int(row["value"])
     except (TypeError, ValueError):
-        return 0
+        return None
 
 
 def _write_schema_version_sqlite(conn: sqlite3.Connection, n: int) -> None:

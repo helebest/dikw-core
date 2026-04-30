@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 import sqlite_vec
 
+from ..data.hashing import hash_bytes
 from ..info.tokenize import CjkTokenizer, initialize_jieba, preprocess_for_fts
 from ..schemas import (
     AssetEmbeddingRow,
@@ -40,10 +41,12 @@ from ..schemas import (
     StorageCounts,
     VecHit,
     WikiLogEntry,
+    WisdomEmbeddingRow,
     WisdomEvidence,
     WisdomItem,
     WisdomKind,
     WisdomStatus,
+    WisdomVecHit,
     dump_media_meta,
     load_media_meta,
 )
@@ -1056,6 +1059,150 @@ class SQLiteStorage:
 
         return await asyncio.to_thread(_run)
 
+    # ---- W layer: wisdom embeddings --------------------------------------
+
+    async def upsert_wisdom_embeddings(
+        self, rows: Sequence[WisdomEmbeddingRow]
+    ) -> None:
+        if not rows:
+            return
+
+        def _run() -> None:
+            conn = self._require_conn()
+            by_version: dict[int, list[WisdomEmbeddingRow]] = {}
+            for r in rows:
+                by_version.setdefault(r.version_id, []).append(r)
+            for version_id, batch in by_version.items():
+                version = _fetch_version(conn, version_id)
+                if version is None:
+                    raise StorageError(
+                        f"unknown embed version_id={version_id}; "
+                        "call upsert_embed_version first"
+                    )
+                if version.modality != "text":
+                    raise StorageError(
+                        f"wisdom embeddings require modality='text'; "
+                        f"version {version_id} has modality={version.modality!r} "
+                        "— wisdom rides on the active text version so chunks "
+                        "and wisdom share one cosine space"
+                    )
+                for r in batch:
+                    if len(r.embedding) != version.dim:
+                        raise StorageError(
+                            f"wisdom embedding dim {len(r.embedding)} != "
+                            f"version {version_id} dim {version.dim}"
+                        )
+                self._ensure_vec_table(conn, "wisdom", version_id, version.dim)
+                rowid_table = f"wisdom_vec_rowid_v{version_id}"
+                conn.execute(
+                    f"CREATE TABLE IF NOT EXISTS {rowid_table}("
+                    "rowid INTEGER PRIMARY KEY, "
+                    "item_id TEXT NOT NULL UNIQUE)"
+                )
+                vec_table = f"vec_wisdom_v{version_id}"
+                with conn:
+                    for r in batch:
+                        # sqlite-vec needs an integer rowid; derive a stable
+                        # 60-bit int from the (variable-length, not-pure-hex)
+                        # item_id by hashing it. Same shape as
+                        # ``_asset_id_to_rowid`` but the input domain is
+                        # arbitrary text (e.g. ``W-3a8f1c``), not a sha256
+                        # hex string. Birthday collisions are detected
+                        # explicitly so a hit corrupts no data.
+                        rowid = _wisdom_id_to_rowid(r.item_id)
+                        existing = conn.execute(
+                            f"SELECT item_id FROM {rowid_table} WHERE rowid = ?",
+                            (rowid,),
+                        ).fetchone()
+                        if existing is not None and existing["item_id"] != r.item_id:
+                            raise StorageError(
+                                f"wisdom rowid collision in version {version_id}: "
+                                f"rowid {rowid} already used by "
+                                f"{existing['item_id']!r}, refused for "
+                                f"{r.item_id!r}"
+                            )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO wisdom_embed_meta"
+                            "(item_id, version_id) VALUES (?, ?)",
+                            (r.item_id, r.version_id),
+                        )
+                        # sqlite-vec's vec0 virtual table doesn't honor
+                        # INSERT OR REPLACE on the rowid PK — re-upserting
+                        # the same item_id would fail with a UNIQUE
+                        # violation. Delete-then-insert mimics upsert
+                        # semantics cleanly.
+                        conn.execute(
+                            f"DELETE FROM {vec_table} WHERE rowid = ?",
+                            (rowid,),
+                        )
+                        conn.execute(
+                            f"INSERT INTO {vec_table}(rowid, embedding) "
+                            "VALUES (?, ?)",
+                            (rowid, _serialize_vec(r.embedding)),
+                        )
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO {rowid_table}"
+                            "(rowid, item_id) VALUES (?, ?)",
+                            (rowid, r.item_id),
+                        )
+
+        await asyncio.to_thread(_run)
+
+    async def vec_search_wisdom(
+        self,
+        embedding: list[float],
+        *,
+        version_id: int,
+        limit: int = 20,
+    ) -> list[WisdomVecHit]:
+        def _run() -> list[WisdomVecHit]:
+            conn = self._require_conn()
+            version = _fetch_version(conn, version_id)
+            if version is None:
+                raise NotSupported(
+                    f"no embed version_id={version_id} registered"
+                )
+            if version.modality != "text":
+                raise StorageError(
+                    f"vec_search_wisdom requires modality='text'; "
+                    f"version {version_id} has modality={version.modality!r}"
+                )
+            if len(embedding) != version.dim:
+                raise StorageError(
+                    f"query embedding dim {len(embedding)} != "
+                    f"version {version_id} dim {version.dim}"
+                )
+            table = f"vec_wisdom_v{version_id}"
+            row_table = f"wisdom_vec_rowid_v{version_id}"
+            # Empty index → no hits. Skip the SQL to avoid sqlite-vec errors
+            # on a non-existent virtual table.
+            tbl_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if tbl_exists is None:
+                return []
+            ranked = _knn(conn, table, embedding, limit)
+            if not ranked:
+                return []
+            rowids = [rid for rid, _ in ranked]
+            placeholders = ",".join("?" * len(rowids))
+            item_id_by_rowid: dict[int, str] = {
+                int(r["rowid"]): r["item_id"]
+                for r in conn.execute(
+                    f"SELECT rowid, item_id FROM {row_table} "
+                    f"WHERE rowid IN ({placeholders})",
+                    rowids,
+                ).fetchall()
+            }
+            return [
+                WisdomVecHit(item_id=item_id_by_rowid[rid], distance=dist)
+                for rid, dist in ranked
+                if rid in item_id_by_rowid
+            ]
+
+        return await asyncio.to_thread(_run)
+
     # ---- Embedding version registry --------------------------------------
 
     async def upsert_embed_version(self, v: EmbeddingVersion) -> int:
@@ -1693,7 +1840,7 @@ class SQLiteStorage:
     def _ensure_vec_table(
         self,
         conn: sqlite3.Connection,
-        kind: Literal["chunks", "assets"],
+        kind: Literal["chunks", "assets", "wisdom"],
         version_id: int,
         dim: int,
     ) -> None:
@@ -1701,6 +1848,11 @@ class SQLiteStorage:
         the embedding dim baked into the table at CREATE time, so each
         version gets its own dim-locked virtual table — switching model
         creates a new version + new table, leaving prior data intact.
+
+        ``kind`` widens to include ``"wisdom"`` so the W layer can ride
+        on the active text version's vector space (chunks and wisdom
+        coexist in the same cosine space; the per-kind vec table only
+        differs by which identity column the rowid maps to).
         """
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_{kind}_v{version_id} "
@@ -1851,3 +2003,16 @@ def _asset_id_to_rowid(asset_id: str) -> int:
     always non-negative and safely below 2**63.
     """
     return int(asset_id[:15], 16)
+
+
+def _wisdom_id_to_rowid(item_id: str) -> int:
+    """Stable, signed-INT64-safe rowid derived from a wisdom item_id.
+
+    Mirror of ``_asset_id_to_rowid`` for the W-layer. Wisdom item_ids are
+    short text (e.g. ``W-3a8f1c``) — not raw sha256 hex — so we hash
+    first to get a uniform high-entropy domain, then take the first 15
+    hex chars (60 bits, ~2^-30 birthday collision odds at 10^9 items).
+    Collisions are detected explicitly at upsert time so a hit corrupts
+    no data.
+    """
+    return int(hash_bytes(item_id.encode("utf-8"))[:15], 16)

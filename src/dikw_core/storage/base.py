@@ -32,10 +32,12 @@ from ..schemas import (
     StorageCounts,
     VecHit,
     WikiLogEntry,
+    WisdomEmbeddingRow,
     WisdomEvidence,
     WisdomItem,
     WisdomKind,
     WisdomStatus,
+    WisdomVecHit,
 )
 
 
@@ -209,6 +211,48 @@ class Storage(Protocol):
         ...
 
     async def get_wisdom(self, item_id: str) -> WisdomItem | None: ...
+
+    # ---- W layer: wisdom embeddings --------------------------------------
+
+    async def upsert_wisdom_embeddings(
+        self, rows: Sequence[WisdomEmbeddingRow]
+    ) -> None:
+        """Persist wisdom-item embedding vectors.
+
+        Mirror of ``upsert_asset_embeddings``: per-row dim must match the
+        ``dim`` recorded on the row's ``version_id`` in ``embed_versions``;
+        otherwise raise ``StorageError``. Re-upserting the same
+        ``(item_id, version_id)`` replaces in place — there is exactly
+        one vector per (item, version).
+
+        Wisdom items reuse the **text** modality so a single active text
+        ``embed_versions`` row covers both chunks and wisdom — apply-at-
+        query compares a question's text embedding against wisdom
+        embeddings in the same cosine space. Per-version vector tables
+        stay separate (``vec_wisdom_v<id>`` keyed by ``item_id TEXT`` vs
+        ``vec_chunks_v<id>`` keyed by ``chunk_id INTEGER``) because the
+        identity columns can't share a table.
+        """
+        ...
+
+    async def vec_search_wisdom(
+        self,
+        embedding: list[float],
+        *,
+        version_id: int,
+        limit: int = 20,
+    ) -> list[WisdomVecHit]:
+        """ANN search against the wisdom vector table for ``version_id``.
+
+        Returns at most ``limit`` ``WisdomVecHit`` rows ordered by
+        ascending cosine distance (smaller = more similar). Empty index
+        returns ``[]`` — same shape as ``vec_search`` /
+        ``vec_search_assets``. Backends without dense retrieval (e.g.
+        the filesystem adapter, FTS-only by design) raise
+        ``NotSupported``; the caller in ``wisdom/apply.py`` falls back
+        to the Jaccard path.
+        """
+        ...
 
     # ---- D layer: multimedia assets --------------------------------------
 

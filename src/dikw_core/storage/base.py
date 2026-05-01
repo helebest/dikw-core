@@ -148,6 +148,15 @@ class Storage(Protocol):
         through ``get_chunk`` per hit would N+1 the connection.
         """
         ...
+
+    async def list_chunks(self, doc_id: str) -> list[ChunkRecord]:
+        """All chunks of ``doc_id`` in ``seq`` order. Empty if doc has none.
+
+        Used by chunk-level eval to resolve ``targets.yaml`` named-id
+        anchors to ``(doc_path, seq)`` runtime keys: the loader walks
+        each doc's chunks once and binary-searches char-position to seq.
+        """
+        ...
     async def fts_search(
         self,
         q: str,
@@ -268,6 +277,16 @@ class Storage(Protocol):
         ...
 
     async def get_asset(self, asset_id: str) -> AssetRecord | None: ...
+
+    async def get_assets(self, asset_ids: Iterable[str]) -> list[AssetRecord]:
+        """Batch-fetch assets by id. Missing ids are dropped silently.
+
+        Single-query equivalent of looping ``get_asset``; the
+        chunk-level retrieval path needs every retrieved chunk's asset
+        bundle, and ``asyncio.gather(*get_asset)`` over a shared
+        connection has tripped sqlite3.InterfaceError on large batches.
+        """
+        ...
 
     # ---- I layer: chunk ↔ asset bridge -----------------------------------
 

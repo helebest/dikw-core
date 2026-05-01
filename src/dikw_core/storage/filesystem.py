@@ -273,6 +273,12 @@ class FilesystemStorage:
     async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
         return [self._chunks[cid] for cid in chunk_ids if cid in self._chunks]
 
+    async def list_chunks(self, doc_id: str) -> list[ChunkRecord]:
+        return sorted(
+            (c for c in self._chunks.values() if c.doc_id == doc_id),
+            key=lambda c: c.seq,
+        )
+
     async def fts_search(
         self, q: str, *, limit: int = 20, layer: Layer | None = None
     ) -> list[FTSHit]:
@@ -465,6 +471,10 @@ class FilesystemStorage:
         raise NotSupported("filesystem adapter: assets not implemented yet")
 
     async def get_asset(self, asset_id: str) -> AssetRecord | None:
+        raise NotSupported("filesystem adapter: assets not implemented yet")
+
+    async def get_assets(self, asset_ids: Iterable[str]) -> list[AssetRecord]:
+        del asset_ids
         raise NotSupported("filesystem adapter: assets not implemented yet")
 
     async def replace_chunk_asset_refs(

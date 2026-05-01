@@ -521,16 +521,11 @@ class HybridSearcher:
             {r.asset_id for refs in refs_by_chunk.values() for r in refs}
         )
         try:
-            fetched = await asyncio.gather(
-                *(self._storage.get_asset(aid) for aid in all_asset_ids)
-            )
+            fetched_assets = await self._storage.get_assets(all_asset_ids)
         except NotSupported:
-            fetched = []
-            all_asset_ids = []
+            fetched_assets = []
         assets_by_id: dict[str, AssetRecord] = {
-            aid: a
-            for aid, a in zip(all_asset_ids, fetched, strict=True)
-            if a is not None
+            a.asset_id: a for a in fetched_assets
         }
 
         # Batch-fetch the chunks (for snippet fallback + seq) and unique

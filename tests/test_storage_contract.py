@@ -459,6 +459,37 @@ async def test_get_chunks_batch(storage: Storage) -> None:
     assert await storage.get_chunks([]) == []
 
 
+async def test_list_chunks_by_doc_returns_seq_ordered(storage: Storage) -> None:
+    """``list_chunks(doc_id)`` returns every chunk of one doc in ``seq``
+    order, regardless of insertion order. Eval anchor-resolution depends
+    on this — it scans the list to find the chunk covering a char position.
+    """
+    doc = _make_doc("sources/list_chunks.md")
+    await storage.upsert_document(doc)
+    other = _make_doc("sources/other.md")
+    await storage.upsert_document(other)
+    await storage.replace_chunks(
+        doc.doc_id,
+        [
+            ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=5, text="alpha"),
+            ChunkRecord(doc_id=doc.doc_id, seq=1, start=5, end=10, text="beta-"),
+            ChunkRecord(doc_id=doc.doc_id, seq=2, start=10, end=15, text="gamma"),
+        ],
+    )
+    await storage.replace_chunks(
+        other.doc_id,
+        [ChunkRecord(doc_id=other.doc_id, seq=0, start=0, end=4, text="zzzz")],
+    )
+
+    chunks = await storage.list_chunks(doc.doc_id)
+    assert [c.seq for c in chunks] == [0, 1, 2]
+    assert [c.text for c in chunks] == ["alpha", "beta-", "gamma"]
+    # All chunks belong to the requested doc — no leakage from siblings.
+    assert all(c.doc_id == doc.doc_id for c in chunks)
+    # Empty list for an unknown doc.
+    assert await storage.list_chunks("does-not-exist") == []
+
+
 async def test_chunks_and_fts_search(storage: Storage) -> None:
     doc = _make_doc("sources/chunked.md")
     await storage.upsert_document(doc)
@@ -1236,6 +1267,31 @@ async def test_asset_upsert_and_get_roundtrip(storage: Storage) -> None:
     assert isinstance(fetched.media_meta, ImageMediaMeta)
     assert fetched.media_meta.width == 100
     assert fetched.media_meta.height == 80
+
+
+async def test_get_assets_batch_drops_missing_ids(storage: Storage) -> None:
+    """``get_assets`` is the batch equivalent of ``get_asset``. Single
+    SQL round-trip — the search path needs every retrieved chunk's
+    asset bundle, and N+1 ``get_asset`` over a shared sqlite connection
+    has tripped sqlite3.InterfaceError on real workloads.
+    """
+    a = _make_asset("aaaa1234" + "0" * 56, original_path="a.png")
+    b = _make_asset("bbbb5678" + "0" * 56, original_path="b.png")
+    try:
+        await storage.upsert_asset(a)
+    except NotSupported:
+        pytest.skip("backend doesn't implement assets yet")
+    await storage.upsert_asset(b)
+
+    fetched = await storage.get_assets(
+        [a.asset_id, b.asset_id, "ffff0000" + "0" * 56]
+    )
+    by_id = {x.asset_id: x for x in fetched}
+    assert set(by_id.keys()) == {a.asset_id, b.asset_id}
+    assert by_id[a.asset_id].original_paths == ["a.png"]
+    assert by_id[b.asset_id].original_paths == ["b.png"]
+    # Empty input is a no-op — equivalent to ``get_chunks([])``.
+    assert await storage.get_assets([]) == []
 
 
 async def test_asset_media_meta_none_round_trips(storage: Storage) -> None:

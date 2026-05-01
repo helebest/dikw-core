@@ -39,7 +39,7 @@ from dikw_core.eval.dataset import DatasetSpec, load_dataset
 from dikw_core.eval.runner import (
     NegativeRow,
     PerQueryRow,
-    _compute_metrics,
+    _compute_view_metrics,
     _resolve_modes,
 )
 from dikw_core.info.search import HybridSearcher, RetrievalMode
@@ -186,13 +186,18 @@ async def replay(wiki: Path, dataset_name_or_path: str, mode: str) -> int:
                     seen.add(stem)
                     ranked_stems.append(stem)
                 if q.expect_none:
-                    negatives.append(NegativeRow(q=q.q, ranked=ranked_stems))
+                    negatives.append(NegativeRow(q=q.q, ranked=tuple(ranked_stems)))
                 else:
                     positives.append(
                         PerQueryRow(
                             q=q.q,
-                            expect_any=list(q.expect_any),
-                            ranked=ranked_stems,
+                            q_id=q.id,
+                            expect_doc_any=tuple(q.doc_positives),
+                            expect_chunk_any=(),
+                            expect_asset_any=(),
+                            ranked_docs=tuple(ranked_stems),
+                            ranked_chunks=(),
+                            ranked_assets=(),
                         )
                     )
             per_mode[m] = (positives, negatives)
@@ -203,12 +208,12 @@ async def replay(wiki: Path, dataset_name_or_path: str, mode: str) -> int:
     canonical_pos = per_mode[canonical][0]
     metrics: dict[str, float] = {}
     if len(modes) == 1:
-        metrics.update(_compute_metrics(canonical_pos))
+        metrics.update(_compute_view_metrics(canonical_pos, view="doc"))
     else:
         for m in modes:
-            for k, v in _compute_metrics(per_mode[m][0]).items():
+            for k, v in _compute_view_metrics(per_mode[m][0], view="doc").items():
                 metrics[f"{m}/{k}"] = v
-        metrics.update(_compute_metrics(canonical_pos))
+        metrics.update(_compute_view_metrics(canonical_pos, view="doc"))
 
     print()
     print("=" * 70)

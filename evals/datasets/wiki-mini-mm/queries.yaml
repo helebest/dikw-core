@@ -1,0 +1,163 @@
+queries:
+- id: eiffel_doc
+  query_type: doc
+  q: What is the Eiffel Tower?
+  expect_any:
+  - eiffel_tower
+- id: eiffel_desc
+  query_type: text_chunk
+  q: Who built the Eiffel Tower and when?
+  expect_any:
+  - eiffel_tower
+  expect_chunk_any:
+  - eiffel_tower.description
+- id: eiffel_img_asset
+  query_type: asset
+  q: Find the photograph of the Eiffel Tower
+  expect_any:
+  - eiffel_tower
+  expect_asset_any:
+  - eiffel_tower.image
+- id: eiffel_img_chunk
+  query_type: text_chunk
+  q: section that shows the Eiffel Tower image
+  expect_any:
+  - eiffel_tower
+  expect_chunk_any:
+  - eiffel_tower.image_chunk
+- id: great_wall_doc
+  query_type: doc
+  q: ancient defensive wall in northern China
+  expect_any:
+  - great_wall_of_china
+- id: great_wall_desc
+  query_type: text_chunk
+  q: Why was the Great Wall of China built?
+  expect_any:
+  - great_wall_of_china
+  expect_chunk_any:
+  - great_wall_of_china.description
+- id: great_wall_img_asset
+  query_type: asset
+  q: photograph of the Great Wall winding over hills
+  expect_any:
+  - great_wall_of_china
+  expect_asset_any:
+  - great_wall_of_china.image
+- id: great_wall_img_chunk
+  query_type: text_chunk
+  q: section with the Great Wall photograph
+  expect_any:
+  - great_wall_of_china
+  expect_chunk_any:
+  - great_wall_of_china.image_chunk
+- id: fuji_doc
+  query_type: doc
+  q: tallest mountain in Japan
+  expect_any:
+  - mount_fuji
+- id: fuji_desc
+  query_type: text_chunk
+  q: Where is Mount Fuji located and how tall is it?
+  expect_any:
+  - mount_fuji
+  expect_chunk_any:
+  - mount_fuji.description
+- id: fuji_img_asset
+  query_type: asset
+  q: snow-capped Mount Fuji photo
+  expect_any:
+  - mount_fuji
+  expect_asset_any:
+  - mount_fuji.image
+- id: fuji_img_chunk
+  query_type: text_chunk
+  q: section showing the Fuji image
+  expect_any:
+  - mount_fuji
+  expect_chunk_any:
+  - mount_fuji.image_chunk
+- id: lion_doc
+  query_type: doc
+  q: large African big cat species
+  expect_any:
+  - lion
+- id: lion_desc
+  query_type: text_chunk
+  q: What does the lion look like and where does it live?
+  expect_any:
+  - lion
+  expect_chunk_any:
+  - lion.description
+- id: lion_img_asset
+  query_type: asset
+  q: photograph of a lion with a mane
+  expect_any:
+  - lion
+  expect_asset_any:
+  - lion.image
+- id: lion_img_chunk
+  query_type: text_chunk
+  q: section that displays the lion picture
+  expect_any:
+  - lion
+  expect_chunk_any:
+  - lion.image_chunk
+- id: sushi_doc
+  query_type: doc
+  q: Japanese rice and seafood dish
+  expect_any:
+  - sushi
+- id: sushi_desc
+  query_type: text_chunk
+  q: What ingredients does sushi traditionally use?
+  expect_any:
+  - sushi
+  expect_chunk_any:
+  - sushi.description
+- id: sushi_img_asset
+  query_type: asset
+  q: photo of sushi pieces on a plate
+  expect_any:
+  - sushi
+  expect_asset_any:
+  - sushi.image
+- id: sushi_img_chunk
+  query_type: text_chunk
+  q: section presenting the sushi photograph
+  expect_any:
+  - sushi
+  expect_chunk_any:
+  - sushi.image_chunk
+- id: mona_lisa_doc
+  query_type: doc
+  q: famous Renaissance portrait painted by Leonardo da Vinci
+  expect_any:
+  - mona_lisa
+- id: mona_lisa_desc
+  query_type: text_chunk
+  q: Who painted the Mona Lisa and where is it displayed?
+  expect_any:
+  - mona_lisa
+  expect_chunk_any:
+  - mona_lisa.description
+- id: mona_lisa_img_asset
+  query_type: asset
+  q: image of the Mona Lisa painting
+  expect_any:
+  - mona_lisa
+  expect_asset_any:
+  - mona_lisa.image
+- id: mona_lisa_img_chunk
+  query_type: text_chunk
+  q: section that contains the Mona Lisa image
+  expect_any:
+  - mona_lisa
+  expect_chunk_any:
+  - mona_lisa.image_chunk
+- id: neg_quantum
+  q: How does quantum entanglement work in superconductors?
+  expect_none: true
+- id: neg_python_async
+  q: Python asyncio event loop best practices
+  expect_none: true

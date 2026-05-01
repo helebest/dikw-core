@@ -1,0 +1,6 @@
+name: wiki-mini-mm
+description: Tiny public-licensed multimodal IR slice — six well-known Wikipedia articles
+  (landmarks, animals, food, art) each rendered as a 2-section markdown (Description
+  + Image) with the article's lead image from Wikimedia Commons. Text under CC-BY-SA-4.0;
+  image licenses vary per file (see ATTRIBUTION.md). Generated via evals/tools/convert_wiki_slice.py.
+thresholds: {}

@@ -749,43 +749,39 @@ async def ingest(
 
             await storage.upsert_document(_to_document(parsed, doc_id=doc_id))
 
-            # Materialize image references first so asset_ids are known
-            # when we wire up chunk_asset_refs after chunking. Dedupe by
-            # original_path so a doc that references the same image N
-            # times only reads + hashes the file once.
-            #
-            # Asset materialization requires a storage backend that
-            # implements the asset APIs. mm_cfg above is set to None
-            # when the backend raised NotSupported on upsert_embed_version,
-            # so this gate also degrades gracefully on filesystem /
-            # postgres until those adapters land their asset impls.
+            # Materialize image references before chunking so asset_ids
+            # are available when chunk_asset_refs land. Decoupled from
+            # mm_cfg so eval rigs see the chunk ↔ asset bridge even
+            # without multimodal embedding configured; backends that
+            # don't implement assets (e.g., filesystem) raise
+            # NotSupported on the first call and we drop refs silently.
             ref_assets: dict[int, AssetRecord] = {}
-            if mm_cfg is not None:
+            if parsed.asset_refs:
                 by_original_path: dict[str, AssetRecord] = {}
-                for ref_idx, ref in enumerate(parsed.asset_refs):
-                    cached = by_original_path.get(ref.original_path)
-                    if cached is not None:
-                        ref_assets[ref_idx] = cached
-                        continue
-                    result = await materialize_asset(
-                        ref,
-                        source_md_path=abs_path,
-                        project_root=root,
-                        get_asset=storage.get_asset,
-                        upsert_asset=storage.upsert_asset,
-                        dir_=cfg.assets.dir,
-                    )
-                    if result is not None:
-                        rec, was_new = result
-                        ref_assets[ref_idx] = rec
-                        by_original_path[ref.original_path] = rec
-                        # Only newly-materialized binaries need an
-                        # embedding pass — assets already in storage
-                        # from a prior run keep their existing vector,
-                        # so re-ingesting an unchanged image-heavy
-                        # corpus doesn't re-bill the multimodal API.
-                        if was_new:
-                            new_assets_by_id.setdefault(rec.asset_id, rec)
+                try:
+                    for ref_idx, ref in enumerate(parsed.asset_refs):
+                        cached = by_original_path.get(ref.original_path)
+                        if cached is not None:
+                            ref_assets[ref_idx] = cached
+                            continue
+                        result = await materialize_asset(
+                            ref,
+                            source_md_path=abs_path,
+                            project_root=root,
+                            get_asset=storage.get_asset,
+                            upsert_asset=storage.upsert_asset,
+                            dir_=cfg.assets.dir,
+                        )
+                        if result is not None:
+                            rec, was_new = result
+                            ref_assets[ref_idx] = rec
+                            by_original_path[ref.original_path] = rec
+                            # Only new binaries need an embedding pass;
+                            # existing rows keep their cached vector.
+                            if was_new and mm_cfg is not None:
+                                new_assets_by_id.setdefault(rec.asset_id, rec)
+                except NotSupported:
+                    ref_assets = {}
 
             atomic_spans = [(r.start, r.end) for r in parsed.asset_refs]
             chunks = chunk_markdown(

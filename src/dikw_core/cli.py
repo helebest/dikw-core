@@ -559,8 +559,10 @@ def eval_cmd(
     embedder = None
     provider_cfg = None
     retrieval_cfg = None
+    assets_cfg = None
+    multimodal_embedder = None
     if embedder_mode == "provider":
-        from .providers import build_embedder
+        from .providers import build_embedder, build_multimodal_embedder
 
         try:
             cfg, _root = api.load_wiki(wiki_path)
@@ -568,11 +570,18 @@ def eval_cmd(
             console.print(f"[red]error:[/red] {e}")
             raise typer.Exit(code=2) from e
         embedder = build_embedder(cfg.provider)
-        # Forward both config blocks — runner otherwise picks up
-        # RetrievalConfig() defaults and silently ignores per-wiki
-        # cjk_tokenizer / weight overrides.
+        # Forward all three config blocks — runner otherwise picks up
+        # RetrievalConfig() / AssetsConfig() defaults and silently
+        # disables per-wiki cjk_tokenizer / weight / multimodal overrides.
         provider_cfg = cfg.provider
         retrieval_cfg = cfg.retrieval
+        assets_cfg = cfg.assets
+        if cfg.assets.multimodal is not None:
+            multimodal_embedder = build_multimodal_embedder(
+                cfg.assets.multimodal.provider,
+                base_url=cfg.assets.multimodal.base_url,
+                batch=cfg.assets.multimodal.batch,
+            )
     elif embedder_mode != "fake":
         console.print(
             f"[red]error:[/red] --embedder must be 'fake' or 'provider', got {embedder_mode!r}"
@@ -588,6 +597,8 @@ def eval_cmd(
                     embedder=embedder,
                     provider_config=provider_cfg,
                     retrieval_config=retrieval_cfg,
+                    assets_config=assets_cfg,
+                    multimodal_embedder=multimodal_embedder,
                     mode=retrieval,  # type: ignore[arg-type]
                     raw_dump_path=dump_raw,
                     cache_mode=cache_mode,
@@ -640,9 +651,6 @@ def _collect_eval_specs(dataset: str | None) -> list[Any]:
     return specs
 
 
-_METRIC_KEYS = ("hit_at_3", "hit_at_10", "mrr", "ndcg_at_10", "recall_at_100")
-
-
 def _print_eval_report(report: Any) -> None:
     """Render an ``EvalReport`` as a rich table with per-metric verdict.
 
@@ -652,8 +660,10 @@ def _print_eval_report(report: Any) -> None:
       column per metric. Threshold gating still applies to the canonical
       (hybrid) mode via the unprefixed metric mirror.
     """
+    from .eval.runner import METRIC_KEYS
+
     title = f"dikw eval — {report.dataset_name}"
-    modes = list(getattr(report, "modes", []) or ["hybrid"])
+    modes = list(report.modes)
 
     if len(modes) > 1:
         ablation = Table(
@@ -662,11 +672,11 @@ def _print_eval_report(report: Any) -> None:
             header_style="bold",
         )
         ablation.add_column("mode")
-        for k in _METRIC_KEYS:
+        for k in METRIC_KEYS:
             ablation.add_column(k, justify="right")
         for m in modes:
             cells: list[str] = [m]
-            for k in _METRIC_KEYS:
+            for k in METRIC_KEYS:
                 v = report.metrics.get(f"{m}/{k}")
                 cells.append(f"{v:.3f}" if v is not None else "-")
             ablation.add_row(*cells)
@@ -677,11 +687,7 @@ def _print_eval_report(report: Any) -> None:
     table.add_column("value", justify="right")
     table.add_column("threshold", justify="right")
     table.add_column("result")
-    for key in _METRIC_KEYS:
-        if key not in report.metrics and key not in report.thresholds:
-            continue
-        val = report.metrics.get(key)
-        thr = report.thresholds.get(key)
+    for key, val, thr in report.iter_metric_rows():
         val_str = f"{val:.3f}" if val is not None else "-"
         thr_str = f"{thr:.3f}" if thr is not None else "-"
         if thr is None or val is None:

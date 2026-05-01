@@ -375,17 +375,7 @@ class PostgresStorage:
                 (version_id,),
             )
             rows = await cur.fetchall()
-        return [
-            ChunkRecord(
-                chunk_id=int(r[0]),
-                doc_id=r[1],
-                seq=int(r[2]),
-                start=int(r[3]),
-                end=int(r[4]),
-                text=r[5],
-            )
-            for r in rows
-        ]
+        return [_row_to_chunk(r) for r in rows]
 
     async def get_chunk(self, chunk_id: int) -> ChunkRecord | None:
         async with self._acquire() as conn, conn.cursor() as cur:
@@ -395,16 +385,7 @@ class PostgresStorage:
                 (chunk_id,),
             )
             row = await cur.fetchone()
-        if row is None:
-            return None
-        return ChunkRecord(
-            chunk_id=int(row[0]),
-            doc_id=row[1],
-            seq=int(row[2]),
-            start=int(row[3]),
-            end=int(row[4]),
-            text=row[5],
-        )
+        return _row_to_chunk(row) if row is not None else None
 
     async def get_chunks(self, chunk_ids: Iterable[int]) -> list[ChunkRecord]:
         ids = list(chunk_ids)
@@ -417,17 +398,17 @@ class PostgresStorage:
                 (ids,),
             )
             rows = await cur.fetchall()
-        return [
-            ChunkRecord(
-                chunk_id=int(r[0]),
-                doc_id=r[1],
-                seq=int(r[2]),
-                start=int(r[3]),
-                end=int(r[4]),
-                text=r[5],
+        return [_row_to_chunk(r) for r in rows]
+
+    async def list_chunks(self, doc_id: str) -> list[ChunkRecord]:
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
+                "FROM chunks WHERE doc_id = %s ORDER BY seq",
+                (doc_id,),
             )
-            for r in rows
-        ]
+            rows = await cur.fetchall()
+        return [_row_to_chunk(r) for r in rows]
 
     async def fts_search(
         self, q: str, *, limit: int = 20, layer: Layer | None = None
@@ -818,6 +799,20 @@ class PostgresStorage:
             )
             row = await cur.fetchone()
         return _row_to_asset(row) if row else None
+
+    async def get_assets(self, asset_ids: Iterable[str]) -> list[AssetRecord]:
+        ids = list(asset_ids)
+        if not ids:
+            return []
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT asset_id, kind, mime, stored_path, "
+                "original_paths, bytes, media_meta, created_ts "
+                "FROM assets WHERE asset_id = ANY(%s)",
+                (ids,),
+            )
+            rows = await cur.fetchall()
+        return [_row_to_asset(r) for r in rows if r is not None]
 
     async def replace_chunk_asset_refs(
         self, chunk_id: int, refs: Sequence[ChunkAssetRef]
@@ -1254,6 +1249,18 @@ class _ConnectionContext:
 
 
 # ---- row → DTO helpers ---------------------------------------------------
+
+
+def _row_to_chunk(row: Any) -> ChunkRecord:
+    # Column order: chunk_id, doc_id, seq, start_off, end_off, text
+    return ChunkRecord(
+        chunk_id=int(row[0]),
+        doc_id=row[1],
+        seq=int(row[2]),
+        start=int(row[3]),
+        end=int(row[4]),
+        text=row[5],
+    )
 
 
 def _row_to_document(row: Any) -> DocumentRecord:

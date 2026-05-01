@@ -148,6 +148,28 @@ def dump_queries_yaml(
     return path
 
 
+def dump_targets_yaml(
+    out_dir: Path,
+    *,
+    assets: Sequence[Mapping[str, Any]] = (),
+    chunks: Sequence[Mapping[str, Any]] = (),
+) -> Path:
+    """Render ``targets.yaml`` (4-file dataset contract — see
+    ``eval/dataset.py:TargetsSpec``). Each entry is passed through
+    verbatim — converter shapes ``{id, doc, path, ...}`` per the schema.
+    """
+    payload = {
+        "assets": [dict(a) for a in assets],
+        "chunks": [dict(c) for c in chunks],
+    }
+    path = out_dir / "targets.yaml"
+    path.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    return path
+
+
 def ensure_clean_outdir(out_dir: Path) -> None:
     """Create ``out_dir/corpus/`` and refuse to clobber existing data.
 

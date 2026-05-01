@@ -31,8 +31,8 @@ def hit_at_k(ranked: Sequence[str], expected_any: Iterable[str], k: int) -> floa
 def reciprocal_rank(ranked: Sequence[str], expected_any: Iterable[str]) -> float:
     """1 / rank of the first ``expected_any`` match (1-indexed); 0.0 if none."""
     expected = set(expected_any)
-    for idx, doc_id in enumerate(ranked, start=1):
-        if doc_id in expected:
+    for idx, key in enumerate(ranked, start=1):
+        if key in expected:
             return 1.0 / idx
     return 0.0
 
@@ -49,8 +49,8 @@ def ndcg_at_k(ranked: Sequence[str], expected_any: Iterable[str], k: int) -> flo
     if not expected:
         return 0.0
     dcg = 0.0
-    for idx, doc_id in enumerate(ranked[:k], start=1):
-        if doc_id in expected:
+    for idx, key in enumerate(ranked[:k], start=1):
+        if key in expected:
             dcg += 1.0 / math.log2(idx + 1)
     n_rel = min(len(expected), k)
     idcg = sum(1.0 / math.log2(i + 1) for i in range(1, n_rel + 1))

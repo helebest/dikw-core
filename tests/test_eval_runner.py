@@ -64,13 +64,23 @@ async def test_run_eval_returns_report_with_metrics_and_passed_flag(
     report = await run_eval(spec)
 
     assert isinstance(report, EvalReport)
+    # Doc-only dataset (no targets.yaml) emits the 5 unprefixed legacy
+    # keys plus their ``doc/`` namespaced aliases — same numbers under
+    # both shapes so back-compat thresholds keep working.
     assert set(report.metrics.keys()) == {
         "hit_at_3",
         "hit_at_10",
         "mrr",
         "ndcg_at_10",
         "recall_at_100",
+        "doc/hit_at_3",
+        "doc/hit_at_10",
+        "doc/mrr",
+        "doc/ndcg_at_10",
+        "doc/recall_at_100",
     }
+    for metric in ("hit_at_3", "hit_at_10", "mrr", "ndcg_at_10", "recall_at_100"):
+        assert report.metrics[metric] == report.metrics[f"doc/{metric}"]
     assert all(0.0 <= v <= 1.0 for v in report.metrics.values())
     # FakeEmbeddings' bag-of-words on a 2-doc corpus with keyword-rich
     # queries should land cleanly in top-3.
@@ -457,6 +467,322 @@ async def test_run_eval_ranked_docs_deduped_after_chunk_level_fusion(
     )
 
 
+# ---- chunk + asset views (4-file dataset contract) -----------------------
+
+
+def _write_mm_dataset_with_targets(root: Path) -> Path:
+    """3-doc / 6-image / 12-query multimodal dataset with targets.yaml.
+
+    Each doc has two H2 sections, each section has its own image. Queries
+    cover all three views (doc / chunk / asset) plus a negative.
+    """
+    ds = root / "mm-mini"
+    corpus = ds / "corpus"
+    (corpus / "images").mkdir(parents=True, exist_ok=True)
+
+    # Three category docs, each with two H2 sections padded long enough
+    # that the heading-aware chunker actually splits them — otherwise
+    # multiple anchors collapse into one chunk and the runner loud-fails
+    # on collision (the "loud failure" path is exercised by
+    # ``test_run_eval_chunk_target_collision_raises``).
+    # ~300+ token padding per section so the heading-aware chunker
+    # crosses its overlap budget (135 tokens at default max_tokens=900,
+    # overlap_ratio=0.15) and forces a split at each H2. Built as ~30
+    # short paragraphs of distinct filler words.
+    pad = "\n\n".join(
+        f"Filler paragraph number {i} contains lorem ipsum dolor sit amet "
+        f"consectetur adipiscing elit alpha bravo charlie delta echo "
+        f"foxtrot golf hotel india juliet kilo lima mike november."
+        for i in range(15)
+    ) + "\n\n"
+    docs = {
+        "fruits": (
+            "# Fruits\n\n"
+            "## 苹果 / Apple\n\n"
+            "Target: fruits.apple\n\n"
+            "Apple section: red round fruit, green leaves, sweet flavor.\n\n"
+            f"{pad}"
+            "![apple](images/fruits-apple.png)\n\n"
+            "## 香蕉 / Banana\n\n"
+            "Target: fruits.banana\n\n"
+            "Banana section: long curved yellow tropical fruit.\n\n"
+            f"{pad}"
+            "![banana](images/fruits-banana.png)\n"
+        ),
+        "animals": (
+            "# Animals\n\n"
+            "## 猫 / Cat\n\n"
+            "Target: animals.cat\n\n"
+            "Cat section: feline whiskers triangular ears purring pet.\n\n"
+            f"{pad}"
+            "![cat](images/animals-cat.png)\n\n"
+            "## 狗 / Dog\n\n"
+            "Target: animals.dog\n\n"
+            "Dog section: canine loyal companion barking wagging tail.\n\n"
+            f"{pad}"
+            "![dog](images/animals-dog.png)\n"
+        ),
+        "vehicles": (
+            "# Vehicles\n\n"
+            "## 汽车 / Car\n\n"
+            "Target: vehicles.car\n\n"
+            "Car section: four-wheel road automobile passenger driving.\n\n"
+            f"{pad}"
+            "![car](images/vehicles-car.png)\n\n"
+            "## 公交 / Bus\n\n"
+            "Target: vehicles.bus\n\n"
+            "Bus section: large public transport multiple seats route.\n\n"
+            f"{pad}"
+            "![bus](images/vehicles-bus.png)\n"
+        ),
+    }
+    for stem, body in docs.items():
+        (corpus / f"{stem}.md").write_text(body, encoding="utf-8")
+
+    # Distinct fake-PNG bytes per image (not real PNGs — markdown ingest
+    # detects MIME from magic bytes; we need a valid header so
+    # ``materialize_asset`` doesn't reject as "unrecognized format").
+    png_header = bytes(
+        [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  # PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,  # IHDR chunk
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,  # 1x1
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+            0x89,
+        ]
+    )
+    image_names = [
+        "fruits-apple", "fruits-banana",
+        "animals-cat", "animals-dog",
+        "vehicles-car", "vehicles-bus",
+    ]
+    for i, name in enumerate(image_names):
+        # Append a unique tail so each image has a distinct sha256.
+        (corpus / "images" / f"{name}.png").write_bytes(
+            png_header + bytes([i, i, i, i])
+        )
+
+    (ds / "dataset.yaml").write_text(
+        "name: mm-mini\n"
+        "description: hermetic multimodal fixture\n"
+        "thresholds:\n"
+        "  hit_at_3: 0.5\n"
+        "  chunk/hit_at_3: 0.4\n",
+        encoding="utf-8",
+    )
+    (ds / "targets.yaml").write_text(
+        "assets:\n"
+        "  - id: fruits.apple.image\n    doc: fruits\n    path: images/fruits-apple.png\n    anchor: fruits.apple\n"
+        "  - id: fruits.banana.image\n    doc: fruits\n    path: images/fruits-banana.png\n    anchor: fruits.banana\n"
+        "  - id: animals.cat.image\n    doc: animals\n    path: images/animals-cat.png\n    anchor: animals.cat\n"
+        "  - id: animals.dog.image\n    doc: animals\n    path: images/animals-dog.png\n    anchor: animals.dog\n"
+        "  - id: vehicles.car.image\n    doc: vehicles\n    path: images/vehicles-car.png\n    anchor: vehicles.car\n"
+        "  - id: vehicles.bus.image\n    doc: vehicles\n    path: images/vehicles-bus.png\n    anchor: vehicles.bus\n"
+        "chunks:\n"
+        "  - id: fruits.apple.text\n    doc: fruits\n    anchor: fruits.apple\n    asset_id: fruits.apple.image\n"
+        "  - id: fruits.banana.text\n    doc: fruits\n    anchor: fruits.banana\n    asset_id: fruits.banana.image\n"
+        "  - id: animals.cat.text\n    doc: animals\n    anchor: animals.cat\n    asset_id: animals.cat.image\n"
+        "  - id: animals.dog.text\n    doc: animals\n    anchor: animals.dog\n    asset_id: animals.dog.image\n"
+        "  - id: vehicles.car.text\n    doc: vehicles\n    anchor: vehicles.car\n    asset_id: vehicles.car.image\n"
+        "  - id: vehicles.bus.text\n    doc: vehicles\n    anchor: vehicles.bus\n    asset_id: vehicles.bus.image\n",
+        encoding="utf-8",
+    )
+    # Mix of doc-only / chunk / asset queries.
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - id: q-doc-fruits\n    q: red round fruit sweet\n    expect_any: [fruits]\n"
+        "  - id: q-chunk-apple\n    query_type: text_chunk\n    q: red round fruit\n"
+        "    expect_any: [fruits]\n    expect_chunk_any: [fruits.apple.text]\n"
+        "  - id: q-chunk-banana\n    query_type: text_chunk\n    q: long curved yellow\n"
+        "    expect_any: [fruits]\n    expect_chunk_any: [fruits.banana.text]\n"
+        "  - id: q-asset-apple\n    query_type: asset\n    q: apple image\n"
+        "    expect_any: [fruits]\n    expect_asset_any: [fruits.apple.image]\n",
+        encoding="utf-8",
+    )
+    return ds
+
+
+@pytest.mark.asyncio
+async def test_run_eval_emits_chunk_and_asset_view_metrics(
+    tmp_path: Path,
+) -> None:
+    """A 4-file dataset (with targets.yaml) produces ``chunk/<metric>``
+    and ``asset/<metric>`` keys alongside the legacy unprefixed doc
+    metrics. The view list reflects what was actually scored.
+    """
+    ds = _write_mm_dataset_with_targets(tmp_path)
+    spec = load_dataset(ds)
+    report = await run_eval(spec)
+
+    # Doc view back-compat.
+    assert "hit_at_3" in report.metrics
+    assert "doc/hit_at_3" in report.metrics
+    assert report.metrics["hit_at_3"] == report.metrics["doc/hit_at_3"]
+
+    # Chunk view emitted (queries opted in via expect_chunk_any).
+    assert "chunk/hit_at_3" in report.metrics
+    assert "chunk/mrr" in report.metrics
+    assert 0.0 <= report.metrics["chunk/hit_at_3"] <= 1.0
+
+    # Asset view emitted (queries opted in via expect_asset_any).
+    assert "asset/hit_at_3" in report.metrics
+    assert 0.0 <= report.metrics["asset/hit_at_3"] <= 1.0
+
+    # Views list reflects what was scored.
+    assert sorted(report.views) == ["asset", "chunk", "doc"]
+
+
+@pytest.mark.asyncio
+async def test_run_eval_targets_yaml_anchor_resolution_loud_failure(
+    tmp_path: Path,
+) -> None:
+    """Anchor missing from doc body → EvalError at runtime (not a
+    silent zero score). Eval datasets are authored, mismatches must surface.
+    """
+    ds = _write_mm_dataset_with_targets(tmp_path)
+    # Use a fixture variant where the queries reference a single
+    # chunk-target whose anchor is corrupted. Loader-time named-id
+    # validation passes (the id exists in targets.yaml), but the
+    # runner's anchor-resolver loud-fails when it scans the doc body
+    # — which is the path under test here.
+    (ds / "targets.yaml").write_text(
+        "assets: []\n"
+        "chunks:\n"
+        "  - id: fruits.apple.text\n    doc: fruits\n    anchor: completely.missing.anchor\n",
+        encoding="utf-8",
+    )
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - id: q-chunk\n"
+        "    q: section about apples\n"
+        "    expect_any: [fruits]\n"
+        "    expect_chunk_any: [fruits.apple.text]\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    with pytest.raises(EvalError, match="anchor"):
+        await run_eval(spec)
+
+
+@pytest.mark.asyncio
+async def test_run_eval_threads_multimodal_config_into_temp_wiki(
+    tmp_path: Path,
+) -> None:
+    """When ``assets_config`` is passed, the temp wiki's ``dikw.yml``
+    must carry the same ``assets.multimodal`` block — otherwise
+    ``HybridSearcher`` builds without an asset leg and the asset
+    metrics would silently fall back to chunk-promoted refs only.
+    """
+    from dikw_core import api as api_mod
+    from dikw_core.config import (
+        AssetsConfig,
+        MultimodalEmbedConfig,
+        load_config,
+    )
+
+    ds = _write_mm_dataset_with_targets(tmp_path)
+    spec = load_dataset(ds)
+
+    assets_cfg = AssetsConfig(
+        multimodal=MultimodalEmbedConfig(
+            provider="gitee_multimodal",
+            model="qwen3-vl-fake",
+            dim=4,
+        )
+    )
+
+    captured_cfgs: list[dict[str, object]] = []
+
+    # Stop after _materialise_wiki + _copy_corpus run by intercepting
+    # api.ingest — we only need to verify the wiki's dikw.yml shape.
+    real_ingest = api_mod.ingest
+
+    async def _capture_ingest(wiki, **kwargs):  # type: ignore[no-untyped-def]
+        cfg = load_config(wiki / "dikw.yml")
+        captured_cfgs.append(
+            {
+                "mm_provider": cfg.assets.multimodal.provider if cfg.assets.multimodal else None,
+                "mm_model": cfg.assets.multimodal.model if cfg.assets.multimodal else None,
+                "mm_dim": cfg.assets.multimodal.dim if cfg.assets.multimodal else None,
+            }
+        )
+        # Skip real ingest; we only care that the cfg landed correctly.
+        from dikw_core.api import IngestReport
+        return IngestReport(scanned=0, added=0, updated=0, unchanged=0, chunks=0, embedded=0)
+
+    api_mod.ingest = _capture_ingest  # type: ignore[assignment]
+    try:
+        # Will fail downstream (no chunks ingested) — that's fine,
+        # we only need the cfg-write step to land.
+        with pytest.raises(EvalError):
+            await run_eval(spec, assets_config=assets_cfg, cache_mode="off")
+    finally:
+        api_mod.ingest = real_ingest  # type: ignore[assignment]
+
+    assert len(captured_cfgs) == 1
+    assert captured_cfgs[0]["mm_provider"] == "gitee_multimodal"
+    assert captured_cfgs[0]["mm_model"] == "qwen3-vl-fake"
+    assert captured_cfgs[0]["mm_dim"] == 4
+
+
+@pytest.mark.asyncio
+async def test_run_eval_chunk_target_collision_raises(tmp_path: Path) -> None:
+    """Two chunk targets resolving to the same runtime ``(doc, seq)`` —
+    the chunker fit both anchors into one chunk — must loud-fail with
+    EvalError. Silent collapse would make chunk-level metrics quietly
+    wrong (an earlier-named target would become unreachable even when
+    its chunk ranks first).
+    """
+    # Tiny doc: two H2 sections short enough that the heading-aware
+    # chunker keeps both in chunk 0 (single accumulator under
+    # max_overlap). Both anchors then resolve to ``(toy, 0)``.
+    ds = tmp_path / "collide"
+    (ds / "corpus").mkdir(parents=True)
+    (ds / "corpus" / "toy.md").write_text(
+        "# Toy\n\n"
+        "## Section A\n\nTarget: toy.a\n\nApples are red.\n\n"
+        "## Section B\n\nTarget: toy.b\n\nBananas are yellow.\n",
+        encoding="utf-8",
+    )
+    (ds / "dataset.yaml").write_text("name: collide\nthresholds: {}\n", encoding="utf-8")
+    (ds / "targets.yaml").write_text(
+        "assets: []\nchunks:\n"
+        "  - id: toy.a.text\n    doc: toy\n    anchor: toy.a\n"
+        "  - id: toy.b.text\n    doc: toy\n    anchor: toy.b\n",
+        encoding="utf-8",
+    )
+    (ds / "queries.yaml").write_text(
+        "queries:\n  - q: anything\n    expect_any: [toy]\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    with pytest.raises(EvalError, match="collision"):
+        await run_eval(spec)
+
+
+@pytest.mark.asyncio
+async def test_run_eval_thresholds_namespaced_chunk_view_gates_pass_fail(
+    tmp_path: Path,
+) -> None:
+    """Setting ``chunk/hit_at_3`` in dataset.yaml gates ``passed`` against
+    the chunk view's metric, independent of the doc-view threshold.
+    """
+    ds = _write_mm_dataset_with_targets(tmp_path)
+    # ``passed`` is computed against ``self.metrics``; setting a threshold
+    # above any achievable score (max metric value is 1.0) forces the
+    # gate to fail. ``_parse_thresholds`` doesn't bound > 1.0 because
+    # the runner deliberately stays metric-agnostic.
+    (ds / "dataset.yaml").write_text(
+        "name: mm-mini\nthresholds:\n  chunk/hit_at_3: 1.5\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    report = await run_eval(spec)
+    # Chunk threshold is unattainable → passed must be False even if
+    # the doc view is perfect.
+    assert report.passed is False
+
+
 # ---- Slice 6: eval-snapshot cache (D1-D5) -------------------------------
 
 
@@ -490,6 +816,13 @@ async def test_corpus_cache_key_is_deterministic_and_path_stable(
     # Format sanity.
     assert k1.startswith("toy/fake__64__")
     assert "__sf" in k1
+
+    # Different multimodal fingerprint → different key (text-only and
+    # multimodal eval runs against the same corpus must NOT share a
+    # snapshot — the asset index lives in different vec tables).
+    k5 = _corpus_cache_key(spec, "fake", 64, mm_fingerprint="qwen3-vl-8b@4096")
+    assert k5 != k1
+    assert "__mmqwen3-vl-8b@4096__" in k5
 
 
 async def test_eval_snapshot_cache_hit_skips_ingest(

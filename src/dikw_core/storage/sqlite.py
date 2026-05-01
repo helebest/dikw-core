@@ -454,16 +454,19 @@ class SQLiteStorage:
                 "FROM chunks WHERE chunk_id = ?",
                 (chunk_id,),
             ).fetchone()
-            if row is None:
-                return None
-            return ChunkRecord(
-                chunk_id=row["chunk_id"],
-                doc_id=row["doc_id"],
-                seq=row["seq"],
-                start=row["start_off"],
-                end=row["end_off"],
-                text=row["text"],
-            )
+            return _row_to_chunk(row) if row is not None else None
+
+        return await asyncio.to_thread(_run)
+
+    async def list_chunks(self, doc_id: str) -> list[ChunkRecord]:
+        def _run() -> list[ChunkRecord]:
+            conn = self._require_conn()
+            rows = conn.execute(
+                "SELECT chunk_id, doc_id, seq, start_off, end_off, text "
+                "FROM chunks WHERE doc_id = ? ORDER BY seq",
+                (doc_id,),
+            ).fetchall()
+            return [_row_to_chunk(r) for r in rows]
 
         return await asyncio.to_thread(_run)
 
@@ -480,17 +483,7 @@ class SQLiteStorage:
                 f"FROM chunks WHERE chunk_id IN ({placeholders})",
                 ids,
             ).fetchall()
-            return [
-                ChunkRecord(
-                    chunk_id=row["chunk_id"],
-                    doc_id=row["doc_id"],
-                    seq=row["seq"],
-                    start=row["start_off"],
-                    end=row["end_off"],
-                    text=row["text"],
-                )
-                for row in rows
-            ]
+            return [_row_to_chunk(r) for r in rows]
 
         return await asyncio.to_thread(_run)
 
@@ -851,6 +844,22 @@ class SQLiteStorage:
                 "SELECT * FROM assets WHERE asset_id = ?", (asset_id,)
             ).fetchone()
             return _row_to_asset(row) if row is not None else None
+
+        return await asyncio.to_thread(_run)
+
+    async def get_assets(self, asset_ids: Iterable[str]) -> list[AssetRecord]:
+        ids = list(asset_ids)
+        if not ids:
+            return []
+
+        def _run() -> list[AssetRecord]:
+            conn = self._require_conn()
+            placeholders = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT * FROM assets WHERE asset_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            return [_row_to_asset(r) for r in rows]
 
         return await asyncio.to_thread(_run)
 
@@ -1471,6 +1480,17 @@ def _knn(
             continue
         ranked.append((int(r["rowid"]), df))
     return ranked
+
+
+def _row_to_chunk(row: sqlite3.Row) -> ChunkRecord:
+    return ChunkRecord(
+        chunk_id=row["chunk_id"],
+        doc_id=row["doc_id"],
+        seq=row["seq"],
+        start=row["start_off"],
+        end=row["end_off"],
+        text=row["text"],
+    )
 
 
 def _row_to_document(row: sqlite3.Row) -> DocumentRecord:

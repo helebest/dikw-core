@@ -7,6 +7,95 @@ regression from a re-run variance.
 Newest first. `dikw eval` thresholds in each dataset's `dataset.yaml`
 are calibrated ~2-3 % below the most recent canonical-mode run.
 
+## 2026-05-01 — wiki-mini-mm: chunk + asset views, real Qwen3-VL-Embedding-8B
+
+**Status:** first end-to-end real-vector multimodal eval after the PR1
++ PR2 landing (chunk + asset views + 4-file dataset contract). Pins the
+current behavior for the public-licensed Wikipedia slice so a future
+regression in the multimodal fusion path or chunker boundaries is
+measurable.
+
+### Run shape
+
+- **Dataset:** `evals/datasets/wiki-mini-mm/` — 6 Wikipedia article
+  summaries (Eiffel Tower, Great Wall of China, Mount Fuji, Lion,
+  Sushi, Mona Lisa), each with one Commons lead image. 6 docs / 6
+  images / 26 hand-authored queries (24 positive across doc + chunk +
+  asset views, 2 negative).
+- **Wiki cfg:** Gitee AI endpoints, `Qwen3-Embedding-0.6B` (text,
+  dim=1024) + `Qwen3-VL-Embedding-8B` (multimodal, dim=1024), RRF
+  fusion (`bm25_weight=0.3`, `vector_weight=1.5`, `rrf_k=60`),
+  `cjk_tokenizer=jieba`. CLI:
+  ```
+  dikw eval --dataset wiki-mini-mm --embedder provider \
+            --path <wiki-with-mm-cfg> --no-cache
+  ```
+- **Walltime:** ~3 min including image embed pass (6 images × Qwen3-VL-8B
+  via Gitee). Runs against `HTTPS_PROXY=http://localhost:1235`.
+
+### Results (canonical hybrid mode)
+
+```
+              dikw eval — wiki-mini-mm  (real Qwen3-VL-Embedding-8B)
+┌─────────────────────┬───────┐
+│ metric              │ value │
+├─────────────────────┼───────┤
+│ doc/hit_at_3        │ 1.000 │
+│ doc/hit_at_10       │ 1.000 │
+│ doc/mrr             │ 1.000 │
+│ doc/ndcg_at_10      │ 1.000 │
+│ doc/recall_at_100   │ 1.000 │
+│ chunk/hit_at_3      │ 0.500 │
+│ chunk/hit_at_10     │ 1.000 │
+│ chunk/mrr           │ 0.571 │
+│ chunk/ndcg_at_10    │ 0.667 │
+│ chunk/recall_at_100 │ 1.000 │
+│ asset/hit_at_3      │ 1.000 │
+│ asset/hit_at_10     │ 1.000 │
+│ asset/mrr           │ 1.000 │
+│ asset/ndcg_at_10    │ 1.000 │
+│ asset/recall_at_100 │ 1.000 │
+└─────────────────────┴───────┘
+```
+
+### Reading
+
+- **Doc + asset views are perfect** — the 6 Wikipedia articles are well
+  separated semantically (doc/mrr=1.000), and Qwen3-VL-8B finds the
+  matching lead image at rank-1 for every image-targeted query
+  (asset/mrr=1.000). The multimodal leg works end-to-end against
+  Gitee's hosted endpoint.
+- **Chunk view is intentionally weaker** — each article has only two
+  chunks (Description / Image), and the queries split evenly between
+  them. Real Qwen embeddings rank both chunks closely for image-
+  targeted queries (the Image section paragraph is short and shares
+  topic vocabulary), so chunk/hit_at_3 lands near 0.5. Hermetic
+  `FakeEmbeddings` actually scores 0.667 on the same dataset because
+  bag-of-words breaks ties differently. This is a property of the
+  dataset's tight chunk structure, not a regression.
+- **Negatives** — 2 OOD queries return top-3 doc lists (retrieval has
+  no "no match" mode); `negative_diagnostics` surfaces them but they
+  do not enter the metric averages.
+
+### Reproducer
+
+```bash
+WIKI=$HOME/.dikw-mm-eval-wiki
+mkdir -p "$WIKI/sources" && dikw init --path "$WIKI"
+# Edit $WIKI/dikw.yml: provider.embedding_base_url=https://ai.gitee.com/v1,
+# embedding_model=Qwen3-Embedding-0.6B, embedding_dim=1024,
+# assets.multimodal: { provider: gitee_multimodal,
+#   model: Qwen3-VL-Embedding-8B, dim: 1024, base_url: https://ai.gitee.com/v1 }
+set -a && source .env && set +a
+dikw eval --dataset wiki-mini-mm --embedder provider \
+          --path "$WIKI" --no-cache
+```
+
+`dataset.yaml` thresholds are intentionally empty — this dataset is a
+demo / regression guard, not a calibrated gate. Future PRs that touch
+fusion, chunker, or asset embedding should re-run and update the table
+above (with delta vs prior run if non-trivial).
+
 ## 2026-04-28 — Fusion mode A/B/C: RRF vs CombSUM vs CombMNZ
 
 **Status:** experimental run, **not** a new canonical baseline. PR #32

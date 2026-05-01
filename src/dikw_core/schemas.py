@@ -128,10 +128,12 @@ class VecHit(BaseModel):
 class Hit(BaseModel):
     """One fused search result.
 
-    ``chunk_id`` is non-optional: chunk-level fusion produces one hit per
-    chunk, so every result is anchored to a concrete chunk. ``seq`` is
-    the chunk's ordinal within its document — useful for disambiguating
-    multiple hits from the same document in CLI / MCP output.
+    Anchored to a concrete chunk (``chunk_id`` is required); ``seq``
+    is the chunk's ordinal within its document — used for
+    disambiguating multiple hits from the same document and for
+    eval-side ``(path, seq) → named-id`` resolution. Image references
+    appear via ``asset_refs``; per-asset retrieval as a first-class
+    Hit kind is reserved for a follow-up PR.
     """
 
     doc_id: str

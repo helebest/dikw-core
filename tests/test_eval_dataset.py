@@ -177,3 +177,194 @@ def test_load_dataset_name_not_found_raises(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr("dikw_core.eval.dataset.datasets_root", lambda: tmp_path)
     with pytest.raises(DatasetError, match="no such dataset"):
         load_dataset("does-not-exist")
+
+
+# ---- 4-file contract: targets.yaml + chunk/asset views --------------------
+
+
+def _write_mm_dataset(root: Path) -> Path:
+    """Minimal 4-file (dataset+corpus+targets+queries) dataset for tests."""
+    ds = root / "mm-toy"
+    corpus = ds / "corpus"
+    (corpus / "images").mkdir(parents=True, exist_ok=True)
+    (corpus / "alpha.md").write_text(
+        "# Alpha doc\n\n"
+        "## 第一节 / Section One\n\nTarget: alpha.s1\n\n"
+        "Section one talks about apples.\n\n"
+        "## 第二节 / Section Two\n\nTarget: alpha.s2\n\n"
+        "Section two covers oranges.\n",
+        encoding="utf-8",
+    )
+    (corpus / "images" / "img-a.png").write_bytes(b"fake-png-bytes-A")
+    (corpus / "images" / "img-b.png").write_bytes(b"fake-png-bytes-B")
+    (ds / "dataset.yaml").write_text(
+        "name: mm-toy\nthresholds:\n  hit_at_3: 0.5\n  chunk/hit_at_3: 0.4\n",
+        encoding="utf-8",
+    )
+    (ds / "targets.yaml").write_text(
+        "assets:\n"
+        "  - id: alpha.s1.image\n"
+        "    doc: alpha\n"
+        "    path: images/img-a.png\n"
+        "    heading: 'Section One'\n"
+        "    anchor: alpha.s1\n"
+        "  - id: alpha.s2.image\n"
+        "    doc: alpha\n"
+        "    path: images/img-b.png\n"
+        "    heading: 'Section Two'\n"
+        "    anchor: alpha.s2\n"
+        "chunks:\n"
+        "  - id: alpha.s1.text\n"
+        "    doc: alpha\n"
+        "    heading: 'Section One'\n"
+        "    anchor: alpha.s1\n"
+        "    asset_id: alpha.s1.image\n"
+        "  - id: alpha.s2.text\n"
+        "    doc: alpha\n"
+        "    heading: 'Section Two'\n"
+        "    anchor: alpha.s2\n"
+        "    asset_id: alpha.s2.image\n",
+        encoding="utf-8",
+    )
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - id: q-doc\n"
+        "    q: what does alpha doc cover\n"
+        "    expect_any: [alpha]\n"
+        "  - id: q-chunk\n"
+        "    query_type: text_chunk\n"
+        "    q: section about apples\n"
+        "    expect_any: [alpha]\n"
+        "    expect_chunk_any: [alpha.s1.text]\n"
+        "  - id: q-asset\n"
+        "    query_type: asset\n"
+        "    q: image of section two\n"
+        "    expect_any: [alpha]\n"
+        "    expect_asset_any: [alpha.s2.image]\n",
+        encoding="utf-8",
+    )
+    return ds
+
+
+def test_load_dataset_targets_yaml_optional_missing_ok(tmp_path: Path) -> None:
+    """Datasets without targets.yaml load fine; targets is empty."""
+    ds_dir = _write_valid_dataset(tmp_path)
+    spec = load_dataset(ds_dir)
+    assert spec.targets.assets == []
+    assert spec.targets.chunks == []
+
+
+def test_load_dataset_with_targets_parses_assets_and_chunks(
+    tmp_path: Path,
+) -> None:
+    ds_dir = _write_mm_dataset(tmp_path)
+    spec = load_dataset(ds_dir)
+    assert [a.id for a in spec.targets.assets] == [
+        "alpha.s1.image",
+        "alpha.s2.image",
+    ]
+    assert [c.id for c in spec.targets.chunks] == [
+        "alpha.s1.text",
+        "alpha.s2.text",
+    ]
+    assert spec.targets.chunks[0].asset_id == "alpha.s1.image"
+    # threshold key with view prefix accepted
+    assert spec.thresholds["chunk/hit_at_3"] == 0.4
+
+
+def test_query_expect_chunk_any_field() -> None:
+    q = Query(
+        q="x",
+        expect_any=["doc1"],
+        expect_chunk_any=["doc1.s1.text"],
+    )
+    assert q.expect_chunk_any == ["doc1.s1.text"]
+    assert q.doc_positives == ["doc1"]
+
+
+def test_query_expect_asset_any_field() -> None:
+    q = Query(q="x", expect_asset_any=["a.png.image"])
+    assert q.expect_asset_any == ["a.png.image"]
+    # asset-only positive is valid
+    assert q.doc_positives == []
+
+
+def test_query_rejects_both_expect_any_and_expect_doc_any() -> None:
+    """Legacy alias and explicit field set together is ambiguous."""
+    with pytest.raises(ValueError, match="legacy alias"):
+        Query(q="x", expect_any=["a"], expect_doc_any=["b"])
+
+
+def test_query_negative_with_any_positive_field_rejected() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Query(q="x", expect_none=True, expect_chunk_any=["c"])
+
+
+def test_query_with_only_chunk_positives_is_valid() -> None:
+    q = Query(q="x", expect_chunk_any=["c.x.text"])
+    # Pure chunk-level positive — legacy doc field empty is fine.
+    assert q.doc_positives == []
+    assert q.expect_chunk_any == ["c.x.text"]
+
+
+def test_thresholds_namespaced_view_key_unknown_view_raises(tmp_path: Path) -> None:
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  bogus/hit_at_3: 0.5\n", encoding="utf-8"
+    )
+    with pytest.raises(DatasetError, match="threshold view"):
+        load_dataset(ds)
+
+
+def test_thresholds_namespaced_view_unknown_metric_raises(tmp_path: Path) -> None:
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  chunk/bogus_metric: 0.5\n", encoding="utf-8"
+    )
+    with pytest.raises(DatasetError, match="threshold metric"):
+        load_dataset(ds)
+
+
+def test_targets_yaml_duplicate_asset_ids_rejected(tmp_path: Path) -> None:
+    ds = _write_mm_dataset(tmp_path)
+    (ds / "targets.yaml").write_text(
+        "assets:\n"
+        "  - id: dup.id\n    doc: alpha\n    path: images/img-a.png\n"
+        "  - id: dup.id\n    doc: alpha\n    path: images/img-b.png\n"
+        "chunks: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="duplicate asset"):
+        load_dataset(ds)
+
+
+def test_query_expect_chunk_any_unknown_target_rejected(tmp_path: Path) -> None:
+    """A typo in queries.yaml's expect_chunk_any must surface at load
+    time, not silently lower metrics. Mirrors the anchor-resolution
+    loud-fail in the runner.
+    """
+    ds = _write_mm_dataset(tmp_path)
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - id: q-typo\n"
+        "    q: bogus chunk reference\n"
+        "    expect_any: [alpha]\n"
+        "    expect_chunk_any: [alpha.s9.text]\n",  # not in targets.yaml
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="unknown chunk targets"):
+        load_dataset(ds)
+
+
+def test_query_expect_asset_any_unknown_target_rejected(tmp_path: Path) -> None:
+    ds = _write_mm_dataset(tmp_path)
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - id: q-typo\n"
+        "    q: bogus asset reference\n"
+        "    expect_any: [alpha]\n"
+        "    expect_asset_any: [alpha.s9.image]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="unknown asset targets"):
+        load_dataset(ds)

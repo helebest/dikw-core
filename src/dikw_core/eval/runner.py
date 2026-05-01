@@ -27,7 +27,6 @@ keys in the report — same fused ranking, different identity projection.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -705,22 +704,28 @@ async def _resolve_chunk_targets(
             f"ingested wiki has {sorted(docs_by_stem)}"
         )
 
-    # Read each unique doc body + load its chunks once, in parallel.
-    # ``parse_any`` matches the ingest-time backend dispatch (markdown +
-    # html), so the body coordinate space is identical to what the
-    # chunker stored — no .md hardcode that would break HTML corpora.
-    async def _load_doc(stem: str) -> tuple[str, str, list[ChunkRecord]]:
+    # Read each unique doc body + load its chunks once. Storage calls
+    # are serialized: ``SQLiteStorage`` uses ``check_same_thread=False``
+    # but a single ``sqlite3.Connection`` can't safely service two
+    # ``conn.execute(...)`` calls at once. ``asyncio.gather`` over
+    # ``list_chunks`` (which dispatches via ``asyncio.to_thread``) trips
+    # ``sqlite3.InterfaceError`` on Python 3.13's faster asyncio
+    # scheduler. ``parse_any`` matches the ingest-time backend dispatch
+    # (markdown + html) so the body coordinate space matches the
+    # chunker's — no .md hardcode that would break HTML corpora.
+    bodies_by_stem: dict[str, str] = {}
+    chunks_by_stem: dict[str, list[ChunkRecord]] = {}
+    for stem in needed_stems:
         candidates = sorted(spec.corpus_dir.glob(f"{stem}.*"))
         source: Path | None = next((p for p in candidates if p.is_file()), None)
         if source is None:
-            raise EvalError(f"corpus file for stem {stem!r} not found in {spec.corpus_dir}")
-        body = parse_any(source, rel_path=source.name).body
-        chunks = await storage.list_chunks(docs_by_stem[stem].doc_id)
-        return stem, body, chunks
-
-    loaded = await asyncio.gather(*(_load_doc(s) for s in needed_stems))
-    bodies_by_stem = {stem: body for stem, body, _ in loaded}
-    chunks_by_stem = {stem: chunks for stem, _, chunks in loaded}
+            raise EvalError(
+                f"corpus file for stem {stem!r} not found in {spec.corpus_dir}"
+            )
+        bodies_by_stem[stem] = parse_any(source, rel_path=source.name).body
+        chunks_by_stem[stem] = await storage.list_chunks(
+            docs_by_stem[stem].doc_id
+        )
 
     out: dict[str, tuple[str, int]] = {}
     for ct in spec.targets.chunks:

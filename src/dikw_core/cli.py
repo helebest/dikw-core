@@ -736,10 +736,86 @@ def mcp_cmd(
         "[red]error:[/red] `dikw mcp` is deprecated and will be removed in a "
         "future release.\n"
         "The `mcp` runtime dependency has already been dropped; run "
-        "[cyan]dikw serve[/cyan] (HTTP + NDJSON) instead once it lands in a "
-        "later migration phase."
+        "[cyan]dikw serve[/cyan] (HTTP + NDJSON) instead."
     )
     raise typer.Exit(code=1)
+
+
+@app.command("serve")
+def serve_cmd(
+    wiki: Annotated[
+        Path,
+        typer.Option(
+            "--wiki",
+            "-w",
+            help="Path to the wiki root (must contain dikw.yml). Defaults to cwd.",
+        ),
+    ] = Path("."),
+    host: Annotated[
+        str,
+        typer.Option(
+            "--host",
+            "-H",
+            help="Interface to bind. 0.0.0.0 requires DIKW_SERVER_TOKEN to be set.",
+        ),
+    ] = "127.0.0.1",
+    port: Annotated[
+        int,
+        typer.Option("--port", "-p", help="TCP port to bind."),
+    ] = 8765,
+    token: Annotated[
+        str | None,
+        typer.Option(
+            "--token",
+            help=(
+                "Bearer token clients must present. Overrides "
+                "DIKW_SERVER_TOKEN. Required when --host is non-loopback."
+            ),
+        ),
+    ] = None,
+    log_level: Annotated[
+        str,
+        typer.Option("--log-level", help="uvicorn log level."),
+    ] = "info",
+) -> None:
+    """Start the dikw HTTP server (FastAPI + NDJSON) on this host."""
+    import uvicorn
+
+    from .server.app import build_app_from_disk
+    from .server.auth import (
+        ensure_auth_invariant,
+        load_auth_config,
+    )
+
+    wiki_root = wiki.resolve()
+    auth_cfg = load_auth_config(host=host, token_override=token)
+    try:
+        ensure_auth_invariant(auth_cfg)
+    except RuntimeError as e:
+        console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=2) from e
+
+    fastapi_app = build_app_from_disk(
+        wiki_root=wiki_root,
+        host=host,
+        token_override=token,
+    )
+    # Print a banner to stderr so `serve-and-run` (Phase 6) can probe
+    # readiness without parsing uvicorn's own output. Logged before
+    # uvicorn binds the socket — gives the operator the auth posture
+    # explicitly so silent localhost-no-token isn't surprising.
+    posture = "token" if auth_cfg.required else "open (localhost only, no token)"
+    console.print(
+        f"[green]dikw serve[/green]  wiki=[cyan]{wiki_root}[/cyan]  "
+        f"bind=[cyan]http://{host}:{port}[/cyan]  auth=[cyan]{posture}[/cyan]",
+        highlight=False,
+    )
+    uvicorn.run(
+        fastapi_app,
+        host=host,
+        port=port,
+        log_level=log_level,
+    )
 
 
 def main() -> None:  # pragma: no cover - entry point shim

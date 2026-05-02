@@ -5,11 +5,20 @@ sync RPC endpoints, async task endpoints (NDJSON event streams), and a
 multipart sources upload endpoint. ``server/*`` may import the engine; the
 reverse direction is forbidden so the engine remains transport-agnostic.
 
-Modules land in subsequent migration phases (see plan
-`dikw-core-client-server-eventual-clarke`):
+Phase 2 surface (this commit):
+  * ``app.build_app`` — FastAPI app factory.
+  * ``runtime`` — engine handle (cfg + storage + task subsystem) + lifespan.
+  * ``auth`` — bearer token + localhost-default policy.
+  * ``routes_sync`` — status / check / lint / wiki / doc / wisdom.
+  * ``routes_tasks`` — submit (echo), list, get, result, events, cancel.
+  * ``ndjson`` — replay + live tail + heartbeat helper.
+  * ``errors`` — ApiError → JSON.
+  * ``tasks/`` — TaskStore, TaskManager, ProgressBus, TaskBusReporter.
 
-  * Phase 2 — ``app``, ``runtime``, ``auth``, ``routes_sync``, ``ndjson``,
-    ``errors``, and the ``tasks/`` subpackage (manager, store, bus, events).
-  * Phase 3 — ``routes_upload`` and the ingest task wiring in ``routes_tasks``.
-  * Phase 4 — ``routes_query`` (NDJSON streaming) plus synth/distill/eval ops.
+Real ingest / synth / distill / eval ops + multipart upload land in
+Phases 3 and 4.
 """
+
+from .app import build_app, build_app_from_disk
+
+__all__ = ["build_app", "build_app_from_disk"]

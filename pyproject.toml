@@ -91,6 +91,11 @@ ignore = ["E501"]  # line length is handled by formatter
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["SIM117"]
+# FastAPI's idiomatic ``Query(default=...)`` and ``Depends(...)`` in
+# parameter defaults is exactly the B008 anti-pattern, but here it's
+# the framework's contract — silence the rule scope-locally rather
+# than refactoring every endpoint.
+"src/dikw_core/server/routes_*.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"

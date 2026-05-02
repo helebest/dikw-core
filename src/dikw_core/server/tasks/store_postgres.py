@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+import zlib
 from typing import TYPE_CHECKING, Any
 
 from .store import (
@@ -164,12 +165,15 @@ class PostgresTaskStore:
             await conn.commit()
 
     async def get(self, task_id: str) -> TaskRow | None:
+        # Filter by ``instance_id`` so a shared task DB doesn't leak
+        # tasks across servers; an unowned task_id reads as missing
+        # exactly like an unknown id.
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
                 f"SELECT task_id, op, status, created_at, started_at, "
                 f"finished_at, params_digest, result, error FROM "
-                f"{self._schema}.tasks WHERE task_id = %s",
-                (task_id,),
+                f"{self._schema}.tasks WHERE task_id = %s AND instance_id = %s",
+                (task_id, self._instance_id),
             )
             row = await cur.fetchone()
             return _row_to_task(row) if row is not None else None
@@ -181,15 +185,17 @@ class PostgresTaskStore:
         op: str | None = None,
         limit: int = 100,
     ) -> list[TaskRow]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        # Always scoped to this server's instance — operator listings
+        # must not enumerate tasks owned by another wiki sharing the DSN.
+        clauses: list[str] = ["instance_id = %s"]
+        params: list[Any] = [self._instance_id]
         if status is not None:
             clauses.append("status = %s")
             params.append(status.value)
         if op is not None:
             clauses.append("op = %s")
             params.append(op)
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        where = " WHERE " + " AND ".join(clauses)
         params.append(int(limit))
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -246,11 +252,11 @@ class PostgresTaskStore:
         if error is not None:
             sets.append("error = %s::jsonb")
             params.append(json.dumps(error))
-        params.append(task_id)
+        params.extend([task_id, self._instance_id])
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
                 f"UPDATE {self._schema}.tasks SET {', '.join(sets)} "
-                "WHERE task_id = %s",
+                "WHERE task_id = %s AND instance_id = %s",
                 params,
             )
             updated = cur.rowcount
@@ -268,9 +274,11 @@ class PostgresTaskStore:
         async with self._acquire() as conn, conn.cursor() as cur:
             try:
                 # Per-task advisory lock keeps cross-process appenders
-                # from racing on max(seq). The lock id is hash(task_id)
-                # mod 2**31 — collisions only delay slightly, never
-                # corrupt.
+                # from racing on max(seq). The lock id is a deterministic
+                # hash of the task_id — Python's built-in ``hash()``
+                # is randomised per process under PYTHONHASHSEED, which
+                # would have two appenders pick different lock ids and
+                # defeat the lock entirely.
                 lock_id = _advisory_lock_id(task_id)
                 await cur.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
                 await cur.execute(
@@ -298,11 +306,17 @@ class PostgresTaskStore:
     async def list_events(
         self, task_id: str, *, from_seq: int = 0
     ) -> list[dict[str, Any]]:
+        # Gate the read on the task belonging to this server's instance —
+        # otherwise a shared-DB deployment leaks event tapes across
+        # wikis. ``EXISTS`` keeps the gate cheap (PK lookup on tasks).
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
                 f"SELECT seq, ts, body FROM {self._schema}.task_events "
-                "WHERE task_id = %s AND seq >= %s ORDER BY seq",
-                (task_id, int(from_seq)),
+                "WHERE task_id = %s AND seq >= %s "
+                f"AND EXISTS (SELECT 1 FROM {self._schema}.tasks "
+                "             WHERE task_id = %s AND instance_id = %s) "
+                "ORDER BY seq",
+                (task_id, int(from_seq), task_id, self._instance_id),
             )
             rows = await cur.fetchall()
         out: list[dict[str, Any]] = []
@@ -355,11 +369,14 @@ def _is_safe_identifier(s: str) -> bool:
 
 
 def _advisory_lock_id(task_id: str) -> int:
-    """Stable signed 32-bit int for ``pg_advisory_xact_lock``. Collisions
-    are harmless (just brief mutual exclusion); we want determinism not
-    uniqueness."""
-    h = hash(task_id) & 0x7FFFFFFF
-    return int(h)
+    """Stable signed 32-bit int for ``pg_advisory_xact_lock``. Must be
+    deterministic across processes — Python's built-in ``hash()`` is
+    randomised per interpreter via PYTHONHASHSEED, so two ``dikw serve``
+    processes appending to the same task would pick different lock ids
+    and race on ``max(seq)+1``. ``zlib.crc32`` gives the same value
+    everywhere (and 32 bits is plenty — collisions are harmless, they
+    just briefly serialise unrelated tasks)."""
+    return int(zlib.crc32(task_id.encode("utf-8")) & 0x7FFFFFFF)
 
 
 __all__ = ["PostgresTaskStore"]

@@ -183,53 +183,64 @@ class Transport:
         body is parsed eagerly and re-raised as ``ClientError`` before
         the iterator yields anything — that way the caller's renderer
         never sees a partial stream from a failed request.
+
+        Network failures at every stage — connect (``__aenter__``),
+        first-byte (``aiter_lines`` lazy connect), or mid-stream socket
+        drop — are funnelled through ``_network_error`` so streaming
+        commands like ``query``/``ingest``/``synth``/``tasks follow``
+        never leak a raw httpx traceback to the operator.
         """
         try:
-            stream_cm = self._client.stream(
+            async with self._client.stream(
                 method,
                 path,
                 json=dict(json_body) if json_body is not None else None,
                 params=params,
                 headers=self._headers(),
-            )
+            ) as resp:
+                if resp.status_code >= 400:
+                    # Drain the body so we can include the server's error
+                    # envelope; ``aread`` materialises it from the streaming
+                    # response without leaving the connection half-read.
+                    await resp.aread()
+                    _raise_for_error(resp)
+
+                async def _iter() -> AsyncIterator[dict[str, Any]]:
+                    try:
+                        async for line in resp.aiter_lines():
+                            if not line.strip():
+                                continue
+                            try:
+                                event = json.loads(line)
+                            except json.JSONDecodeError:
+                                # The server only ever emits well-formed JSON
+                                # lines; anything else is a transport-layer
+                                # corruption (e.g. a reverse proxy injecting
+                                # text). Surface it as a ClientError instead of
+                                # silently dropping it.
+                                raise ClientError(
+                                    status=resp.status_code,
+                                    code="invalid_ndjson",
+                                    message=f"non-JSON line in stream: {line!r}",
+                                ) from None
+                            if (
+                                isinstance(event, dict)
+                                and event.get("type") == _HEARTBEAT_TYPE
+                            ):
+                                continue
+                            if not isinstance(event, dict):
+                                raise ClientError(
+                                    status=resp.status_code,
+                                    code="invalid_ndjson",
+                                    message=f"non-object NDJSON event: {event!r}",
+                                )
+                            yield event
+                    except httpx.RequestError as e:
+                        raise _network_error(e) from e
+
+                yield _iter()
         except httpx.RequestError as e:
             raise _network_error(e) from e
-        async with stream_cm as resp:
-            if resp.status_code >= 400:
-                # Drain the body so we can include the server's error
-                # envelope; ``aread`` materialises it from the streaming
-                # response without leaving the connection half-read.
-                await resp.aread()
-                _raise_for_error(resp)
-
-            async def _iter() -> AsyncIterator[dict[str, Any]]:
-                async for line in resp.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        # The server only ever emits well-formed JSON
-                        # lines; anything else is a transport-layer
-                        # corruption (e.g. a reverse proxy injecting
-                        # text). Surface it as a ClientError instead of
-                        # silently dropping it.
-                        raise ClientError(
-                            status=resp.status_code,
-                            code="invalid_ndjson",
-                            message=f"non-JSON line in stream: {line!r}",
-                        ) from None
-                    if isinstance(event, dict) and event.get("type") == _HEARTBEAT_TYPE:
-                        continue
-                    if not isinstance(event, dict):
-                        raise ClientError(
-                            status=resp.status_code,
-                            code="invalid_ndjson",
-                            message=f"non-object NDJSON event: {event!r}",
-                        )
-                    yield event
-
-            yield _iter()
 
 
 def _parse_json_response(resp: httpx.Response) -> Any:

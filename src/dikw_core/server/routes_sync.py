@@ -217,6 +217,27 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         rt: ServerRuntime = get_runtime(request.app)
         cfg, _root, storage = await api._with_storage(rt.root)
         try:
+            # Pin the query embedder to the active text embed_version
+            # (model + dim) — same anti-drift guard ``api.query`` uses.
+            # If the operator just edited ``embedding_model`` /
+            # ``embedding_dim`` in dikw.yml without re-ingesting, the
+            # vec table still holds vectors from the OLD space; querying
+            # with the new model would either dim-mismatch or rank
+            # against an incompatible space.
+            from ..storage.base import NotSupported
+
+            text_version_id: int | None = None
+            text_query_model = cfg.provider.embedding_model
+            text_query_dim: int | None = None
+            try:
+                active_text = await storage.get_active_embed_version(modality="text")
+            except NotSupported:
+                active_text = None
+            if active_text is not None and active_text.version_id is not None:
+                text_version_id = active_text.version_id
+                text_query_model = active_text.model
+                text_query_dim = active_text.dim
+
             # Build an embedder only when the dense leg is actually
             # going to run AND the storage has an active text version.
             # This lets ``mode="bm25"`` work on a wiki that has never
@@ -226,7 +247,9 @@ def make_router(*, auth_dep: Any) -> APIRouter:
             embedder = None
             if body.mode in ("hybrid", "vector"):
                 try:
-                    embedder = build_embedder(cfg.provider)
+                    embedder = build_embedder(
+                        cfg.provider, dim_override=text_query_dim
+                    )
                 except Exception as e:
                     if body.mode == "vector":
                         raise BadRequest(
@@ -239,7 +262,8 @@ def make_router(*, auth_dep: Any) -> APIRouter:
                 storage,
                 embedder,
                 cfg.retrieval,
-                embedding_model=cfg.provider.embedding_model,
+                embedding_model=text_query_model,
+                text_version_id=text_version_id,
             )
             return await searcher.search(
                 body.q,

@@ -158,11 +158,16 @@ class SqliteTaskStore:
         return await asyncio.to_thread(self._get_sync, task_id)
 
     def _get_sync(self, task_id: str) -> TaskRow | None:
+        # Filter by ``instance_id`` for symmetry with the Postgres store.
+        # In single-server SQLite (the default) the filter matches all
+        # rows; in any future shared-DB sqlite scenario it scopes reads
+        # the same way Postgres does.
         conn = self._require_conn()
         cur = conn.execute(
             "SELECT task_id, op, status, created_at, started_at, finished_at, "
-            "params_digest, result, error FROM tasks WHERE task_id = ?",
-            (task_id,),
+            "params_digest, result, error FROM tasks "
+            "WHERE task_id = ? AND instance_id = ?",
+            (task_id, self._instance_id),
         )
         row = cur.fetchone()
         return _row_to_task(row) if row is not None else None
@@ -183,15 +188,15 @@ class SqliteTaskStore:
         limit: int,
     ) -> list[TaskRow]:
         conn = self._require_conn()
-        clauses: list[str] = []
-        params: list[Any] = []
+        clauses: list[str] = ["instance_id = ?"]
+        params: list[Any] = [self._instance_id]
         if status is not None:
             clauses.append("status = ?")
             params.append(status.value)
         if op is not None:
             clauses.append("op = ?")
             params.append(op)
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        where = " WHERE " + " AND ".join(clauses)
         params.append(int(limit))
         cur = conn.execute(
             "SELECT task_id, op, status, created_at, started_at, finished_at, "
@@ -269,9 +274,10 @@ class SqliteTaskStore:
         if error is not None:
             sets.append("error = ?")
             params.append(json.dumps(error))
-        params.append(task_id)
+        params.extend([task_id, self._instance_id])
         cur = conn.execute(
-            f"UPDATE tasks SET {', '.join(sets)} WHERE task_id = ?",
+            f"UPDATE tasks SET {', '.join(sets)} "
+            "WHERE task_id = ? AND instance_id = ?",
             params,
         )
         if cur.rowcount == 0:
@@ -325,11 +331,17 @@ class SqliteTaskStore:
     def _list_events_sync(
         self, task_id: str, from_seq: int
     ) -> list[dict[str, Any]]:
+        # Same instance gate as the Postgres impl — keeps the cross-store
+        # contract identical so a future shared-DB sqlite scenario doesn't
+        # surprise the operator.
         conn = self._require_conn()
         cur = conn.execute(
             "SELECT seq, ts, body FROM task_events "
-            "WHERE task_id = ? AND seq >= ? ORDER BY seq",
-            (task_id, int(from_seq)),
+            "WHERE task_id = ? AND seq >= ? "
+            "AND EXISTS (SELECT 1 FROM tasks "
+            "            WHERE task_id = ? AND instance_id = ?) "
+            "ORDER BY seq",
+            (task_id, int(from_seq), task_id, self._instance_id),
         )
         out: list[dict[str, Any]] = []
         for seq, ts, body in cur.fetchall():

@@ -28,6 +28,13 @@ from dikw_core.server.tasks import (
 async def _wait_terminal(
     store: SqliteTaskStore, task_id: str, *, timeout: float = 5.0
 ) -> None:
+    """Wait until the task is fully terminal — both the row's status
+    is in a terminal state AND the matching ``final`` event has been
+    appended. The TaskManager updates the row before emitting the
+    final event (so /result is consistent the moment a follower sees
+    ``final``); waiting only on the row therefore races the final
+    event onto the tape, which is fine for /result-style tests but
+    breaks any test that reads the event tape next."""
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         row = await store.get(task_id)
@@ -36,7 +43,9 @@ async def _wait_terminal(
             TaskStatus.FAILED,
             TaskStatus.CANCELLED,
         ):
-            return
+            events = await store.list_events(task_id)
+            if events and events[-1].get("type") == "final":
+                return
         await asyncio.sleep(0.01)
     raise AssertionError(f"task {task_id} did not reach terminal state in {timeout}s")
 

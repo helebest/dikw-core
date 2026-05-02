@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -29,6 +28,7 @@ from ..storage import Storage, build_storage
 from .auth import AuthConfig
 from .tasks import (
     ProgressBus,
+    SqliteTaskStore,
     TaskManager,
     TaskStore,
     build_task_store,
@@ -37,17 +37,16 @@ from .tasks import (
 logger = logging.getLogger(__name__)
 
 
-def _server_instance_id(root: Path) -> str:
-    """Stable per-server identity. Two ``dikw serve`` processes pointed
-    at the same wiki on the same host get the same id; different hosts
-    or different wiki paths get different ids.
+def _wiki_scope_id(root: Path) -> str:
+    """Stable identifier for the wiki this server is bound to.
 
-    Used by the task store to scope ``restart_cleanup`` so a server
-    only ever reaps its own leftover rows from a previous run, even
-    when a shared Postgres task DB is in use across multiple servers.
+    Used by the task store to scope every read + write so a shared
+    Postgres task DB does not leak rows across wikis. Hostname is
+    *not* part of the identity — multiple replicas of the same wiki
+    must share state so that ``GET /v1/tasks/{id}`` issued against
+    replica B can find a task submitted via replica A.
     """
-    raw = f"{socket.gethostname()}::{root.resolve()}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -90,18 +89,28 @@ async def build_runtime(
     await storage.migrate()
 
     task_store = build_task_store(
-        cfg, root=root, instance_id=_server_instance_id(root)
+        cfg, root=root, instance_id=_wiki_scope_id(root)
     )
     await task_store.init()
 
     bus = ProgressBus()
     manager = TaskManager(store=task_store, bus=bus)
-    # Safe for both stores: ``list_running()`` filters by the store's
-    # ``instance_id``, so a shared Postgres task DB only surfaces rows
-    # this exact server (host + wiki path) submitted in a previous run.
-    # Other live ``dikw serve`` processes pointed at the same DB stay
-    # untouched.
-    await manager.restart_cleanup()
+    # Auto-cleanup is safe only when this process owns the task store
+    # exclusively — i.e. the per-wiki sqlite file. With a shared Postgres
+    # task DB another live replica of *the same wiki* may have in-flight
+    # tasks that belong to its own asyncio loop; cancelling them here
+    # would mark a healthy peer's work as failed{server_restart}.
+    # Postgres operators must reap stuck rows out-of-band (planned: a
+    # ``dikw client tasks reap`` admin command).
+    if isinstance(task_store, SqliteTaskStore):
+        await manager.restart_cleanup()
+    else:
+        logger.info(
+            "skipping restart_cleanup for shared task store (%s); "
+            "stuck rows from a previous incarnation must be reaped "
+            "out-of-band",
+            type(task_store).__name__,
+        )
 
     return ServerRuntime(
         cfg=cfg,

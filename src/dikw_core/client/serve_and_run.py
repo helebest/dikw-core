@@ -172,9 +172,27 @@ def build_inner_command(inner_cmd: list[str]) -> list[str]:
     return [*_PYTHON_M_DIKW, *inner_cmd]
 
 
+# Wildcard bind addresses (server listens on all interfaces) are NOT
+# routable from a client. The server still binds to ``opts.host``; we
+# remap only the URL the client uses to reach it back through loopback.
+_WILDCARD_HOSTS = {"0.0.0.0", "::", "*", ""}
+
+
+def _client_host(server_host: str) -> str:
+    """Loopback address the in-process client should use to reach the
+    server we just spawned. ``::`` (IPv6 wildcard) routes to ``[::1]``;
+    everything else (including ``0.0.0.0`` and ``*``) routes to
+    ``127.0.0.1``."""
+    if server_host == "::":
+        return "[::1]"
+    if server_host in _WILDCARD_HOSTS:
+        return "127.0.0.1"
+    return server_host
+
+
 def build_inner_env(host: str, port: int, token: str | None) -> dict[str, str]:
     env = dict(os.environ)
-    env[ENV_SERVER_URL] = f"http://{host}:{port}"
+    env[ENV_SERVER_URL] = f"http://{_client_host(host)}:{port}"
     if token is not None:
         env[ENV_SERVER_TOKEN] = token
     return env
@@ -203,7 +221,7 @@ def run(opts: ServeAndRunOptions) -> int:
     try:
         try:
             wait_until_ready(
-                f"http://{opts.host}:{opts.port}",
+                f"http://{_client_host(opts.host)}:{opts.port}",
                 timeout=opts.ready_timeout,
                 token=_effective_token(opts.token),
                 proc=server,

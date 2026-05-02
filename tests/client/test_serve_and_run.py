@@ -97,9 +97,16 @@ def test_build_inner_env_sets_url_and_optional_token() -> None:
     assert env["DIKW_SERVER_URL"] == "http://127.0.0.1:9123"
     assert "DIKW_SERVER_TOKEN" not in env
 
+    # Wildcard server bind must NOT leak into the client URL — the inner
+    # CLI would try to dial 0.0.0.0 (not routable) and fail. Loopback is
+    # the only sensible client-side rewrite when the server bound to
+    # all-interfaces.
     env_with = sar.build_inner_env("0.0.0.0", 9123, token="abc")
-    assert env_with["DIKW_SERVER_URL"] == "http://0.0.0.0:9123"
+    assert env_with["DIKW_SERVER_URL"] == "http://127.0.0.1:9123"
     assert env_with["DIKW_SERVER_TOKEN"] == "abc"
+
+    env_v6 = sar.build_inner_env("::", 9123, token=None)
+    assert env_v6["DIKW_SERVER_URL"] == "http://[::1]:9123"
 
 
 def test_wait_until_ready_times_out_when_nothing_listens() -> None:

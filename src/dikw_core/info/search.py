@@ -11,8 +11,8 @@ v1 has two operating modes:
   asset vector table; matched assets promote their parent chunks (via
   the ``chunk_asset_refs`` reverse lookup) into the same RRF pool.
   Each returned Hit carries the assets that the chunk references so
-  downstream consumers (CLI display, MCP schema, LLM synthesis) can
-  render or cite them.
+  downstream consumers (CLI display, server response, LLM synthesis)
+  can render or cite them.
 
 Fusion algorithm is configurable via ``RetrievalConfig.fusion``: ``rrf``
 (default, rank-only), ``combsum`` (per-leg min-max → weighted sum), or

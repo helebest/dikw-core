@@ -86,30 +86,31 @@ async def test_check_reports_embed_failure_distinctly_from_llm_failure(
 
 
 def test_cli_check_exits_nonzero_on_failure(
-    wiki: Path, monkeypatch: pytest.MonkeyPatch
+    asgi_client: Any,
+    patch_transport_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Server-routed: the engine inside the in-memory server picks up the
+    monkeypatched ``api.build_llm`` and fails — the CLI's exit code
+    mirrors the report's ``ok`` field."""
     monkeypatch.setattr("dikw_core.api.build_llm", lambda cfg: BrokenLLM())
     monkeypatch.setattr("dikw_core.api.build_embedder", lambda cfg: FakeEmbeddings())
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["check", "--path", str(wiki)])
+    patch_transport_factory()
+    result = CliRunner().invoke(app, ["check"])
     assert result.exit_code == 1, result.stdout
 
 
 def test_cli_check_exits_zero_on_success(
-    wiki: Path, monkeypatch: pytest.MonkeyPatch
+    asgi_client: Any,
+    patch_transport_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_llm(_cfg: Any) -> Any:
-        return FakeLLM()
-
-    def _fake_embed(_cfg: Any) -> Any:
-        return FakeEmbeddings()
-
-    monkeypatch.setattr("dikw_core.api.build_llm", _fake_llm)
-    monkeypatch.setattr("dikw_core.api.build_embedder", _fake_embed)
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["check", "--path", str(wiki)])
+    monkeypatch.setattr("dikw_core.api.build_llm", lambda _cfg: FakeLLM())
+    monkeypatch.setattr(
+        "dikw_core.api.build_embedder", lambda _cfg: FakeEmbeddings()
+    )
+    patch_transport_factory()
+    result = CliRunner().invoke(app, ["check"])
     assert result.exit_code == 0, result.stdout
 
 
@@ -173,55 +174,63 @@ async def test_check_llm_only_does_not_build_embedder(
 
 
 def test_cli_check_llm_only_exits_zero_when_embed_would_fail(
-    wiki: Path, monkeypatch: pytest.MonkeyPatch
+    asgi_client: Any,
+    patch_transport_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_llm(_cfg: Any) -> Any:
-        return FakeLLM()
+    """``--llm-only`` skips the embedder factory inside the server, so a
+    broken embedder factory must not fail the probe."""
+    monkeypatch.setattr("dikw_core.api.build_llm", lambda _cfg: FakeLLM())
 
     def _boom(_cfg: Any) -> Any:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("dikw_core.api.build_llm", _fake_llm)
     monkeypatch.setattr("dikw_core.api.build_embedder", _boom)
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["check", "--path", str(wiki), "--llm-only"])
+    patch_transport_factory()
+    result = CliRunner().invoke(app, ["check", "--llm-only"])
     assert result.exit_code == 0, result.stdout
 
 
-def test_cli_check_rejects_both_only_flags(wiki: Path) -> None:
-    runner = CliRunner()
-    result = runner.invoke(
-        app, ["check", "--path", str(wiki), "--llm-only", "--embed-only"]
+def test_cli_check_rejects_both_only_flags(
+    asgi_client: Any,
+    patch_transport_factory: Any,
+) -> None:
+    patch_transport_factory()
+    result = CliRunner().invoke(
+        app, ["check", "--llm-only", "--embed-only"]
     )
     assert result.exit_code == 2, result.stdout
 
 
 def test_cli_check_embed_only_shows_provider_label_when_yaml_set(
-    wiki: Path, monkeypatch: pytest.MonkeyPatch
+    asgi_client: tuple[Any, Any],
+    patch_transport_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``provider.embedding_provider_label`` becomes a free-form tag in probe detail.
-
-    Display-only — it doesn't change any behaviour. Users running
-    MiniMax LLM + Gitee AI embeddings want the output to make that split
-    obvious at a glance. The label lives in ``dikw.yml`` so it travels
-    with the wiki instead of needing a shell env var every time.
-    """
+    """``provider.embedding_provider_label`` flows verbatim from dikw.yml
+    through the server's check report into the client's rendered table.
+    Edit the runtime's bound wiki on disk before running the CLI so the
+    server picks up the label on its next read."""
     import yaml
 
-    def _fake_embed(_cfg: Any) -> Any:
-        return FakeEmbeddings()
+    monkeypatch.setattr(
+        "dikw_core.api.build_embedder", lambda _cfg: FakeEmbeddings()
+    )
 
-    # Post-edit the scaffolded dikw.yml to include the label.
-    cfg_path = wiki / "dikw.yml"
+    _, rt = asgi_client
+    cfg_path = rt.root / "dikw.yml"
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     raw.setdefault("provider", {})["embedding_provider_label"] = "gitee-ai"
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    monkeypatch.setattr("dikw_core.api.build_embedder", _fake_embed)
+    # The runtime caches its DikwConfig at lifespan startup; reload so
+    # the route reads the updated label.
+    from dikw_core.api import load_wiki
 
-    runner = CliRunner()
-    result = runner.invoke(app, ["check", "--path", str(wiki), "--embed-only"])
+    rt.cfg, _ = load_wiki(rt.root)
+
+    patch_transport_factory()
+    result = CliRunner().invoke(app, ["check", "--embed-only"])
     assert result.exit_code == 0, result.stdout
     assert "gitee-ai" in result.stdout
 

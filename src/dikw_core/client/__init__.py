@@ -1,11 +1,20 @@
 """Remote CLI for dikw-core.
 
-Thin Typer + httpx + rich client that talks to a ``dikw serve`` instance over
-HTTP/NDJSON. ``client/*`` must not import any engine internals beyond
-``schemas`` (used only for type alignment with server responses), so it can in
-principle ship as a standalone wheel later.
+Thin Typer + httpx + rich client that talks to a ``dikw serve`` instance
+over HTTP/NDJSON. The package is intentionally engine-agnostic: nothing
+in ``client/*`` imports from ``dikw_core.{api,storage,providers,server}``
+— only ``rich``, ``typer``, ``httpx``, and stdlib. Adding a new
+operation means adding one Typer command and matching the server's wire
+contract; no engine changes required.
 
-Modules land in Phase 5 of the migration (see plan
-`dikw-core-client-server-eventual-clarke`): ``cli_app``, ``transport``,
-``progress``, ``upload``, ``config``, ``serve_and_run``.
+Submodules:
+  * :mod:`config` — resolve server URL + token (CLI flags > env > toml > default)
+  * :mod:`transport` — httpx wrapper, JSON + NDJSON helpers, error mapping
+  * :mod:`upload` — pack a local sources/+assets/ tree as tar.gz + manifest
+  * :mod:`progress` — NDJSON event → rich Progress / final-result renderers
+  * :mod:`cli_app` — Typer app exposed as ``dikw client *``
 """
+
+from .cli_app import app
+
+__all__ = ["app"]

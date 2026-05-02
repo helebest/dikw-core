@@ -105,12 +105,8 @@ mypy_path = "src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-# `mcp.*` stays ignorable until mcp_server.py is physically removed in
-# the client/server migration's final phase; the dep itself is gone, so
-# any stray import would otherwise fail type-check.
 module = [
     "sqlite_vec.*", "frontmatter.*", "markdown_it.*", "pgvector.*", "jieba.*",
-    "mcp.*",
 ]
 ignore_missing_imports = true
 

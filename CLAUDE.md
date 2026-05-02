@@ -8,15 +8,10 @@ Guidance for Claude Code when working in this repository.
 DIKW pyramid (**D**ata → **I**nformation → **K**nowledge → **W**isdom).
 Status: **pre-alpha** — APIs and on-disk formats will change.
 
-Two interfaces wrap the same core (`dikw_core.api`): a Typer-based CLI
-(`dikw`) and an MCP server (`dikw mcp --stdio`).
-
-> **Architecture migration in progress** (plan: `dikw-core-client-server-eventual-clarke`).
-> Moving from in-process invocation to a `dikw serve` (FastAPI + NDJSON) HTTP
-> server with a remote Typer client (`dikw client …`). Phase 0 has already
-> dropped the `mcp` runtime dependency — `dikw mcp` now exits with a
-> deprecation message — and added empty `server/` and `client/` packages as
-> landing pads. The MCP path will be fully removed in the final phase.
+Architecture is **client/server**: a `dikw serve` process (FastAPI + NDJSON)
+hosts the engine; `dikw client …` (the default user surface, plus top-level
+aliases like `dikw status`) talks to it over HTTP. The local-only commands
+are `dikw version`, `dikw init`, and `dikw serve` itself.
 
 Canonical docs (read these before designing changes):
 - `docs/design.md` — approved design doc, source of truth for intent
@@ -56,8 +51,8 @@ Tooling config lives in `pyproject.toml`:
 ```
 src/dikw_core/
 ├── api.py                 engine facade (ingest, query, synth, distill, review, lint, status)
-├── cli.py                 Typer app → api
-├── mcp_server.py          DEPRECATED — frozen until physical removal in the migration's final phase
+├── cli.py                 top-level Typer app: version, init, serve + dikw client subgroup
+├── progress.py            ProgressReporter Protocol + CancelToken (engine-side progress contract)
 ├── config.py              pydantic config + YAML loader (dikw.yml)
 ├── schemas.py             cross-layer DTOs (cross the Storage Protocol boundary — no SQL types)
 ├── data/                  D layer — sources + SourceBackend registry (markdown, html)
@@ -68,9 +63,14 @@ src/dikw_core/
 ├── storage/               Storage Protocol + adapters (sqlite, postgres, filesystem)
 ├── eval/                  retrieval-quality eval — metrics, dataset loader, runner, packaged datasets
 ├── prompts/               versioned LLM prompts (importlib.resources)
-├── server/                [Phase 2+] FastAPI app, auth, routes, async task subsystem (currently empty)
-└── client/                [Phase 5]  remote Typer CLI + httpx transport + NDJSON progress (currently empty)
+├── server/                FastAPI app, auth, sync + task routes, NDJSON streaming, task subsystem
+└── client/                Remote Typer CLI + httpx transport + NDJSON progress renderer + sources upload
 ```
+
+### Layering invariants
+
+- `server/*` may import `dikw_core.api`, `schemas`, `storage`, `providers`. The reverse is forbidden — engine code must not depend on FastAPI / uvicorn / server task plumbing.
+- `client/*` only depends on `schemas` (for response type alignment) and stdlib + httpx + typer + rich. It must not import any `dikw_core.{api,storage,providers,server}` symbol — the client is meant to be packagable as a standalone wheel later.
 
 ### Named seams — extend here, not elsewhere
 
@@ -87,7 +87,7 @@ src/dikw_core/
 
 ## Conventions
 
-- Types: code is fully typed; mypy runs strict. Don't widen types to silence errors — fix the root cause. Existing missing-import overrides (`sqlite_vec`, `frontmatter`, `markdown_it`, `pgvector`, `jieba`, plus `mcp.*` until the deprecated `mcp_server.py` is deleted) are listed in `pyproject.toml`; extend deliberately. `mcp_server.py` itself is `# mypy: ignore-errors` for the same transitional reason.
+- Types: code is fully typed; mypy runs strict. Don't widen types to silence errors — fix the root cause. Missing-import overrides (`sqlite_vec`, `frontmatter`, `markdown_it`, `pgvector`, `jieba`) live in `pyproject.toml`; extend deliberately.
 - DTOs: anything crossing the Storage Protocol is a pydantic model in `schemas.py`. No SQL types, ORM handles, or cursors leak out of adapters.
 - Tests: `tests/fakes.py` provides in-memory fakes; prefer them over mocks. Storage adapters are validated via `tests/test_storage_contract.py` — add new adapter behavior to the contract, not to ad-hoc tests.
 - Prompts: versioned markdown files under `src/dikw_core/prompts/`, loaded via `importlib.resources`. Don't inline prompts in code.

@@ -5,7 +5,7 @@ verbatim — ``![arch](./diagrams/arch.png)`` — so source-fidelity is
 preserved (Layer 1). The structural mapping from "this chunk character
 range references this asset" lives in ``chunk_asset_refs`` (Layer 2).
 
-When a downstream consumer (CLI, MCP tool, LLM prompt builder, web
+When a downstream consumer (server response, LLM prompt builder, web
 preview) needs a self-contained renderable Markdown snippet, it calls
 ``render_chunk`` to produce one with each original reference rewritten
 to the engine-managed ``stored_path``. The substitution is

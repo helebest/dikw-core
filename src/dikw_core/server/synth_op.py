@@ -172,9 +172,13 @@ def make_eval_runner(
             ) from e
         # ``EvalReport`` is a pydantic BaseModel — model_dump gives us
         # JSON-safe output the manager can drop straight into the final
-        # event.
+        # event. ``passed`` is a ``@property`` that pydantic drops from
+        # the dump; surface it explicitly so clients can branch on the
+        # threshold-pass verdict without re-running the gate logic.
         _ = wiki_root  # eval owns its own throwaway wiki tree
-        return report.model_dump(mode="json")
+        dumped = report.model_dump(mode="json")
+        dumped["passed"] = report.passed
+        return dumped
 
     return _runner
 

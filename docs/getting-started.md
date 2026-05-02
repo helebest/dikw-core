@@ -39,7 +39,21 @@ Open the folder in Obsidian and you'll see the wiki + wisdom pages render
 natively thanks to the `[[wikilink]]` syntax and YAML front-matter the engine
 emits.
 
-## 2. Add source material and ingest
+## 2. Start the server
+
+`dikw-core` runs as a long-lived process; the CLI is a thin client that
+talks HTTP + NDJSON to it. Start the server bound to your wiki in a
+spare terminal (or under a process supervisor):
+
+```bash
+uv run dikw serve --wiki .
+# bound to http://127.0.0.1:8765 — no auth on loopback
+```
+
+Leave it running. Every `dikw <op>` shown below is a top-level alias for
+`dikw client <op>` and routes through this server.
+
+## 3. Add source material and ingest
 
 Drop markdown or HTML files anywhere under `sources/`, then:
 
@@ -57,7 +71,7 @@ uv run dikw ingest
 Subsequent ingests are idempotent: files whose content hash hasn't changed
 are skipped.
 
-## 3. Ask questions (Information layer → LLM)
+## 4. Ask questions (Information layer → LLM)
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -67,7 +81,7 @@ uv run dikw query "What does Karpathy mean by deterministic scoping?"
 Output includes the answer and a table of citations. Every claim cites a
 source excerpt by `[#N]`; approved wisdom items cite by `[W1]`.
 
-## 4. Synthesise a Knowledge layer
+## 5. Synthesise a Knowledge layer
 
 ```bash
 uv run dikw synth
@@ -80,7 +94,7 @@ regenerate automatically. Re-running is a no-op until you add new sources
 
 Run `dikw lint` to check for broken wikilinks, orphans, and duplicate titles.
 
-## 5. Distil Wisdom (the W layer)
+## 6. Distil Wisdom (the W layer)
 
 ```bash
 uv run dikw distill
@@ -96,7 +110,7 @@ candidate file, promotes the item to approved status, and regenerates
 Approved wisdom automatically surfaces in future `dikw query` answers under
 an "operating principles" block — cited as `[W1]`, `[W2]`, ….
 
-## 6. Check retrieval quality on your corpus
+## 7. Check retrieval quality on your corpus
 
 ```bash
 # Default: run all packaged datasets (ships with the MVP dogfood corpus).
@@ -112,15 +126,19 @@ the top-k result. Metrics: `hit@3`, `hit@10`, `MRR`. Exit code 0/1/2.
 The full convention (what `dataset.yaml` looks like, how to author
 queries, how to convert public benchmarks) lives in [`evals/README.md`](../evals/README.md).
 
-## 7. Expose the engine as an MCP server
+## 8. Bind the server to a non-loopback interface
+
+`dikw serve --host 0.0.0.0` is rejected unless `DIKW_SERVER_TOKEN` is set
+— the runtime refuses to expose an unauthenticated wiki to the network.
+Run with the token:
 
 ```bash
-uv run dikw mcp --stdio
+export DIKW_SERVER_TOKEN=$(openssl rand -hex 32)
+uv run dikw serve --wiki . --host 0.0.0.0
 ```
 
-Point Claude Desktop, Claude Code, or any MCP client at that command and
-the agent can call `core.query`, `wiki.synthesize`, `wisdom.distill`,
-`admin.lint`, and friends directly.
+Clients pick the same token up via `DIKW_SERVER_TOKEN` (or `--token` /
+`~/.config/dikw/client.toml`) and pass it as a bearer header.
 
 ## Pluggable providers
 

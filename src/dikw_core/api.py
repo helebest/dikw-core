@@ -1,4 +1,6 @@
-"""High-level engine facade used by both the CLI and the MCP server.
+"""High-level engine facade — server routes (``dikw_core.server``) and
+the eval runner depend on this module; CLI access is via ``dikw client``
+which talks HTTP to a running server instead of importing the engine.
 
 Phase 1 surface:
   * ``ingest`` — walk configured sources, parse markdown, chunk, embed, index.
@@ -782,7 +784,7 @@ async def ingest(
 
         # Auto-build the multimodal embedder from config when one wasn't
         # injected — symmetric with query()'s behavior, so the typical
-        # CLI / MCP / eval call site (which only passes `embedder`) still
+        # server / eval call site (which only passes `embedder`) still
         # produces chunk + asset vectors in the configured mm space
         # rather than indexing chunks in text space and querying in
         # mm space.

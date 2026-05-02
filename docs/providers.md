@@ -253,8 +253,8 @@ retrieval:
   vector_weight: 1.0  # raise for paraphrase / semantic match
 ```
 
-No code change needed — `api.query` and the MCP `doc.search` tool pick
-up the block on next call.
+No code change needed — `api.query` and the server's `POST /v1/doc/search`
+endpoint pick up the block on next call.
 
 ### Score-normalised fusion alternatives
 

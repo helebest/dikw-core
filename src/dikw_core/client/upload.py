@@ -245,7 +245,14 @@ def _discover(
                 yield _make_entry(path, archive_path=rel)
         return
 
-    # No sources/ or assets/ subtree → re-root top-level + nested into sources/.
+    # No sources/ or assets/ subtree → re-root: markdown lands under
+    # ``sources/``, everything else under ``assets/``. The default
+    # whitelist includes image / pdf extensions for the assets path,
+    # so a flat dir with ``note.md + diagram.png`` gets the png mapped
+    # to ``assets/diagram.png`` (where commit_staging + ingest expect
+    # asset files) rather than ``sources/diagram.png`` (where ingest
+    # would skip or misclassify it).
+    _MD_LIKE = {".md", ".html", ".htm"}
     for path in sorted(_walk_files(src)):
         if path.name == "_payload.tar.gz":
             continue
@@ -255,7 +262,8 @@ def _discover(
                 f"(allowed: {sorted(allowed_ext)})"
             )
         rel = path.relative_to(src).as_posix()
-        yield _make_entry(path, archive_path=f"sources/{rel}")
+        bucket = "sources" if path.suffix.lower() in _MD_LIKE else "assets"
+        yield _make_entry(path, archive_path=f"{bucket}/{rel}")
 
 
 def _walk_files(root: Path) -> Iterator[Path]:
@@ -271,6 +279,18 @@ def _walk_files(root: Path) -> Iterator[Path]:
 
 
 def _make_entry(path: Path, *, archive_path: str) -> _DiscoveredFile:
+    # Reject symlinks before we open() — otherwise the open follows the
+    # link and archives whatever it points at as a regular file (e.g.
+    # ``sources/note.md -> /etc/passwd``). The server-side tar check
+    # blocks symlink *members* but can't tell that the bytes inside a
+    # regular member came from a followed symlink, so the gate has to
+    # live here.
+    if path.is_symlink():
+        raise UploadError(
+            f"refusing to upload symlink: {path} "
+            f"(target: {os.readlink(path)!r}); "
+            "copy the file in place if you really mean to include it"
+        )
     size = path.stat().st_size
     sha = _sha256_file(path)
     return _DiscoveredFile(

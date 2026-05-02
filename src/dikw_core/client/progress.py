@@ -229,16 +229,23 @@ class QueryStreamRenderer:
     def _render_citations(self, final: FinalEvent) -> None:
         if final.status != "succeeded" or final.result is None:
             return
-        if self._plain:
-            return
-        # If the engine had no streaming output (fallback path), the
-        # answer is only in the final result — print it now.
+        # If the engine had no streaming output (fallback path because
+        # the provider doesn't implement ``complete_stream``), the
+        # answer only exists in the final payload — print it in BOTH
+        # rich and plain modes; otherwise ``--plain`` produces empty
+        # stdout on the supported fallback path.
         if not self._buffered:
             answer = str(final.result.get("answer") or "")
             if answer:
-                self._console.print(
-                    Panel(answer, title="answer", border_style="cyan")
-                )
+                if self._plain:
+                    sys.stdout.write(answer + "\n")
+                    sys.stdout.flush()
+                else:
+                    self._console.print(
+                        Panel(answer, title="answer", border_style="cyan")
+                    )
+        if self._plain:
+            return
 
         citations = final.result.get("citations") or []
         if not isinstance(citations, list) or not citations:

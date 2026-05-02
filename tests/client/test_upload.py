@@ -107,3 +107,42 @@ def test_extra_extensions_admitted(tmp_path: Path) -> None:
         assert paths == ["sources/alpha.md", "sources/snippet.org"]
     finally:
         bundle.close()
+
+
+def test_flat_dir_routes_assets_to_assets_bucket(tmp_path: Path) -> None:
+    """A flat input dir with ``note.md + diagram.png`` must put the
+    image under ``assets/`` (so commit_staging + ingest treat it as an
+    asset), not under ``sources/`` (where ingest skips/misclassifies
+    binaries)."""
+    src = tmp_path / "flat"
+    src.mkdir()
+    (src / "note.md").write_text("# n\n![](diagram.png)\n", encoding="utf-8")
+    asset_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    (src / "diagram.png").write_bytes(asset_bytes)
+
+    bundle = build_upload(src)
+    try:
+        manifest = json.loads(bundle.manifest_json)
+        paths = sorted(e["path"] for e in manifest["files"])
+        assert paths == ["assets/diagram.png", "sources/note.md"]
+    finally:
+        bundle.close()
+
+
+def test_symlink_in_upload_tree_is_rejected(tmp_path: Path) -> None:
+    """The server-side tar check blocks symlink members but can't see
+    that a regular member's bytes were read through a followed symlink.
+    The client must refuse before the file leaves the machine — a
+    symlinked ``sources/note.md`` could otherwise leak ``/etc/passwd``
+    or any other readable file outside the chosen upload root."""
+    src = tmp_path / "inbox"
+    (src / "sources").mkdir(parents=True)
+    real_file = tmp_path / "outside.md"
+    real_file.write_text("# leaked\n", encoding="utf-8")
+    link = src / "sources" / "note.md"
+    try:
+        link.symlink_to(real_file)
+    except (OSError, NotImplementedError) as e:  # pragma: no cover - Windows
+        pytest.skip(f"symlinks unavailable in this environment: {e}")
+    with pytest.raises(UploadError, match="symlink"):
+        build_upload(src)

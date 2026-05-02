@@ -26,12 +26,16 @@ from typing import Any
 
 from fastapi.responses import StreamingResponse
 
-from .tasks import ProgressBus, TaskStore
+from .tasks import TERMINAL_STATUSES, ProgressBus, TaskStore
 
 # Tuned to undercut typical proxy idle timeouts (60s on most CDNs / nginx
 # defaults) by 4x; bumping it doesn't hurt the engine but does increase
 # the time a client takes to notice a fully stalled task.
 HEARTBEAT_INTERVAL = 15.0
+# How often to re-read the store while tailing a task whose live events
+# never landed on this worker's bus (multi-worker / multi-replica
+# deployments). Sub-second feels live enough; longer would feel laggy.
+_STORE_POLL_INTERVAL = 0.5
 
 
 def _isoformat() -> str:
@@ -56,13 +60,16 @@ async def ndjson_lines(
       1. Replay every event with ``seq >= from_seq`` from the store.
       2. If the bus is already closed for this task (terminal state
          persisted), stop — the replay above contains the full tape.
-      3. Otherwise subscribe to the bus, BUT first re-replay any events
-         that landed in the store between step 1 and the subscription
-         (otherwise a client that resumes mid-stream can miss events
-         that flushed between the read and the subscribe). De-duplicate
-         by seq when forwarding live events.
+      3. Otherwise subscribe to the bus AND poll the store on a short
+         interval. The bus is the fast path for in-process tasks; the
+         store-poll is the cross-worker safety net — in a multi-worker
+         or multi-replica deployment the follower may land on a worker
+         that never saw the task in memory, so its bus has nothing to
+         hand back. Polling lets that follower still tail the task to
+         terminal even though every event arrives via the persistent
+         tape, not the in-process bus.
       4. Inject a heartbeat every ``heartbeat_interval`` seconds while
-         the bus stream is active.
+         the stream is otherwise quiet.
     """
     seen_seq = max(0, from_seq - 1)
 
@@ -83,39 +90,82 @@ async def ndjson_lines(
         yield _serialise(event)
         seen_seq = max(seen_seq, int(event.get("seq", 0)))
 
-    # Step 4 — interleave live events and heartbeats.
+    # Step 4 — bus tail + store-poll fallback + heartbeats.
     sub_iter = sub.__aiter__()
-    next_event_task = asyncio.ensure_future(sub_iter.__anext__())
+    next_event_task: asyncio.Task[dict[str, Any]] | None = (
+        asyncio.ensure_future(sub_iter.__anext__())
+    )
+    poll_interval = min(_STORE_POLL_INTERVAL, heartbeat_interval)
+    last_heartbeat = time.monotonic()
+
+    async def _drain_store() -> bool:
+        """Yield any new events from the store. Returns True if the row
+        is now terminal (caller should exit after one more drain)."""
+        nonlocal seen_seq
+        polled = await store.list_events(task_id, from_seq=seen_seq + 1)
+        for e in polled:
+            yield_buf.append(_serialise(e))
+            seen_seq = max(seen_seq, int(e.get("seq", 0)))
+        row = await store.get(task_id)
+        return row is not None and row.status in TERMINAL_STATUSES
+
+    yield_buf: list[bytes] = []
     try:
         while True:
-            try:
-                done, _pending = await asyncio.wait(
-                    {next_event_task},
-                    timeout=heartbeat_interval,
-                )
-            except asyncio.CancelledError:
-                next_event_task.cancel()
-                raise
-            if not done:
-                # Heartbeat — ephemeral, seq=0.
+            if next_event_task is not None:
+                try:
+                    done, _pending = await asyncio.wait(
+                        {next_event_task}, timeout=poll_interval
+                    )
+                except asyncio.CancelledError:
+                    next_event_task.cancel()
+                    raise
+                if done:
+                    try:
+                        event = next_event_task.result()
+                    except StopAsyncIteration:
+                        # Bus closed for this worker — switch to pure
+                        # polling. The task may still be running on
+                        # another worker, so we can't return yet.
+                        next_event_task = None
+                        continue
+                    seq = int(event.get("seq", 0))
+                    if seq > seen_seq:
+                        yield _serialise(event)
+                        seen_seq = seq
+                    next_event_task = asyncio.ensure_future(
+                        sub_iter.__anext__()
+                    )
+                    continue
+            else:
+                # Pure-polling mode (cross-worker follower) — pace the
+                # loop so we don't burn CPU on store reads.
+                await asyncio.sleep(poll_interval)
+
+            # Timeout / poll path — drain new events from the store
+            # (covers the cross-worker case) plus heartbeat.
+            terminal = await _drain_store()
+            for buf in yield_buf:
+                yield buf
+            yield_buf.clear()
+
+            now = time.monotonic()
+            if not terminal and now - last_heartbeat >= heartbeat_interval:
                 yield _serialise(
                     {"type": "heartbeat", "seq": 0, "ts": _isoformat()}
                 )
-                continue
-            try:
-                event = next_event_task.result()
-            except StopAsyncIteration:
+                last_heartbeat = now
+
+            if terminal:
+                # One more drain to be safe (a final event can land
+                # between drain + status check).
+                await _drain_store()
+                for buf in yield_buf:
+                    yield buf
+                yield_buf.clear()
                 return
-            seq = int(event.get("seq", 0))
-            if seq <= seen_seq:
-                # Already delivered via replay/catchup — drop.
-                next_event_task = asyncio.ensure_future(sub_iter.__anext__())
-                continue
-            yield _serialise(event)
-            seen_seq = seq
-            next_event_task = asyncio.ensure_future(sub_iter.__anext__())
     finally:
-        if not next_event_task.done():
+        if next_event_task is not None and not next_event_task.done():
             next_event_task.cancel()
 
 

@@ -1003,12 +1003,20 @@ async def test_filesystem_rejects_all_dense_methods(tmp_path: Path) -> None:
                 lambda: fs.vec_search_assets([1.0, 0.0, 0.0, 0.0], version_id=1),
             ),
             (
+                "list_assets_missing_embedding",
+                lambda: fs.list_assets_missing_embedding(version_id=1),
+            ),
+            (
                 "upsert_wisdom_embeddings",
                 lambda: fs.upsert_wisdom_embeddings([]),
             ),
             (
                 "vec_search_wisdom",
                 lambda: fs.vec_search_wisdom([1.0, 0.0, 0.0, 0.0], version_id=1),
+            ),
+            (
+                "list_wisdom_missing_embedding",
+                lambda: fs.list_wisdom_missing_embedding(version_id=1),
             ),
         ]
         for label, factory in cases:
@@ -1675,6 +1683,124 @@ async def test_asset_embeddings_dim_mismatch_raises(storage: Storage) -> None:
         )
 
 
+async def test_chunks_referencing_assets_chunks_large_input(
+    storage: Storage,
+) -> None:
+    """``chunks_referencing_assets`` must not trip
+    ``OperationalError: too many SQL variables`` on a backfill-sized
+    asset list. Default SQLite ``SQLITE_MAX_VARIABLE_NUMBER`` is 999
+    on legacy builds; modern is 32766. The implementation chunks the
+    IN-list internally so callers can hand it the full backlog.
+    """
+    doc = _make_doc("sources/many.md")
+    await storage.upsert_document(doc)
+    chunk_ids = await storage.replace_chunks(
+        doc.doc_id,
+        [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=4, text="body")],
+    )
+
+    # Three asset IDs ACTUALLY referenced by chunk 0; the remaining
+    # 1500 are random hashes the function should return empty lists for.
+    real_ids = [f"a{i:04d}" + "0" * 60 for i in range(3)]
+    decoy_ids = [f"d{i:04d}" + "0" * 60 for i in range(1500)]
+    all_ids = real_ids + decoy_ids
+
+    try:
+        for aid in real_ids:
+            await storage.upsert_asset(_make_asset(aid))
+        await storage.replace_chunk_asset_refs(
+            chunk_ids[0],
+            [
+                ChunkAssetRef(
+                    chunk_id=chunk_ids[0],
+                    asset_id=aid,
+                    ord=i,
+                    alt="",
+                    start_in_chunk=i,
+                    end_in_chunk=i + 1,
+                )
+                for i, aid in enumerate(real_ids)
+            ],
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement chunk_asset_refs yet")
+
+    # The ask: 1503 IDs in one call. Must not raise.
+    result = await storage.chunks_referencing_assets(all_ids)
+    assert len(result) == len(all_ids)
+    for aid in real_ids:
+        assert result[aid] == [chunk_ids[0]]
+    for aid in decoy_ids:
+        assert result[aid] == []
+
+
+async def test_list_assets_missing_embedding(storage: Storage) -> None:
+    """Backfill scan: returns assets without an ``asset_embed_meta`` row
+    for ``version_id``.
+
+    Assets stored under a text-only ingest (``materialize_asset``
+    decoupled from ``mm_cfg``) get rows in ``assets`` but no embedding.
+    The next mm-enabled ingest needs to find them; without this scan
+    they'd stay un-embedded forever (was_new=False suppresses the
+    new-asset queue entry).
+    """
+    v = EmbeddingVersion(
+        provider="fake_mm",
+        model="fake-mm-v1-missing",
+        dim=4,
+        normalize=True,
+        distance="cosine",
+        modality="multimodal",
+    )
+    v2 = EmbeddingVersion(
+        provider="fake_mm",
+        model="fake-mm-v2-missing",
+        dim=4,
+        normalize=True,
+        distance="cosine",
+        modality="multimodal",
+    )
+    a1 = _make_asset("a1" + "0" * 62, original_path="a1.png")
+    a2 = _make_asset("a2" + "0" * 62, original_path="a2.png")
+    a3 = _make_asset("a3" + "0" * 62, original_path="a3.png")
+    try:
+        v1_id = await storage.upsert_embed_version(v)
+        v2_id = await storage.upsert_embed_version(v2)
+        for asset in (a1, a2, a3):
+            await storage.upsert_asset(asset)
+        # Embed only a1 + a2 under v1; a3 unembedded under v1.
+        await storage.upsert_asset_embeddings(
+            [
+                AssetEmbeddingRow(
+                    asset_id=a1.asset_id,
+                    version_id=v1_id,
+                    embedding=[1.0, 0.0, 0.0, 0.0],
+                ),
+                AssetEmbeddingRow(
+                    asset_id=a2.asset_id,
+                    version_id=v1_id,
+                    embedding=[0.0, 1.0, 0.0, 0.0],
+                ),
+            ]
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement asset embeddings yet")
+
+    missing_v1 = await storage.list_assets_missing_embedding(version_id=v1_id)
+    assert {a.asset_id for a in missing_v1} == {a3.asset_id}
+    # Returned AssetRecords carry the original metadata so the caller can
+    # hand them to ``embed_assets`` directly without a refetch.
+    assert missing_v1[0].original_paths == ["a3.png"]
+
+    # Different version_id (v2) — none have embeddings yet → all 3 missing.
+    missing_v2 = await storage.list_assets_missing_embedding(version_id=v2_id)
+    assert {a.asset_id for a in missing_v2} == {
+        a1.asset_id,
+        a2.asset_id,
+        a3.asset_id,
+    }
+
+
 # ---- Wisdom embeddings (P0) ---------------------------------------------
 
 
@@ -1806,6 +1932,44 @@ async def test_wisdom_embeddings_idempotent_on_reupsert(
     # the original vector was overwritten rather than duplicated.
     assert len(hits_a) == 1
     assert hits_a[0].distance > 0.5
+
+
+async def test_list_wisdom_missing_embedding(storage: Storage) -> None:
+    """Symmetric to ``test_list_assets_missing_embedding`` — wisdom items
+    without a ``wisdom_embed_meta`` row for ``version_id``.
+
+    No engine call site uses this primitive yet (wisdom embedding
+    pipeline is not wired up); the test just locks the storage
+    contract so future work has the recovery path ready.
+    """
+    try:
+        v1 = await register_text_version(
+            storage, dim=4, model="fake-wisdom-missing-v1"
+        )
+        v2 = await register_text_version(
+            storage, dim=4, model="fake-wisdom-missing-v2"
+        )
+        i1 = await _seed_wisdom_item(storage, "W-MISS-001")
+        i2 = await _seed_wisdom_item(storage, "W-MISS-002")
+        i3 = await _seed_wisdom_item(storage, "W-MISS-003")
+        await storage.upsert_wisdom_embeddings(
+            [
+                WisdomEmbeddingRow(
+                    item_id=i1, version_id=v1, embedding=[1.0, 0.0, 0.0, 0.0]
+                ),
+                WisdomEmbeddingRow(
+                    item_id=i2, version_id=v1, embedding=[0.0, 1.0, 0.0, 0.0]
+                ),
+            ]
+        )
+    except NotSupported:
+        pytest.skip("backend doesn't implement wisdom embeddings")
+
+    missing_v1 = await storage.list_wisdom_missing_embedding(version_id=v1)
+    assert {it.item_id for it in missing_v1} == {i3}
+    # Different version → none embedded under it yet.
+    missing_v2 = await storage.list_wisdom_missing_embedding(version_id=v2)
+    assert {it.item_id for it in missing_v2} == {i1, i2, i3}
 
 
 async def test_vec_search_wisdom_returns_in_distance_order(

@@ -23,16 +23,25 @@ Phase 0 surface (``init_wiki``, ``status``) stays unchanged.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import struct
 import time
 import zlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from . import prompts
 from .config import (
@@ -54,6 +63,7 @@ from .info.embed import (
     ChunkToEmbed,
     embed_assets,
     embed_chunks,
+    is_unembeddable_asset_mime,
 )
 from .info.search import HybridSearcher, MultimodalSearch
 from .info.tokenize import CjkTokenizer
@@ -175,18 +185,60 @@ WIKI_INIT_FILES: dict[str, str] = {
 }
 
 
-async def _consume_embedding_stream(
-    stream: AsyncIterator[list[EmbeddingRow]], storage: Storage
-) -> int:
-    """Drain an embed_chunks-style stream, upserting each batch as it arrives.
+# One stderr Console for all embedding progress bars. Constructing one
+# per ingest pass would re-probe terminal capability + color system on
+# every call; rich's recommended pattern is a single shared instance.
+_PROGRESS_CONSOLE = Console(stderr=True)
 
-    Per-batch upsert is the durability guarantee: a mid-flight provider
-    failure leaves prior batches on disk instead of throwing them away.
+
+def _ceil_div(n: int, d: int) -> int:
+    """``(N + B - 1) // B`` with the same ``batch_size > 0`` guard
+    ``embed_chunks`` / ``embed_assets`` already raise on. Without this,
+    a ``batch_size: 0`` config produced an opaque ``ZeroDivisionError``
+    from this helper before reaching the embed function's validation.
+    """
+    if d <= 0:
+        raise ValueError(f"batch_size must be positive, got {d}")
+    return (n + d - 1) // d
+
+
+@contextlib.contextmanager
+def _embedding_progress(
+    description: str, *, total: int
+) -> Iterator[Callable[[], None]]:
+    """Yield an ``advance()`` that bumps a transient stderr progress bar
+    by one batch. ``rich.progress`` self-suppresses in non-TTY shells
+    (CI, pipe redirects), so the bar is invisible there without a flag.
+    """
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=_PROGRESS_CONSOLE,
+        transient=True,
+    ) as progress:
+        task = progress.add_task(description, total=total)
+        yield lambda: progress.update(task, advance=1)
+
+
+async def _consume_embedding_stream(
+    stream: AsyncIterator[list[EmbeddingRow]],
+    storage: Storage,
+    *,
+    on_batch: Callable[[], None] | None = None,
+) -> int:
+    """Drain an embed_chunks-style stream, upserting each batch as it
+    arrives. Per-batch upsert is the durability guarantee: a mid-flight
+    provider failure leaves prior batches on disk instead of throwing
+    away the entire run's API spend.
     """
     embedded = 0
     async for batch in stream:
         await storage.upsert_embeddings(batch)
         embedded += len(batch)
+        if on_batch is not None:
+            on_batch()
     return embedded
 
 
@@ -871,42 +923,105 @@ async def ingest(
         # a mid-flight crash keeps the prior batches' vectors on disk
         # instead of throwing away the entire run's API spend.
         if to_embed and embedder is not None and text_version_id is not None:
-            embedded = await _consume_embedding_stream(
-                embed_chunks(
-                    embedder,
-                    to_embed,
-                    model=cfg.provider.embedding_model,
-                    version_id=text_version_id,
-                    storage=storage,
-                    batch_size=cfg.provider.embedding_batch_size,
-                ),
-                storage,
-            )
+            chunk_batch_size = cfg.provider.embedding_batch_size
+            chunk_total = _ceil_div(len(to_embed), chunk_batch_size)
+            with _embedding_progress(
+                "embedding chunks", total=chunk_total
+            ) as advance_chunk:
+                embedded = await _consume_embedding_stream(
+                    embed_chunks(
+                        embedder,
+                        to_embed,
+                        model=cfg.provider.embedding_model,
+                        version_id=text_version_id,
+                        storage=storage,
+                        batch_size=chunk_batch_size,
+                    ),
+                    storage,
+                    on_batch=advance_chunk,
+                )
             report = _replace(report, embedded=embedded)
 
-        # Asset embeddings — only when multimodal is configured AND a real
-        # mm provider is available. New-this-run assets only; previously
-        # ingested asset binaries already have vectors from a prior run.
+        # Backfill assets stored without a vector for the active mm
+        # version — text-only ingest residue, prior mm version, or
+        # mid-flight crash of an earlier embed pass. Kept separate from
+        # ``new_assets_by_id`` so ``report.assets`` (= NEW this run)
+        # stays accurate; the union below is what we feed to the
+        # embed pass. Gated on the same condition as the embed block
+        # to avoid a no-op SQL round-trip when no mm embedder is wired.
+        backfill_by_id: dict[str, AssetRecord] = {}
         if (
             multimodal_embedder is not None
             and mm_cfg is not None
             and mm_version_id is not None
-            and new_assets_by_id
         ):
-            asset_rows = await embed_assets(
-                multimodal_embedder,
-                list(new_assets_by_id.values()),
-                project_root=root,
-                model=mm_cfg.model,
-                version_id=mm_version_id,
-                batch_size=mm_cfg.batch,
+            missing_assets = await storage.list_assets_missing_embedding(
+                version_id=mm_version_id
             )
-            if asset_rows:
-                await storage.upsert_asset_embeddings(asset_rows)
+            # Skip categories ``embed_assets`` deliberately discards
+            # without writing a meta row — they'd reappear in every
+            # subsequent ingest's "needs embedding" list forever:
+            #   * unembeddable mime (SVG today; v1 doesn't rasterize)
+            #   * stored binary missing on disk (asset row points at a
+            #     deleted file — first time we hit it, ``embed_assets``
+            #     logs the read failure; the backfill scan should not
+            #     keep re-reading + re-warning on every later ingest).
+            candidates = [
+                rec
+                for rec in missing_assets
+                if not is_unembeddable_asset_mime(rec.mime)
+                and rec.asset_id not in new_assets_by_id
+                and (root / rec.stored_path).is_file()
+            ]
+            # Filter to assets still referenced by at least one live
+            # chunk. An asset whose markdown ref was deleted is
+            # unreachable via ``HybridSearcher`` (which promotes asset
+            # hits through ``chunks_referencing_assets``), so embedding
+            # those orphans burns provider calls for vectors search
+            # can never surface.
+            if candidates:
+                refs_by_asset = await storage.chunks_referencing_assets(
+                    [rec.asset_id for rec in candidates]
+                )
+                for rec in candidates:
+                    if refs_by_asset.get(rec.asset_id):
+                        backfill_by_id[rec.asset_id] = rec
+
+        to_embed_assets: dict[str, AssetRecord] = {
+            **new_assets_by_id,
+            **backfill_by_id,
+        }
+        if (
+            multimodal_embedder is not None
+            and mm_cfg is not None
+            and mm_version_id is not None
+            and to_embed_assets
+        ):
+            asset_total_batches = _ceil_div(len(to_embed_assets), mm_cfg.batch)
+            asset_embedded = 0
+            # Per-batch upsert: a mid-flight provider failure leaves
+            # prior batches' vectors on disk so the next retry's
+            # backfill scan sees only the truly-missing tail. Symmetric
+            # with the chunk side's ``_consume_embedding_stream``.
+            with _embedding_progress(
+                "embedding assets", total=asset_total_batches
+            ) as advance_asset:
+                async for batch_rows in embed_assets(
+                    multimodal_embedder,
+                    list(to_embed_assets.values()),
+                    project_root=root,
+                    model=mm_cfg.model,
+                    version_id=mm_version_id,
+                    batch_size=mm_cfg.batch,
+                ):
+                    if batch_rows:
+                        await storage.upsert_asset_embeddings(batch_rows)
+                        asset_embedded += len(batch_rows)
+                    advance_asset()
             report = _replace(
                 report,
                 assets=len(new_assets_by_id),
-                asset_embedded=len(asset_rows),
+                asset_embedded=asset_embedded,
             )
         elif new_assets_by_id:
             # Materialized assets even without an mm embedder so the chunk

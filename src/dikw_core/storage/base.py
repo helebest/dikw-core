@@ -244,6 +244,18 @@ class Storage(Protocol):
         """
         ...
 
+    async def list_wisdom_missing_embedding(
+        self, *, version_id: int
+    ) -> list[WisdomItem]:
+        """Wisdom items with no ``wisdom_embed_meta`` row for ``version_id``.
+
+        Symmetric API to ``list_assets_missing_embedding`` /
+        ``list_chunks_missing_embedding``; reserved for the wisdom-
+        embedding pipeline that will follow once distill+approve learn
+        to enqueue items here. No call site in the engine yet.
+        """
+        ...
+
     async def vec_search_wisdom(
         self,
         embedding: list[float],
@@ -319,6 +331,19 @@ class Storage(Protocol):
         """Persist asset-level embedding vectors. The vector dimension
         must match the dim of the row's ``version_id`` in
         ``embed_versions``; otherwise raise ``StorageError``."""
+        ...
+
+    async def list_assets_missing_embedding(
+        self, *, version_id: int
+    ) -> list[AssetRecord]:
+        """Assets with no ``asset_embed_meta`` row for ``version_id``.
+
+        Used by ``api.ingest`` to backfill assets that were materialized
+        without an embedding (text-only ingest decoupled materialize
+        from ``mm_cfg``, so existing rows pre-date the active mm
+        version) or whose prior embed pass crashed mid-flight. Mirrors
+        ``list_chunks_missing_embedding`` for the chunk side.
+        """
         ...
 
     async def vec_search_assets(

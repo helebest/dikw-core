@@ -227,6 +227,18 @@ async def _embed_one_batch(
     return rows
 
 
+def is_unembeddable_asset_mime(mime: str) -> bool:
+    """Return ``True`` for MIME types that ``embed_assets`` will silently
+    skip (no vector + no ``asset_embed_meta`` row produced).
+
+    Currently SVG only — v1 doesn't rasterize. Callers who scan for
+    "missing" embeddings (e.g., the resume-scan in ``api.ingest``) use
+    this to filter the candidate list, otherwise SVGs reappear in
+    every ingest's "needs embedding" pass forever.
+    """
+    return mime == "image/svg+xml"
+
+
 async def embed_assets(
     provider: MultimodalEmbeddingProvider,
     assets: Sequence[AssetRecord],
@@ -235,14 +247,21 @@ async def embed_assets(
     model: str,
     version_id: int,
     batch_size: int = 16,
-) -> list[AssetEmbeddingRow]:
-    """Embed asset binaries via the multimodal provider (image-only inputs).
+) -> AsyncIterator[list[AssetEmbeddingRow]]:
+    """Embed asset binaries via the multimodal provider, streaming
+    one ``list[AssetEmbeddingRow]`` per provider call.
 
-    Reads each asset's bytes from ``project_root / asset.stored_path``.
-    Assets whose binary is missing on disk are skipped with a WARNING log;
-    the rest of the batch still embeds. SVG assets (``image/svg+xml``)
-    are also skipped since v1 doesn't rasterize them; their AssetRecord
-    survives in storage with no embedding row.
+    Mirrors ``embed_chunks``'s per-batch yield contract so the caller
+    can persist each batch immediately. Without this, a partial-failure
+    on a large backfill (e.g. text-only -> multimodal migration with
+    thousands of unembedded images) wastes the API spend on every
+    successful prior batch — the next retry re-embeds them from scratch.
+
+    Reads each asset's bytes from ``project_root / asset.stored_path``
+    just before its batch goes to the provider; skipped assets (SVG,
+    unreadable) don't contribute to the request payload but the slice
+    still yields (empty list) so the caller's progress bookkeeping
+    stays aligned with slice count, not embedded count.
 
     Output rows are tagged with ``version_id`` so storage can route them
     into the correct ``vec_assets_v<id>`` table.
@@ -250,44 +269,45 @@ async def embed_assets(
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if not assets:
-        return []
+        return
 
-    # Resolve and load bytes upfront so the provider call only sees ready
-    # inputs. Skipped assets never enter the request payload.
-    pending: list[tuple[AssetRecord, ImageContent]] = []
-    for asset in assets:
-        if asset.mime == "image/svg+xml":
-            logger.info(
-                "skipping SVG asset embedding (v1 doesn't rasterize): %s",
-                asset.stored_path,
-            )
-            continue
-        path = project_root / asset.stored_path
-        try:
-            data = path.read_bytes()
-        except OSError as e:
-            logger.warning(
-                "skipping asset embedding for %s (read failed: %s)",
-                asset.stored_path,
-                e,
-            )
-            continue
-        pending.append((asset, ImageContent(bytes=data, mime=asset.mime)))
+    for start in range(0, len(assets), batch_size):
+        slice_ = assets[start : start + batch_size]
+        batch_pairs: list[tuple[AssetRecord, ImageContent]] = []
+        for asset in slice_:
+            if is_unembeddable_asset_mime(asset.mime):
+                logger.info(
+                    "skipping unembeddable asset (%s): %s",
+                    asset.mime,
+                    asset.stored_path,
+                )
+                continue
+            path = project_root / asset.stored_path
+            try:
+                data = path.read_bytes()
+            except OSError as e:
+                logger.warning(
+                    "skipping asset embedding for %s (read failed: %s)",
+                    asset.stored_path,
+                    e,
+                )
+                continue
+            batch_pairs.append((asset, ImageContent(bytes=data, mime=asset.mime)))
 
-    rows: list[AssetEmbeddingRow] = []
-    for start in range(0, len(pending), batch_size):
-        batch = pending[start : start + batch_size]
-        inputs = [MultimodalInput(images=[img]) for _, img in batch]
+        if not batch_pairs:
+            yield []
+            continue
+
+        inputs = [MultimodalInput(images=[img]) for _, img in batch_pairs]
         vectors = await provider.embed(inputs, model=model)
-        if len(vectors) != len(batch):
+        if len(vectors) != len(batch_pairs):
             raise RuntimeError(
                 f"multimodal provider returned {len(vectors)} vectors for "
-                f"{len(batch)} asset inputs"
+                f"{len(batch_pairs)} asset inputs"
             )
-        rows.extend(
+        yield [
             AssetEmbeddingRow(
                 asset_id=asset.asset_id, version_id=version_id, embedding=v
             )
-            for (asset, _), v in zip(batch, vectors, strict=True)
-        )
-    return rows
+            for (asset, _), v in zip(batch_pairs, vectors, strict=True)
+        ]

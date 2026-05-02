@@ -789,6 +789,37 @@ class PostgresStorage:
                 )
             await conn.commit()
 
+    async def list_assets_missing_embedding(
+        self, *, version_id: int
+    ) -> list[AssetRecord]:
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT asset_id, kind, mime, stored_path, "
+                "original_paths, bytes, media_meta, created_ts "
+                "FROM assets "
+                "WHERE asset_id NOT IN "
+                "(SELECT asset_id FROM asset_embed_meta WHERE version_id = %s) "
+                "ORDER BY asset_id",
+                (version_id,),
+            )
+            rows = await cur.fetchall()
+        return [_row_to_asset(r) for r in rows]
+
+    async def list_wisdom_missing_embedding(
+        self, *, version_id: int
+    ) -> list[WisdomItem]:
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT item_id, kind, status, path, title, body, confidence, "
+                "       created_ts, approved_ts FROM wisdom_items "
+                "WHERE item_id NOT IN "
+                "(SELECT item_id FROM wisdom_embed_meta WHERE version_id = %s) "
+                "ORDER BY item_id",
+                (version_id,),
+            )
+            rows = await cur.fetchall()
+        return [_row_to_wisdom(r) for r in rows]
+
     async def get_asset(self, asset_id: str) -> AssetRecord | None:
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(

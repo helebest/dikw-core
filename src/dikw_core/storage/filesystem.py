@@ -497,6 +497,12 @@ class FilesystemStorage:
     ) -> None:
         raise NotSupported(_DENSE_NOT_SUPPORTED)
 
+    async def list_assets_missing_embedding(
+        self, *, version_id: int
+    ) -> list[AssetRecord]:
+        del version_id
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
+
     async def vec_search_assets(
         self,
         embedding: list[float],
@@ -511,6 +517,12 @@ class FilesystemStorage:
         self, rows: Sequence[WisdomEmbeddingRow]
     ) -> None:
         del rows
+        raise NotSupported(_DENSE_NOT_SUPPORTED)
+
+    async def list_wisdom_missing_embedding(
+        self, *, version_id: int
+    ) -> list[WisdomItem]:
+        del version_id
         raise NotSupported(_DENSE_NOT_SUPPORTED)
 
     async def vec_search_wisdom(

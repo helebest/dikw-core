@@ -10,9 +10,10 @@ OpenAI-compatible provider.
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from .base import LLMResponse, ProviderError, ToolSpec
+from .base import LLMResponse, LLMStreamEvent, ProviderError, ToolSpec
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
@@ -127,4 +128,22 @@ class AnthropicLLM:
             text=text_out,
             finish_reason=resp.stop_reason,
             usage=usage,
+        )
+
+    def complete_stream(
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str,
+        max_tokens: int = 4096,
+        temperature: float = 0.2,
+        tools: list[ToolSpec] | None = None,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        # Streaming lands in Phase 4 of the client/server migration; until
+        # then callers must catch NotImplementedError and fall back to
+        # ``complete`` + a single synthetic ``done`` event.
+        del system, user, model, max_tokens, temperature, tools
+        raise NotImplementedError(
+            "AnthropicLLM.complete_stream is not implemented yet; use complete()"
         )

@@ -73,6 +73,7 @@ from .knowledge.lint import LintReport, run_lint
 from .knowledge.log import render_log
 from .knowledge.synthesize import SynthesisError, parse_synthesis_response
 from .knowledge.wiki import WikiPage, now_iso, write_page
+from .progress import NoopReporter, ProgressReporter
 from .providers import (
     EmbeddingProvider,
     LLMProvider,
@@ -227,18 +228,33 @@ async def _consume_embedding_stream(
     storage: Storage,
     *,
     on_batch: Callable[[], None] | None = None,
+    reporter: ProgressReporter | None = None,
+    phase: str = "embed",
+    total: int = 0,
 ) -> int:
     """Drain an embed_chunks-style stream, upserting each batch as it
     arrives. Per-batch upsert is the durability guarantee: a mid-flight
     provider failure leaves prior batches on disk instead of throwing
     away the entire run's API spend.
+
+    ``on_batch`` keeps the in-process rich progress bar's CLI callback
+    surface; ``reporter`` is the new structured channel a server task
+    listens on. Both fire per batch so a single ingest call can drive a
+    local TTY *and* a remote NDJSON subscriber simultaneously.
     """
     embedded = 0
+    batches_done = 0
     async for batch in stream:
         await storage.upsert_embeddings(batch)
         embedded += len(batch)
+        batches_done += 1
         if on_batch is not None:
             on_batch()
+        if reporter is not None:
+            await reporter.progress(
+                phase=phase, current=batches_done, total=total
+            )
+            reporter.cancel_token().raise_if_cancelled()
     return embedded
 
 
@@ -692,6 +708,7 @@ async def ingest(
     *,
     embedder: EmbeddingProvider | None = None,
     multimodal_embedder: MultimodalEmbeddingProvider | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> IngestReport:
     """Ingest every markdown file listed in ``sources:`` into the D and I layers.
 
@@ -705,6 +722,10 @@ async def ingest(
       bytes into ``vec_assets_v<mm_version_id>``. It does NOT embed
       chunk text — chunks always flow through the text channel.
 
+    ``reporter`` (optional) receives structured progress events for
+    server-driven task wrappers; in-process callers leave it ``None`` and
+    rely on the ``rich`` stderr progress bar instead.
+
     Asset binaries referenced from markdown are materialized into
     ``<root>/<assets.dir>/`` regardless of which embedder is set —
     ``chunk_asset_refs`` always reflect the on-disk structure so
@@ -712,6 +733,7 @@ async def ingest(
     """
     cfg, root, storage = await _with_storage(path)
     owned_mm: MultimodalEmbeddingProvider | None = None
+    _reporter: ProgressReporter = reporter or NoopReporter()
     try:
         report = IngestReport()
         to_embed: list[ChunkToEmbed] = []
@@ -772,7 +794,9 @@ async def ingest(
             )
             owned_mm = multimodal_embedder
 
+        await _reporter.progress(phase="scan", current=0, total=0)
         for abs_path, logical_path in iter_source_files(cfg.sources, root=root):
+            _reporter.cancel_token().raise_if_cancelled()
             try:
                 parsed = parse_any(abs_path, rel_path=logical_path)
             except UnsupportedFormat:
@@ -897,6 +921,12 @@ async def ingest(
                 updated=report.updated + 1 if existing is not None else report.updated,
                 chunks=report.chunks + len(chunk_records),
             )
+            await _reporter.progress(
+                phase="scan",
+                current=scanned,
+                total=0,
+                detail={"path": logical_path},
+            )
 
         # Resume scan: pick up chunks that landed in storage during a
         # prior crashed run but never got their embedding written. The
@@ -939,6 +969,9 @@ async def ingest(
                     ),
                     storage,
                     on_batch=advance_chunk,
+                    reporter=_reporter,
+                    phase="embed_chunks",
+                    total=chunk_total,
                 )
             report = _replace(report, embedded=embedded)
 
@@ -999,6 +1032,7 @@ async def ingest(
         ):
             asset_total_batches = _ceil_div(len(to_embed_assets), mm_cfg.batch)
             asset_embedded = 0
+            asset_batches_done = 0
             # Per-batch upsert: a mid-flight provider failure leaves
             # prior batches' vectors on disk so the next retry's
             # backfill scan sees only the truly-missing tail. Symmetric
@@ -1018,6 +1052,13 @@ async def ingest(
                         await storage.upsert_asset_embeddings(batch_rows)
                         asset_embedded += len(batch_rows)
                     advance_asset()
+                    asset_batches_done += 1
+                    await _reporter.progress(
+                        phase="embed_assets",
+                        current=asset_batches_done,
+                        total=asset_total_batches,
+                    )
+                    _reporter.cancel_token().raise_if_cancelled()
             report = _replace(
                 report,
                 assets=len(new_assets_by_id),
@@ -1071,6 +1112,7 @@ async def query(
     llm: LLMProvider | None = None,
     embedder: EmbeddingProvider | None = None,
     multimodal_embedder: MultimodalEmbeddingProvider | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> QueryResult:
     """Hybrid-search the wiki, feed the top hits to an LLM, and return cited answer.
 
@@ -1078,9 +1120,15 @@ async def query(
     ``multimodal_embedder`` is supplied (or buildable from the same
     config), the searcher activates the asset-vector channel so visual
     references contribute to retrieval.
+
+    ``reporter`` (optional) emits a ``retrieval_done`` partial with the
+    raw hits before the LLM step, then a final ``llm_done`` partial with
+    the answer text + usage. Streaming token-level partials land in
+    Phase 4 once provider ``complete_stream`` exists.
     """
     cfg, _root, storage = await _with_storage(path)
     owned_mm: MultimodalEmbeddingProvider | None = None
+    _reporter: ProgressReporter = reporter or NoopReporter()
     try:
         _llm = llm
         if _llm is None:
@@ -1157,6 +1205,10 @@ async def query(
             multimodal=mm_search,
         )
         hits = await searcher.search(q, limit=limit)
+        await _reporter.partial(
+            "retrieval_done",
+            {"hits": [h.model_dump(mode="json") for h in hits]},
+        )
 
         excerpts_block, citations = await _build_excerpts(storage, hits)
         if not citations:
@@ -1179,6 +1231,14 @@ async def query(
             model=cfg.provider.llm_model,
             max_tokens=cfg.provider.llm_max_tokens_query,
             temperature=0.2,
+        )
+        await _reporter.partial(
+            "llm_done",
+            {
+                "text": response.text,
+                "finish_reason": response.finish_reason,
+                "usage": response.usage,
+            },
         )
         return QueryResult(
             answer=response.text.strip(),
@@ -1224,14 +1284,19 @@ async def synthesize(
     force_all: bool = False,
     llm: LLMProvider | None = None,
     embedder: EmbeddingProvider | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> SynthReport:
     """Turn source docs into K-layer wiki pages via the configured LLM.
 
     By default only source docs that have never been synthesised are
     processed; pass ``force_all=True`` to re-synthesise every source.
     Embedding of new wiki pages is skipped when ``embedder`` is ``None``.
+
+    ``reporter`` (optional) receives one ``progress`` event per source
+    document processed for server-driven task wrappers.
     """
     cfg, root, storage = await _with_storage(path)
+    _reporter: ProgressReporter = reporter or NoopReporter()
     try:
         _llm = llm or build_llm(cfg.provider)
 
@@ -1262,11 +1327,19 @@ async def synthesize(
         report = SynthReport()
         tmpl = prompts.load("synthesize")
         persisted_any = False
+        total_sources = len(sources)
 
-        for src in sources:
+        for idx, src in enumerate(sources, start=1):
+            _reporter.cancel_token().raise_if_cancelled()
             report = _sr_replace(report, candidates=report.candidates + 1)
             if src.path in already:
                 report = _sr_replace(report, skipped=report.skipped + 1)
+                await _reporter.progress(
+                    phase="synth",
+                    current=idx,
+                    total=total_sources,
+                    detail={"path": src.path, "outcome": "skipped"},
+                )
                 continue
 
             body = _read_source_body(root, src)
@@ -1279,6 +1352,12 @@ async def synthesize(
                         src=src.path,
                         note="source body missing on disk",
                     )
+                )
+                await _reporter.progress(
+                    phase="synth",
+                    current=idx,
+                    total=total_sources,
+                    detail={"path": src.path, "outcome": "missing_body"},
                 )
                 continue
 
@@ -1303,6 +1382,12 @@ async def synthesize(
                         note=f"parse error: {e}",
                     )
                 )
+                await _reporter.progress(
+                    phase="synth",
+                    current=idx,
+                    total=total_sources,
+                    detail={"path": src.path, "outcome": "parse_error"},
+                )
                 continue
 
             pre_existing = await storage.get_document(
@@ -1324,10 +1409,17 @@ async def synthesize(
                 )
             )
             persisted_any = True
+            outcome = "created" if pre_existing is None else "updated"
             if pre_existing is None:
                 report = _sr_replace(report, created=report.created + 1)
             else:
                 report = _sr_replace(report, updated=report.updated + 1)
+            await _reporter.progress(
+                phase="synth",
+                current=idx,
+                total=total_sources,
+                detail={"path": src.path, "dst": page.path, "outcome": outcome},
+            )
 
         # Refresh the human-readable views after the batch so a partial run
         # still leaves the wiki internally consistent.
@@ -1444,14 +1536,18 @@ async def distill(
     *,
     llm: LLMProvider | None = None,
     pages_per_call: int = 8,
+    reporter: ProgressReporter | None = None,
 ) -> DistillReport:
     """Propose W-layer wisdom items from the current K-layer pages.
 
     ``pages_per_call`` caps how many K pages are fed to a single LLM call;
     each call produces zero or more ``<wisdom>`` blocks that are persisted
     as candidates when they satisfy the N≥2-evidence invariant.
+
+    ``reporter`` (optional) emits one ``progress`` event per LLM batch.
     """
     cfg, root, storage = await _with_storage(path)
+    _reporter: ProgressReporter = reporter or NoopReporter()
     try:
         _llm = llm or build_llm(cfg.provider)
 
@@ -1473,7 +1569,10 @@ async def distill(
             for item in await storage.list_wisdom()
         }
 
-        for batch in _chunked(k_docs, pages_per_call):
+        batches = list(_chunked(k_docs, pages_per_call))
+        total_batches = len(batches)
+        for batch_idx, batch in enumerate(batches, start=1):
+            _reporter.cancel_token().raise_if_cancelled()
             pages_block = _render_pages_block(root, batch)
             user_prompt = tmpl.format(pages_block=pages_block)
             response = await _llm.complete(
@@ -1488,6 +1587,7 @@ async def distill(
                 report,
                 rejected=report.rejected + len(parsed.rejected),
             )
+            batch_added = 0
             for cand in parsed.candidates:
                 if cand.item_id in seen_ids:
                     continue
@@ -1498,6 +1598,17 @@ async def distill(
                     continue
                 seen_ids.add(cand.item_id)
                 report = _dr_replace(report, candidates_added=report.candidates_added + 1)
+                batch_added += 1
+            await _reporter.progress(
+                phase="distill",
+                current=batch_idx,
+                total=total_batches,
+                detail={
+                    "pages": len(batch),
+                    "candidates_added": batch_added,
+                    "rejected": len(parsed.rejected),
+                },
+            )
 
         # Keep the append-only log up to date even if no candidates landed
         if report.candidates_added:

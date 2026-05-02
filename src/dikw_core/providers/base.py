@@ -7,7 +7,8 @@ wrap the official SDKs. Swapping providers is a config-only change at the
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import AsyncIterator
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,25 @@ class LLMResponse(BaseModel):
     raw: dict[str, Any] | None = None
 
 
+class LLMStreamEvent(BaseModel):
+    """One event in a streaming LLM completion.
+
+    ``type == "token"``: incremental text fragment in ``delta``.
+    ``type == "done"``: terminal event with the full assembled ``text`` and
+    ``finish_reason``/``usage`` mirroring ``LLMResponse``. Stream consumers
+    should expect exactly one ``done`` event after zero or more ``token``
+    events; providers that don't support streaming raise
+    ``NotImplementedError`` from ``complete_stream`` and callers fall back
+    to ``complete``.
+    """
+
+    type: Literal["token", "done"]
+    delta: str | None = None
+    text: str | None = None
+    finish_reason: str | None = None
+    usage: dict[str, int] = Field(default_factory=dict)
+
+
 class ProviderError(RuntimeError):
     """Base class for provider errors (auth, network, invalid model, etc.)."""
 
@@ -43,6 +63,25 @@ class LLMProvider(Protocol):
         temperature: float = 0.2,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResponse: ...
+
+    def complete_stream(
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str,
+        max_tokens: int = 4096,
+        temperature: float = 0.2,
+        tools: list[ToolSpec] | None = None,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        """Stream a completion as ``LLMStreamEvent`` chunks.
+
+        Optional capability: providers that haven't wired SDK-level
+        streaming yet raise ``NotImplementedError``. The query layer's
+        Phase-4 streaming path catches that and falls back to ``complete``
+        + a single synthetic ``done`` event.
+        """
+        ...
 
 
 @runtime_checkable
@@ -77,6 +116,7 @@ __all__ = [
     "EmbeddingProvider",
     "LLMProvider",
     "LLMResponse",
+    "LLMStreamEvent",
     "MultimodalEmbeddingProvider",
     "ProviderError",
     "ToolSpec",

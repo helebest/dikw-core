@@ -201,6 +201,7 @@ def make_router(*, auth_dep: Any) -> APIRouter:
             cfg=rt.cfg,
             upload_id=body.upload_id,
             no_embed=body.no_embed,
+            lock=rt.ingest_lock,
         )
         row = await rt.manager.submit(
             op="ingest",

@@ -28,6 +28,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -93,6 +94,37 @@ def test_wait_until_ready_times_out_when_nothing_listens() -> None:
     # poll to complete. If we ever exceed 5s here, the deadline math
     # is broken.
     assert elapsed < 5.0
+
+
+def test_wait_until_ready_sends_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the spawned server requires a token, the readiness probe
+    must include ``Authorization: Bearer <token>``. Without it the
+    server returns 401 and the caller waits out the entire timeout
+    even though everything is healthy."""
+    seen_headers: list[dict[str, str]] = []
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def fake_urlopen(req: Any, timeout: float) -> _Resp:  # type: ignore[no-untyped-def]
+        seen_headers.append(dict(req.headers))
+        return _Resp()
+
+    monkeypatch.setattr(sar.urllib.request, "urlopen", fake_urlopen)
+    sar.wait_until_ready(
+        "http://127.0.0.1:9999", timeout=1.0, token="s3cret"
+    )
+    assert seen_headers, "urlopen was never called"
+    # urllib title-cases header names ("Authorization").
+    assert seen_headers[0].get("Authorization") == "Bearer s3cret"
 
 
 def test_terminate_is_a_noop_for_already_exited_process() -> None:

@@ -82,6 +82,7 @@ def wait_until_ready(
     url: str,
     *,
     timeout: float,
+    token: str | None = None,
     proc: subprocess.Popen[bytes] | None = None,
 ) -> None:
     """Poll ``GET <url>/v1/healthz`` until 200 or ``timeout`` lapses.
@@ -91,10 +92,15 @@ def wait_until_ready(
     ``proc`` is given, an early subprocess exit short-circuits the
     poll with ``ServerExitedEarly`` — saves a 30s timeout when the
     user passed e.g. ``--host 0.0.0.0`` without a token.
+
+    ``token`` must be passed whenever the spawned server requires auth
+    (any non-loopback ``--host``, or loopback with ``--token``); otherwise
+    the probe sees 401 and the caller waits out the entire timeout.
     """
     deadline = time.monotonic() + timeout
     last_err: BaseException | None = None
     health_url = url.rstrip("/") + "/v1/healthz"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     while time.monotonic() < deadline:
         if proc is not None and proc.poll() is not None:
             raise ServerExitedEarly(
@@ -102,7 +108,8 @@ def wait_until_ready(
                 "before /v1/healthz responded"
             )
         try:
-            with urllib.request.urlopen(health_url, timeout=_READY_HTTP_TIMEOUT) as resp:
+            req = urllib.request.Request(health_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=_READY_HTTP_TIMEOUT) as resp:
                 if 200 <= resp.status < 300:
                     return
         except (urllib.error.URLError, ConnectionError, OSError) as e:
@@ -187,6 +194,7 @@ def run(opts: ServeAndRunOptions) -> int:
             wait_until_ready(
                 f"http://{opts.host}:{opts.port}",
                 timeout=opts.ready_timeout,
+                token=opts.token,
                 proc=server,
             )
         except (TimeoutError, ServerExitedEarly) as e:

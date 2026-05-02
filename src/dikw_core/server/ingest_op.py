@@ -8,6 +8,7 @@ helper (synth on a freshly uploaded source set, etc.).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import os
@@ -92,6 +93,7 @@ def make_ingest_runner(
     cfg: Any,  # DikwConfig — typed Any to avoid re-importing across modules
     upload_id: str | None,
     no_embed: bool,
+    lock: asyncio.Lock | None = None,
 ) -> Callable[[ProgressReporter], Awaitable[dict[str, Any]]]:
     """Build a ``TaskRunner`` that drives ``api.ingest`` for one task.
 
@@ -101,61 +103,72 @@ def make_ingest_runner(
     TaskManager-managed cancellation token covers the runner's whole
     lifetime, while a pre-submit commit would leave a "task created but
     nothing happened yet" gap visible to subscribers.
+
+    ``lock`` (the runtime's ``ingest_lock``) serializes overlapping
+    ingest tasks so two concurrent uploads can't interleave their
+    staging-commit + on-disk writes. Tests that drive the runner in
+    isolation may pass ``None``.
     """
 
     async def _runner(reporter: ProgressReporter) -> dict[str, Any]:
-        upload_commit: dict[str, int] | None = None
-        if upload_id is not None:
-            await reporter.progress(
-                phase="upload_commit",
-                current=0,
-                total=0,
-                detail={"upload_id": upload_id},
-            )
-            upload_commit = commit_staging(wiki_root, upload_id)
-            await reporter.progress(
-                phase="upload_commit",
-                current=upload_commit["sources"] + upload_commit["assets"],
-                total=upload_commit["sources"] + upload_commit["assets"],
-                detail={"upload_id": upload_id, **upload_commit},
-            )
+        # The lock is held for the whole runner — concurrent ingests on
+        # the same wiki would also race on the storage row writes, not
+        # just the staging commit, so single-threading the entire op is
+        # the only safe story.
+        guard = lock if lock is not None else asyncio.Lock()
+        async with guard:
+            upload_commit: dict[str, int] | None = None
+            if upload_id is not None:
+                await reporter.progress(
+                    phase="upload_commit",
+                    current=0,
+                    total=0,
+                    detail={"upload_id": upload_id},
+                )
+                upload_commit = commit_staging(wiki_root, upload_id)
+                await reporter.progress(
+                    phase="upload_commit",
+                    current=upload_commit["sources"] + upload_commit["assets"],
+                    total=upload_commit["sources"] + upload_commit["assets"],
+                    detail={"upload_id": upload_id, **upload_commit},
+                )
 
-        embedder = None
-        multimodal_embedder = None
-        if not no_embed:
-            try:
-                embedder = build_embedder(cfg.provider)
-            except Exception as e:
-                # Surface as a runner-level failure so the task ends
-                # ``failed`` with a clear cause (most often a missing API
-                # key); the engine itself can't differentiate config
-                # errors from network errors mid-run.
-                raise BadRequest(
-                    f"could not build embedder: {e}",
-                    code="embedder_unavailable",
-                ) from e
-            mm_cfg = cfg.assets.multimodal
-            if mm_cfg is not None:
+            embedder = None
+            multimodal_embedder = None
+            if not no_embed:
                 try:
-                    multimodal_embedder = build_multimodal_embedder(
-                        mm_cfg.provider,
-                        base_url=mm_cfg.base_url,
-                        batch=mm_cfg.batch,
-                    )
+                    embedder = build_embedder(cfg.provider)
                 except Exception as e:
-                    await reporter.log(
-                        "WARN",
-                        f"multimodal embedder unavailable, "
-                        f"falling back to text-only ingest: {e}",
-                    )
+                    # Surface as a runner-level failure so the task ends
+                    # ``failed`` with a clear cause (most often a missing API
+                    # key); the engine itself can't differentiate config
+                    # errors from network errors mid-run.
+                    raise BadRequest(
+                        f"could not build embedder: {e}",
+                        code="embedder_unavailable",
+                    ) from e
+                mm_cfg = cfg.assets.multimodal
+                if mm_cfg is not None:
+                    try:
+                        multimodal_embedder = build_multimodal_embedder(
+                            mm_cfg.provider,
+                            base_url=mm_cfg.base_url,
+                            batch=mm_cfg.batch,
+                        )
+                    except Exception as e:
+                        await reporter.log(
+                            "WARN",
+                            f"multimodal embedder unavailable, "
+                            f"falling back to text-only ingest: {e}",
+                        )
 
-        report = await api.ingest(
-            wiki_root,
-            embedder=embedder,
-            multimodal_embedder=multimodal_embedder,
-            reporter=reporter,
-        )
-        return _ingest_report_to_dict(report, upload_commit=upload_commit)
+            report = await api.ingest(
+                wiki_root,
+                embedder=embedder,
+                multimodal_embedder=multimodal_embedder,
+                reporter=reporter,
+            )
+            return _ingest_report_to_dict(report, upload_commit=upload_commit)
 
     return _runner
 

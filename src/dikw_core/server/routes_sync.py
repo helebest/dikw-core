@@ -183,15 +183,27 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         request: Request, page_path: str
     ) -> WikiPageResponse:
         rt: ServerRuntime = get_runtime(request.app)
-        # Confine to the wiki tree — reject path-traversal attempts even
-        # though FastAPI's path-converter already blocks the easy cases.
-        abs_path = (rt.root / page_path).resolve()
+        # Scope to the ``wiki/`` subtree (not the wiki root). Resolving
+        # against ``rt.root`` would let an authenticated caller fetch
+        # ``dikw.yml``, ``sources/...``, ``wisdom/...``, etc. through
+        # this endpoint — page_path is meant to address K-layer pages
+        # only. ``page_path`` may be ``"wiki/notes/foo.md"`` (matching
+        # ``DocumentRecord.path``) or ``"notes/foo.md"`` (raw page-path
+        # under ``wiki/``); we accept both by stripping a leading
+        # ``"wiki/"`` before resolving.
+        wiki_dir = (rt.root / "wiki").resolve()
+        rel = page_path[5:] if page_path.startswith("wiki/") else page_path
+        abs_path = (wiki_dir / rel).resolve()
         try:
-            abs_path.relative_to(rt.root.resolve())
+            abs_path.relative_to(wiki_dir)
         except ValueError as e:
             raise BadRequest(
-                f"page_path escapes the wiki root: {page_path!r}"
+                f"page_path escapes the wiki/ subtree: {page_path!r}"
             ) from e
+        if abs_path.suffix != ".md":
+            raise BadRequest(
+                f"only .md pages are addressable here: {page_path!r}"
+            )
         if not abs_path.is_file():
             raise NotFoundError(f"wiki page not found: {page_path!r}")
         body = abs_path.read_text(encoding="utf-8")

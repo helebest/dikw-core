@@ -212,6 +212,14 @@ class TaskManager:
         )
 
         async def _run() -> None:
+            # Always update the task row to its terminal status BEFORE
+            # emitting the corresponding ``final`` event. A subscriber
+            # that sees ``final`` and immediately calls ``/result`` must
+            # find the row terminal — the reverse order races and yields
+            # ``task_not_terminal`` for a brief window. The post-emit
+            # crash mode (row terminal but tape missing ``final``) is
+            # easier to recover than ``restart_cleanup`` appending a
+            # second terminal event over a still-RUNNING row.
             try:
                 started_at = _isoformat()
                 await self._store.update_status(
@@ -222,22 +230,22 @@ class TaskManager:
                 )
                 result = await runner(reporter)
                 finished_at = _isoformat()
-                await reporter.emit_raw(
-                    {"type": "final", "status": "succeeded", "result": result}
-                )
                 await self._store.update_status(
                     task_id,
                     TaskStatus.SUCCEEDED,
                     finished_at=finished_at,
                     result=result,
                 )
+                await reporter.emit_raw(
+                    {"type": "final", "status": "succeeded", "result": result}
+                )
             except asyncio.CancelledError:
                 finished_at = _isoformat()
-                await reporter.emit_raw(
-                    {"type": "final", "status": "cancelled"}
-                )
                 await self._store.update_status(
                     task_id, TaskStatus.CANCELLED, finished_at=finished_at
+                )
+                await reporter.emit_raw(
+                    {"type": "final", "status": "cancelled"}
                 )
                 # Don't re-raise: the manager owns the task lifecycle and a
                 # graceful "cancelled" final is the contract.
@@ -248,14 +256,14 @@ class TaskManager:
                     "message": str(e),
                     "traceback": traceback.format_exc(),
                 }
-                await reporter.emit_raw(
-                    {"type": "final", "status": "failed", "error": error}
-                )
                 await self._store.update_status(
                     task_id,
                     TaskStatus.FAILED,
                     finished_at=finished_at,
                     error=error,
+                )
+                await reporter.emit_raw(
+                    {"type": "final", "status": "failed", "error": error}
                 )
             finally:
                 await self._bus.close(task_id)

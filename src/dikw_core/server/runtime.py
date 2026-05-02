@@ -13,10 +13,11 @@ Lifecycle:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -26,6 +27,7 @@ from ..storage import Storage, build_storage
 from .auth import AuthConfig
 from .tasks import (
     ProgressBus,
+    SqliteTaskStore,
     TaskManager,
     TaskStore,
     build_task_store,
@@ -45,6 +47,11 @@ class ServerRuntime:
     bus: ProgressBus
     manager: TaskManager
     auth: AuthConfig
+    # Serializes wiki-mutating ops (currently ingest) so two concurrent
+    # tasks can't interleave their staging-commit + on-disk writes and
+    # leave the sources/ tree as a mix of both. Held for the entire ingest
+    # runner — concurrent ingests on the same wiki are a degenerate case.
+    ingest_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 async def build_runtime(
@@ -73,7 +80,19 @@ async def build_runtime(
 
     bus = ProgressBus()
     manager = TaskManager(store=task_store, bus=bus)
-    await manager.restart_cleanup()
+    # Orphan cleanup is safe only when this process owns the task store
+    # exclusively — i.e. the per-wiki sqlite file. A shared Postgres task
+    # store can serve multiple ``dikw serve`` instances against the same
+    # database, and a blanket cleanup here would mark another live
+    # server's running tasks as failed{server_restart}.
+    if isinstance(task_store, SqliteTaskStore):
+        await manager.restart_cleanup()
+    else:
+        logger.info(
+            "skipping restart_cleanup for shared task store (%s); "
+            "orphans must be reaped out-of-band",
+            type(task_store).__name__,
+        )
 
     return ServerRuntime(
         cfg=cfg,

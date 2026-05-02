@@ -730,12 +730,16 @@ def _print_eval_report(report: Any) -> None:
 def mcp_cmd(
     stdio: Annotated[bool, typer.Option("--stdio", help="Use stdio transport.")] = True,
 ) -> None:
-    """Launch the MCP server over the chosen transport."""
-    if not stdio:
-        console.print("[yellow]HTTP transport lands in Phase 4; running stdio.[/yellow]")
-    from .mcp_server import run_stdio
-
-    run_stdio()
+    """[DEPRECATED] MCP support is being removed; use `dikw serve` instead."""
+    del stdio  # unused — kept for option-compat until the command is dropped
+    console.print(
+        "[red]error:[/red] `dikw mcp` is deprecated and will be removed in a "
+        "future release.\n"
+        "The `mcp` runtime dependency has already been dropped; run "
+        "[cyan]dikw serve[/cyan] (HTTP + NDJSON) instead once it lands in a "
+        "later migration phase."
+    )
+    raise typer.Exit(code=1)
 
 
 def main() -> None:  # pragma: no cover - entry point shim

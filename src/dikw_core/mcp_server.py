@@ -1,6 +1,15 @@
-"""MCP server for dikw-core.
+# mypy: ignore-errors
+"""MCP server for dikw-core — DEPRECATED.
 
-Phase 0-3 tools:
+Slated for removal as part of the in-process → client/server architecture
+migration (see plan: dikw-core-client-server-eventual-clarke). The ``mcp``
+runtime dependency was removed in Phase 0; the file itself is kept as a
+thin shell so ``_doc_read`` (used by tests) still imports cleanly. The
+public surface — ``build_server`` and ``run_stdio`` — will raise
+``ImportError`` at call time because the SDK is gone, and the ``dikw mcp``
+CLI command translates that into a friendly deprecation message.
+
+Original tool catalog (frozen, will be deleted in Phase 5):
   * ``core.status`` — counts across DIKW layers.
   * ``core.query`` — natural-language question -> cited answer (with wisdom).
   * ``admin.ingest`` — run the ingest pipeline.

@@ -8,6 +8,7 @@ so that schema drift on either side fails loudly.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from dikw_core.client.transport import ClientError, Transport
@@ -99,3 +100,25 @@ async def test_stream_4xx_surfaces_as_client_error_before_iteration(
                 pytest.fail("stream should have raised before yielding")
     assert excinfo.value.status == 400
     assert excinfo.value.code == "bad_request"
+
+
+@pytest.mark.asyncio
+async def test_transport_wraps_request_error_as_network_client_error() -> None:
+    """When httpx fails before any response (DNS, refused, dropped
+    socket) we must surface a ``ClientError(status=0, code='network_error')``
+    instead of leaking a raw httpx traceback. Every CLI command relies
+    on this single failure-channel to render a clean message + exit."""
+    # Bind to a port nobody listens on — the OS rejects the connection
+    # immediately so the test is fast and deterministic.
+    client = httpx.AsyncClient(
+        base_url="http://127.0.0.1:1",
+        timeout=httpx.Timeout(connect=0.5, read=0.5, write=0.5, pool=0.5),
+    )
+    transport = Transport(client=client, token=None)
+    try:
+        with pytest.raises(ClientError) as excinfo:
+            await transport.get_json("/v1/status")
+        assert excinfo.value.status == 0
+        assert excinfo.value.code == "network_error"
+    finally:
+        await client.aclose()

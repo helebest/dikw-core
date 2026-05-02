@@ -43,7 +43,9 @@ _TASKS_DSN_ENV = "DIKW_SERVER_TASKS_DSN"
 _DEFAULT_TASKS_DB_PATH = ".dikw/server-tasks.db"
 
 
-def build_task_store(cfg: DikwConfig, root: Path) -> TaskStore:
+def build_task_store(
+    cfg: DikwConfig, root: Path, *, instance_id: str = ""
+) -> TaskStore:
     """Pick a TaskStore matching the wiki's storage backend.
 
     Per the migration plan's Phase-0 decision:
@@ -52,6 +54,13 @@ def build_task_store(cfg: DikwConfig, root: Path) -> TaskStore:
       * Postgres wiki backend → a separate Postgres database whose DSN
         comes from ``DIKW_SERVER_TASKS_DSN`` (intentionally distinct from
         the wiki DSN so a wiki schema wipe doesn't lose task history).
+
+    ``instance_id`` is stamped on each task row at create-time and used
+    by ``list_running()`` to scope the orphan-reaper. Pass a stable
+    per-server value so a single-machine restart picks up its own
+    leftover rows without touching another live ``dikw serve`` process
+    sharing the same Postgres task DB. Default ``""`` is correct for
+    tests and the single-server SQLite case.
     """
     storage_cfg = cfg.storage
     if isinstance(storage_cfg, PostgresStorageConfig):
@@ -67,10 +76,12 @@ def build_task_store(cfg: DikwConfig, root: Path) -> TaskStore:
         # the [postgres] extra installed (e.g. when only sqlite is configured).
         from .store_postgres import PostgresTaskStore
 
-        return PostgresTaskStore(dsn=dsn)
+        return PostgresTaskStore(dsn=dsn, instance_id=instance_id)
 
     if isinstance(storage_cfg, SQLiteStorageConfig | FilesystemStorageConfig):
-        return SqliteTaskStore(path=root / _DEFAULT_TASKS_DB_PATH)
+        return SqliteTaskStore(
+            path=root / _DEFAULT_TASKS_DB_PATH, instance_id=instance_id
+        )
 
     raise TaskStoreError(
         f"unrecognised storage backend: {type(storage_cfg).__name__}"

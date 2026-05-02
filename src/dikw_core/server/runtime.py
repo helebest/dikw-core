@@ -14,7 +14,9 @@ Lifecycle:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -27,13 +29,25 @@ from ..storage import Storage, build_storage
 from .auth import AuthConfig
 from .tasks import (
     ProgressBus,
-    SqliteTaskStore,
     TaskManager,
     TaskStore,
     build_task_store,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _server_instance_id(root: Path) -> str:
+    """Stable per-server identity. Two ``dikw serve`` processes pointed
+    at the same wiki on the same host get the same id; different hosts
+    or different wiki paths get different ids.
+
+    Used by the task store to scope ``restart_cleanup`` so a server
+    only ever reaps its own leftover rows from a previous run, even
+    when a shared Postgres task DB is in use across multiple servers.
+    """
+    raw = f"{socket.gethostname()}::{root.resolve()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -75,24 +89,19 @@ async def build_runtime(
     await storage.connect()
     await storage.migrate()
 
-    task_store = build_task_store(cfg, root=root)
+    task_store = build_task_store(
+        cfg, root=root, instance_id=_server_instance_id(root)
+    )
     await task_store.init()
 
     bus = ProgressBus()
     manager = TaskManager(store=task_store, bus=bus)
-    # Orphan cleanup is safe only when this process owns the task store
-    # exclusively — i.e. the per-wiki sqlite file. A shared Postgres task
-    # store can serve multiple ``dikw serve`` instances against the same
-    # database, and a blanket cleanup here would mark another live
-    # server's running tasks as failed{server_restart}.
-    if isinstance(task_store, SqliteTaskStore):
-        await manager.restart_cleanup()
-    else:
-        logger.info(
-            "skipping restart_cleanup for shared task store (%s); "
-            "orphans must be reaped out-of-band",
-            type(task_store).__name__,
-        )
+    # Safe for both stores: ``list_running()`` filters by the store's
+    # ``instance_id``, so a shared Postgres task DB only surfaces rows
+    # this exact server (host + wiki path) submitted in a previous run.
+    # Other live ``dikw serve`` processes pointed at the same DB stay
+    # untouched.
+    await manager.restart_cleanup()
 
     return ServerRuntime(
         cfg=cfg,

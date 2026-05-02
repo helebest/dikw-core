@@ -117,9 +117,12 @@ class Transport:
     async def get_json(
         self, path: str, *, params: Mapping[str, Any] | None = None
     ) -> Any:
-        resp = await self._client.get(
-            path, params=params, headers=self._headers()
-        )
+        try:
+            resp = await self._client.get(
+                path, params=params, headers=self._headers()
+            )
+        except httpx.RequestError as e:
+            raise _network_error(e) from e
         return _parse_json_response(resp)
 
     async def post_json(
@@ -129,12 +132,15 @@ class Transport:
         json_body: Mapping[str, Any] | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> Any:
-        resp = await self._client.post(
-            path,
-            json=dict(json_body) if json_body is not None else None,
-            params=params,
-            headers=self._headers(),
-        )
+        try:
+            resp = await self._client.post(
+                path,
+                json=dict(json_body) if json_body is not None else None,
+                params=params,
+                headers=self._headers(),
+            )
+        except httpx.RequestError as e:
+            raise _network_error(e) from e
         return _parse_json_response(resp)
 
     async def post_multipart(
@@ -151,12 +157,15 @@ class Transport:
         objects — caller is responsible for closing them after the call
         returns.
         """
-        resp = await self._client.post(
-            path,
-            files=cast(Any, files),
-            data=cast(Any, dict(data)) if data is not None else None,
-            headers=self._headers(),
-        )
+        try:
+            resp = await self._client.post(
+                path,
+                files=cast(Any, files),
+                data=cast(Any, dict(data)) if data is not None else None,
+                headers=self._headers(),
+            )
+        except httpx.RequestError as e:
+            raise _network_error(e) from e
         return _parse_json_response(resp)
 
     @asynccontextmanager
@@ -175,13 +184,17 @@ class Transport:
         the iterator yields anything — that way the caller's renderer
         never sees a partial stream from a failed request.
         """
-        async with self._client.stream(
-            method,
-            path,
-            json=dict(json_body) if json_body is not None else None,
-            params=params,
-            headers=self._headers(),
-        ) as resp:
+        try:
+            stream_cm = self._client.stream(
+                method,
+                path,
+                json=dict(json_body) if json_body is not None else None,
+                params=params,
+                headers=self._headers(),
+            )
+        except httpx.RequestError as e:
+            raise _network_error(e) from e
+        async with stream_cm as resp:
             if resp.status_code >= 400:
                 # Drain the body so we can include the server's error
                 # envelope; ``aread`` materialises it from the streaming
@@ -237,6 +250,21 @@ def _parse_json_response(resp: httpx.Response) -> Any:
             code="invalid_response",
             message=f"server returned non-JSON: {resp.text[:200]!r}",
         ) from e
+
+
+def _network_error(exc: httpx.RequestError) -> ClientError:
+    """Wrap a transport-level failure (DNS, refused, timeout, dropped
+    socket) so every CLI command surfaces it through the same
+    ``ClientError`` channel as a server-side error envelope, instead of
+    leaking an httpx traceback to stderr. ``status=0`` distinguishes
+    network errors from any real HTTP status; the code is stable enough
+    for shell scripts to branch on without parsing the message.
+    """
+    return ClientError(
+        status=0,
+        code="network_error",
+        message=f"could not reach server: {exc.__class__.__name__}: {exc}",
+    )
 
 
 def _raise_for_error(resp: httpx.Response) -> None:

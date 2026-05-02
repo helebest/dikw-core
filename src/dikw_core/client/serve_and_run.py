@@ -25,6 +25,17 @@ from pathlib import Path
 
 from .config import ENV_SERVER_TOKEN, ENV_SERVER_URL
 
+
+def _effective_token(opts_token: str | None) -> str | None:
+    """The token the spawned server will require — explicit ``--token``
+    wins, otherwise the inherited ``DIKW_SERVER_TOKEN`` env var. The
+    readiness probe must use this same value or it sees 401 and the
+    caller waits out the entire ready timeout."""
+    if opts_token is not None:
+        return opts_token
+    env = os.environ.get(ENV_SERVER_TOKEN)
+    return env or None
+
 # How long to wait between healthz polls. Short enough that a fast cold
 # start (<1s) is barely-noticeable, long enough that we don't spam a
 # struggling server during its lifespan startup.
@@ -194,7 +205,7 @@ def run(opts: ServeAndRunOptions) -> int:
             wait_until_ready(
                 f"http://{opts.host}:{opts.port}",
                 timeout=opts.ready_timeout,
-                token=opts.token,
+                token=_effective_token(opts.token),
                 proc=server,
             )
         except (TimeoutError, ServerExitedEarly) as e:

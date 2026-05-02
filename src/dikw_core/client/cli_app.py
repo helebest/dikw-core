@@ -198,12 +198,25 @@ def init_cmd(
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
-            payload = await t.post_json(
-                "/v1/init",
-                json_body={"description": description}
-                if description is not None
-                else {},
-            )
+            try:
+                payload = await t.post_json(
+                    "/v1/init",
+                    json_body={"description": description}
+                    if description is not None
+                    else {},
+                )
+            except ClientError as e:
+                # The server's own runtime refuses to start without a
+                # ``dikw.yml`` already present, so the only way this 409
+                # fires in normal use is "wiki is already scaffolded" —
+                # treat it as a no-op success per the command's own
+                # docstring instead of exiting non-zero.
+                if e.code == "wiki_already_initialised":
+                    console.print(
+                        "[yellow]wiki already initialized[/yellow] — no-op"
+                    )
+                    return
+                raise
         console.print(f"[green]initialized[/green] wiki at {payload.get('root')}")
 
     _run(_go())

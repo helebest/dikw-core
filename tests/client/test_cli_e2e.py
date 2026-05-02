@@ -63,6 +63,21 @@ def test_lint_clean_on_fresh_wiki(
     assert "lint" in result.stdout.lower()
 
 
+def test_client_init_treats_already_initialised_as_success(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    """The server's runtime won't even start without a ``dikw.yml``, so
+    the only way ``POST /v1/init`` lands in normal use is the
+    ``wiki_already_initialised`` 409. The CLI must surface that as an
+    exit-0 no-op (matching its docstring) instead of a non-zero
+    failure that would break any "init then ingest" bootstrap script."""
+    patch_transport_factory()
+    result = _run(["client", "init"])
+    assert result.exit_code == 0, result.stdout
+    assert "already initialized" in result.stdout.lower()
+
+
 def test_query_streams_tokens_and_renders_answer(
     asgi_client: tuple[Any, ServerRuntime],
     patch_transport_factory: Callable[[], None],

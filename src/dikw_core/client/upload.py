@@ -171,7 +171,7 @@ def build_upload(
 
 
 _DEFAULT_EXTENSIONS = frozenset(
-    {".md", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"}
+    {".md", ".html", ".htm", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"}
 )
 
 

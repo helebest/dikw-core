@@ -36,13 +36,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     finished_at    TEXT,
     params_digest  TEXT NOT NULL DEFAULT '',
     result         TEXT,
-    error          TEXT
+    error          TEXT,
+    instance_id    TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS tasks_status_created_idx
     ON tasks(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_op_created_idx
     ON tasks(op, created_at DESC);
+CREATE INDEX IF NOT EXISTS tasks_instance_status_idx
+    ON tasks(instance_id, status);
 
 CREATE TABLE IF NOT EXISTS task_events (
     task_id  TEXT NOT NULL,
@@ -79,8 +82,9 @@ class SqliteTaskStore:
     inside the wiki root.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, instance_id: str = "") -> None:
         self._path = Path(path)
+        self._instance_id = instance_id
         self._conn: sqlite3.Connection | None = None
         # One re-entrant lock guards conn writes — sqlite is one-writer,
         # the lock keeps async coroutines from interleaving inside one
@@ -104,6 +108,16 @@ class SqliteTaskStore:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SCHEMA_DDL)
+        # Bring older DBs up to schema. SQLite ALTER TABLE ADD COLUMN
+        # got IF NOT EXISTS in 3.36; older runtimes raise OperationalError
+        # on the duplicate which we swallow.
+        try:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN instance_id TEXT NOT NULL DEFAULT ''"
+            )
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
         self._conn = conn
 
     async def close(self) -> None:
@@ -124,8 +138,8 @@ class SqliteTaskStore:
         conn = self._require_conn()
         conn.execute(
             "INSERT INTO tasks(task_id, op, status, created_at, started_at, "
-            "finished_at, params_digest, result, error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "finished_at, params_digest, result, error, instance_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.task_id,
                 row.op,
@@ -136,6 +150,7 @@ class SqliteTaskStore:
                 row.params_digest,
                 json.dumps(row.result) if row.result is not None else None,
                 json.dumps(row.error) if row.error is not None else None,
+                self._instance_id,
             ),
         )
 
@@ -191,12 +206,21 @@ class SqliteTaskStore:
         return await asyncio.to_thread(self._list_running_sync)
 
     def _list_running_sync(self) -> list[TaskRow]:
+        # Filter by ``instance_id`` so the orphan-reaper at server boot
+        # never touches rows owned by another live ``dikw serve``
+        # instance pointed at the same task DB. With the default
+        # ``instance_id=""`` (single-server / tests) this matches all
+        # rows for that wiki, preserving the previous behaviour.
         conn = self._require_conn()
         cur = conn.execute(
             "SELECT task_id, op, status, created_at, started_at, finished_at, "
             "params_digest, result, error FROM tasks "
-            "WHERE status IN (?, ?)",
-            (TaskStatus.PENDING.value, TaskStatus.RUNNING.value),
+            "WHERE status IN (?, ?) AND instance_id = ?",
+            (
+                TaskStatus.PENDING.value,
+                TaskStatus.RUNNING.value,
+                self._instance_id,
+            ),
         )
         return [_row_to_task(r) for r in cur.fetchall()]
 

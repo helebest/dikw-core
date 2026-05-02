@@ -38,13 +38,19 @@ CREATE TABLE IF NOT EXISTS {schema}.tasks (
     finished_at    TEXT,
     params_digest  TEXT NOT NULL DEFAULT '',
     result         JSONB,
-    error          JSONB
+    error          JSONB,
+    instance_id    TEXT NOT NULL DEFAULT ''
 );
+
+-- Bring older DBs up to schema (no-op when the column is already there).
+ALTER TABLE {schema}.tasks ADD COLUMN IF NOT EXISTS instance_id TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS tasks_status_created_idx
     ON {schema}.tasks(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_op_created_idx
     ON {schema}.tasks(op, created_at DESC);
+CREATE INDEX IF NOT EXISTS tasks_instance_status_idx
+    ON {schema}.tasks(instance_id, status);
 
 CREATE TABLE IF NOT EXISTS {schema}.task_events (
     task_id  TEXT NOT NULL,
@@ -86,6 +92,7 @@ class PostgresTaskStore:
         *,
         schema: str = "dikw_server_tasks",
         pool_size: int = 5,
+        instance_id: str = "",
     ) -> None:
         if not _is_safe_identifier(schema):
             raise TaskStoreError(
@@ -94,6 +101,7 @@ class PostgresTaskStore:
         self._dsn = dsn
         self._schema = schema
         self._pool_size = pool_size
+        self._instance_id = instance_id
         self._pool: AsyncConnectionPool | None = None
 
     # ---- lifecycle ------------------------------------------------------
@@ -138,8 +146,8 @@ class PostgresTaskStore:
             await cur.execute(
                 f"INSERT INTO {self._schema}.tasks(task_id, op, status, "
                 "created_at, started_at, finished_at, params_digest, "
-                "result, error) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)",
+                "result, error, instance_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)",
                 (
                     row.task_id,
                     row.op,
@@ -150,6 +158,7 @@ class PostgresTaskStore:
                     row.params_digest,
                     json.dumps(row.result) if row.result is not None else None,
                     json.dumps(row.error) if row.error is not None else None,
+                    self._instance_id,
                 ),
             )
             await conn.commit()
@@ -193,12 +202,22 @@ class PostgresTaskStore:
         return [_row_to_task(r) for r in rows]
 
     async def list_running(self) -> list[TaskRow]:
+        # Filter by ``instance_id`` so a restart in one ``dikw serve``
+        # process never reaps another live process's tasks via the
+        # shared Postgres task store. With the default ``instance_id=""``
+        # (single-server / tests) this still matches every leftover
+        # row, preserving the previous behaviour.
         async with self._acquire() as conn, conn.cursor() as cur:
             await cur.execute(
                 f"SELECT task_id, op, status, created_at, started_at, "
                 f"finished_at, params_digest, result, error FROM "
-                f"{self._schema}.tasks WHERE status IN (%s, %s)",
-                (TaskStatus.PENDING.value, TaskStatus.RUNNING.value),
+                f"{self._schema}.tasks "
+                "WHERE status IN (%s, %s) AND instance_id = %s",
+                (
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                    self._instance_id,
+                ),
             )
             rows = await cur.fetchall()
         return [_row_to_task(r) for r in rows]

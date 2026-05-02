@@ -71,6 +71,27 @@ def test_build_server_command_includes_token_only_when_set() -> None:
     assert with_token[with_token.index("--token") + 1] == "s3cret"
 
 
+def test_effective_token_prefers_explicit_then_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--token`` wins over ``DIKW_SERVER_TOKEN`` env, but env still
+    activates when --token is unset — otherwise an authenticated
+    server inherited via env never gets the right Authorization
+    header on the readiness probe."""
+    monkeypatch.delenv("DIKW_SERVER_TOKEN", raising=False)
+    assert sar._effective_token(None) is None
+    assert sar._effective_token("explicit") == "explicit"
+
+    monkeypatch.setenv("DIKW_SERVER_TOKEN", "env-tok")
+    assert sar._effective_token(None) == "env-tok"
+    assert sar._effective_token("explicit") == "explicit"
+
+    # Empty env value → treated as unset (avoids "" being interpreted
+    # as "auth required with empty bearer").
+    monkeypatch.setenv("DIKW_SERVER_TOKEN", "")
+    assert sar._effective_token(None) is None
+
+
 def test_build_inner_env_sets_url_and_optional_token() -> None:
     env = sar.build_inner_env("127.0.0.1", 9123, token=None)
     assert env["DIKW_SERVER_URL"] == "http://127.0.0.1:9123"

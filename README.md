@@ -29,12 +29,19 @@ uv sync
 
 uv run dikw init my-wiki --description "my research wiki"
 cd my-wiki
-# Start the server (in another terminal, or with a process supervisor).
-uv run dikw serve --wiki .
+# Drop some markdown into sources/, then run any single command via
+# `serve-and-run` — it spawns a local server, runs the inner command,
+# and tears it down.
+uv run dikw serve-and-run -- ingest --no-embed
+uv run dikw serve-and-run -- query "What does Karpathy mean by deterministic scoping?"
+```
 
-# In your shell, point the client at it (defaults to http://127.0.0.1:8765):
-# drop some markdown or HTML into sources/, then:
-uv run dikw client ingest --no-embed   # or: uv run dikw client ingest
+For interactive sessions or long iterations, run `dikw serve` once and
+keep using `dikw client *` against it:
+
+```bash
+uv run dikw serve --wiki .   # in one terminal
+# in another:
 uv run dikw client status
 uv run dikw client synth               # K layer (needs ANTHROPIC_API_KEY or OpenAI-compat)
 uv run dikw client distill             # W-layer candidates
@@ -45,6 +52,9 @@ uv run dikw client query "What does Karpathy mean by deterministic scoping?"
 
 > Top-level aliases (`dikw status`, `dikw query`, …) are kept as shortcuts and
 > route through the same client.
+
+Server deployment, security posture, and the wire contract live in
+[`docs/server.md`](./docs/server.md).
 
 End-to-end walkthrough: [`docs/getting-started.md`](./docs/getting-started.md).
 Architecture brief: [`docs/architecture.md`](./docs/architecture.md).
@@ -59,6 +69,7 @@ Local-only commands run in this process:
 | `dikw version`              | print the package version                                                     |
 | `dikw init <path>`          | scaffold a wiki directory (sources / wiki / wisdom / `.dikw/` + `dikw.yml`)   |
 | `dikw serve --wiki <path>`  | start the FastAPI + NDJSON server bound to one wiki                           |
+| `dikw serve-and-run -- <cmd>` | spawn a local server, run an inner client command against it, tear it down |
 
 Everything else lives under `dikw client *` and talks to a running server
 (top-level aliases keep the old muscle memory):

@@ -25,6 +25,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from . import serve_and_run as _sar
 from .config import ClientConfig, resolve
 from .progress import (
     QueryStreamRenderer,
@@ -725,6 +726,106 @@ def tasks_cancel_cmd(
             )
 
     _run(_go())
+
+
+# ---- serve-and-run ----------------------------------------------------
+
+
+@app.command(
+    "serve-and-run",
+    help=(
+        "Start a local server, run an inner CLI command against it, "
+        "and tear it down. Pass the inner command after ``--``."
+    ),
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+    },
+)
+def serve_and_run_cmd(
+    ctx: typer.Context,
+    wiki: Annotated[
+        Path,
+        typer.Option(
+            "--wiki",
+            "-w",
+            help="Path to the wiki root (must contain dikw.yml). Defaults to cwd.",
+        ),
+    ] = Path("."),
+    host: Annotated[
+        str,
+        typer.Option(
+            "--host",
+            "-H",
+            help="Interface to bind. 0.0.0.0 requires --token.",
+        ),
+    ] = "127.0.0.1",
+    port: Annotated[
+        int,
+        typer.Option(
+            "--port",
+            "-p",
+            help="TCP port to bind. ``0`` (default) picks a free one.",
+        ),
+    ] = 0,
+    token: Annotated[
+        str | None,
+        typer.Option(
+            "--token",
+            help=(
+                "Bearer token. Forwarded to both the server (--token) "
+                "and the inner client (DIKW_SERVER_TOKEN). Required when "
+                "--host is non-loopback."
+            ),
+        ),
+    ] = None,
+    ready_timeout: Annotated[
+        float,
+        typer.Option(
+            "--ready-timeout",
+            help="Seconds to wait for /v1/healthz before giving up.",
+        ),
+    ] = 30.0,
+    keep_alive: Annotated[
+        bool,
+        typer.Option(
+            "--keep-alive",
+            help=(
+                "After the inner command exits, leave the server "
+                "running and print its connection details."
+            ),
+        ),
+    ] = False,
+    log_level: Annotated[
+        str,
+        typer.Option(
+            "--log-level",
+            help="uvicorn log level for the spawned server.",
+        ),
+    ] = "warning",
+) -> None:
+    """One-shot server + inner-command lifecycle.
+
+    Examples:
+
+        dikw client serve-and-run -- status
+        dikw client serve-and-run --wiki ./my-wiki -- ingest --no-embed
+        dikw client serve-and-run --keep-alive -- query "..."
+    """
+    inner_cmd = list(ctx.args)
+    opts = _sar.ServeAndRunOptions(
+        wiki=wiki,
+        host=host,
+        port=port,
+        token=token,
+        ready_timeout=ready_timeout,
+        keep_alive=keep_alive,
+        log_level=log_level,
+        inner_cmd=inner_cmd,
+    )
+    rc = _sar.run(opts)
+    if rc != 0:
+        raise typer.Exit(code=rc)
 
 
 __all__ = ["app"]

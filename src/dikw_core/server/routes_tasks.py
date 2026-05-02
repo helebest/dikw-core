@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .errors import BadRequest, NotFoundError
+from .ingest_op import make_ingest_runner
 from .ndjson import ndjson_lines, stream_response
 from .runtime import ServerRuntime, get_runtime
 from .tasks import (
@@ -66,6 +67,23 @@ class EchoSubmit(BaseModel):
     """Phase 2 mock submit body. Real ops will define their own."""
 
     count: int = 5
+
+
+class IngestSubmit(BaseModel):
+    """Body for ``POST /v1/ingest``.
+
+    ``upload_id`` (optional) references a successful ``POST /v1/upload/sources``
+    response: the runner commits the staged tree onto ``<wiki>/sources``
+    (overwriting same-name files) before running the ingest pipeline.
+    Without it, the server ingests whatever's already on disk —
+    convenient for local-server-on-same-machine workflows.
+
+    ``no_embed`` skips the dense embedding pass; useful for FTS-only
+    wikis or when the embedding provider isn't reachable.
+    """
+
+    upload_id: str | None = None
+    no_embed: bool = False
 
 
 class TaskHandle(BaseModel):
@@ -129,6 +147,28 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         runner: TaskRunner = _runner
         row = await rt.manager.submit(
             op="echo", runner=runner, params={"count": count}
+        )
+        return _handle(row)
+
+    @router.post("/ingest", response_model=TaskHandle)
+    async def submit_ingest(
+        request: Request,
+        body: IngestSubmit = Body(default_factory=IngestSubmit),
+    ) -> TaskHandle:
+        rt: ServerRuntime = get_runtime(request.app)
+        runner: TaskRunner = make_ingest_runner(
+            wiki_root=rt.root,
+            cfg=rt.cfg,
+            upload_id=body.upload_id,
+            no_embed=body.no_embed,
+        )
+        row = await rt.manager.submit(
+            op="ingest",
+            runner=runner,
+            params={
+                "upload_id": body.upload_id,
+                "no_embed": body.no_embed,
+            },
         )
         return _handle(row)
 

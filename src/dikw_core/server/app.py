@@ -18,6 +18,7 @@ from .auth import AuthConfig, load_auth_config, make_dependency
 from .errors import install_handlers
 from .routes_sync import make_router as make_sync_router
 from .routes_tasks import make_router as make_tasks_router
+from .routes_upload import make_router as make_upload_router
 from .runtime import ServerRuntime, build_runtime, lifespan
 
 
@@ -44,6 +45,7 @@ def build_app(
     auth_dep = make_dependency(auth)
     app.include_router(make_sync_router(auth_dep=auth_dep))
     app.include_router(make_tasks_router(auth_dep=auth_dep))
+    app.include_router(make_upload_router(auth_dep=auth_dep))
     return app
 
 

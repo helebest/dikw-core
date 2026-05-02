@@ -936,28 +936,70 @@ class SQLiteStorage:
     async def chunks_referencing_assets(
         self, asset_ids: Sequence[str]
     ) -> dict[str, list[int]]:
+        # SQLite's default ``SQLITE_MAX_VARIABLE_NUMBER`` is 999 on
+        # legacy builds and 32766 on modern; chunk the IN-list so a
+        # large backfill (e.g., text-only → multimodal migration with
+        # thousands of unembedded images) doesn't trip
+        # ``OperationalError: too many SQL variables``.
+        _SQL_VARS_PER_CALL = 500
+
         def _run() -> dict[str, list[int]]:
             conn = self._require_conn()
             out: dict[str, list[int]] = {aid: [] for aid in asset_ids}
             if not asset_ids:
                 return out
-            placeholders = ",".join("?" for _ in asset_ids)
-            rows = conn.execute(
-                f"""
-                SELECT asset_id, chunk_id
-                FROM chunk_asset_refs
-                WHERE asset_id IN ({placeholders})
-                ORDER BY asset_id, chunk_id
-                """,
-                tuple(asset_ids),
-            ).fetchall()
-            for r in rows:
-                out[r["asset_id"]].append(int(r["chunk_id"]))
+            ids_seq = list(asset_ids)
+            for start in range(0, len(ids_seq), _SQL_VARS_PER_CALL):
+                shard = ids_seq[start : start + _SQL_VARS_PER_CALL]
+                placeholders = ",".join("?" for _ in shard)
+                rows = conn.execute(
+                    f"""
+                    SELECT asset_id, chunk_id
+                    FROM chunk_asset_refs
+                    WHERE asset_id IN ({placeholders})
+                    ORDER BY asset_id, chunk_id
+                    """,
+                    tuple(shard),
+                ).fetchall()
+                for r in rows:
+                    out[r["asset_id"]].append(int(r["chunk_id"]))
             return out
 
         return await asyncio.to_thread(_run)
 
     # ---- I layer: asset embeddings (multimodal) --------------------------
+
+    async def list_assets_missing_embedding(
+        self, *, version_id: int
+    ) -> list[AssetRecord]:
+        def _run() -> list[AssetRecord]:
+            conn = self._require_conn()
+            rows = conn.execute(
+                "SELECT * FROM assets "
+                "WHERE asset_id NOT IN "
+                "(SELECT asset_id FROM asset_embed_meta WHERE version_id = ?) "
+                "ORDER BY asset_id",
+                (version_id,),
+            ).fetchall()
+            return [_row_to_asset(r) for r in rows]
+
+        return await asyncio.to_thread(_run)
+
+    async def list_wisdom_missing_embedding(
+        self, *, version_id: int
+    ) -> list[WisdomItem]:
+        def _run() -> list[WisdomItem]:
+            conn = self._require_conn()
+            rows = conn.execute(
+                "SELECT * FROM wisdom_items "
+                "WHERE item_id NOT IN "
+                "(SELECT item_id FROM wisdom_embed_meta WHERE version_id = ?) "
+                "ORDER BY item_id",
+                (version_id,),
+            ).fetchall()
+            return [_row_to_wisdom(r) for r in rows]
+
+        return await asyncio.to_thread(_run)
 
     async def upsert_asset_embeddings(
         self, rows: Sequence[AssetEmbeddingRow]

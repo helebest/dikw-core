@@ -185,12 +185,16 @@ class FakeMultimodalEmbedding:
     dim: int = 4
     last_inputs: list[MultimodalInput] = field(default_factory=list, init=False)
     last_model: str | None = field(default=None, init=False)
+    embed_calls: int = field(default=0, init=False)
+    total_inputs: int = field(default=0, init=False)
 
     async def embed(
         self, inputs: list[MultimodalInput], *, model: str
     ) -> list[list[float]]:
         self.last_inputs = list(inputs)
         self.last_model = model
+        self.embed_calls += 1
+        self.total_inputs += len(inputs)
         return [self._vector_for(inp) for inp in inputs]
 
     def _vector_for(self, inp: MultimodalInput) -> list[float]:

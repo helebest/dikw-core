@@ -4,16 +4,12 @@ Each route maps 1:1 to an ``api.py`` method and returns the engine's
 DTO directly as JSON. Long-running ops (ingest / synth / distill /
 query) are NOT here — they live behind ``/v1/{op}`` in
 ``routes_tasks.py`` and stream NDJSON.
-
-The ``init`` endpoint is intentionally *not* implemented in Phase 2 —
-the server's wiki root is bound at boot, so scaffolding a fresh wiki
-through HTTP only makes sense once the upload pipeline (Phase 3)
-exists. ``POST /v1/init`` will return 501 until then.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -48,6 +44,14 @@ logger = logging.getLogger(__name__)
 class CheckRequest(BaseModel):
     llm_only: bool = False
     embed_only: bool = False
+
+
+class InitRequest(BaseModel):
+    description: str | None = None
+
+
+class InitResponse(BaseModel):
+    root: str
 
 
 class WikiPageResponse(BaseModel):
@@ -124,6 +128,32 @@ def make_router(*, auth_dep: Any) -> APIRouter:
     async def lint(request: Request) -> LintReport:
         rt: ServerRuntime = get_runtime(request.app)
         return await api.lint(rt.root)
+
+    @router.post("/init", response_model=InitResponse)
+    async def init_wiki_endpoint(
+        request: Request,
+        body: InitRequest = Body(default_factory=InitRequest),
+    ) -> InitResponse:
+        # ``DIKW_SERVER_DISABLE_INIT=1`` is the production lockdown — once
+        # the server is bound to a real wiki, accepting a request that
+        # rewrites scaffold files would only ever be a misconfiguration.
+        if os.environ.get("DIKW_SERVER_DISABLE_INIT") == "1":
+            raise Conflict(
+                "init is disabled on this server (DIKW_SERVER_DISABLE_INIT=1)",
+                code="init_disabled",
+            )
+        rt: ServerRuntime = get_runtime(request.app)
+        try:
+            root = api.init_wiki(rt.root, description=body.description)
+        except FileExistsError as e:
+            # Server-bound wiki was already scaffolded — re-init would
+            # blow away whatever's on disk. Return 409 so the client can
+            # branch (e.g., "wiki already exists, skip bootstrap").
+            raise Conflict(
+                f"wiki at {rt.root} is already initialised",
+                code="wiki_already_initialised",
+            ) from e
+        return InitResponse(root=str(root))
 
     # ---- wiki + doc ---------------------------------------------------
 

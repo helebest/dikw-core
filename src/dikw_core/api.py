@@ -1225,23 +1225,66 @@ async def query(
         user_prompt = prompt_tmpl.format(
             question=q, wisdom=wisdom_block, excerpts=excerpts_block
         )
-        response = await _llm.complete(
-            system="You are the query-answering component of dikw-core.",
-            user=user_prompt,
-            model=cfg.provider.llm_model,
-            max_tokens=cfg.provider.llm_max_tokens_query,
-            temperature=0.2,
-        )
+        # Try the streaming path first so a remote NDJSON subscriber sees
+        # tokens as they arrive; providers that haven't wired SDK-level
+        # streaming raise NotImplementedError synchronously and we fall
+        # back to a single ``complete`` round-trip + a synthetic done.
+        text: str | None = None
+        finish_reason: str | None = None
+        usage: dict[str, int] = {}
+        try:
+            stream = _llm.complete_stream(
+                system="You are the query-answering component of dikw-core.",
+                user=user_prompt,
+                model=cfg.provider.llm_model,
+                max_tokens=cfg.provider.llm_max_tokens_query,
+                temperature=0.2,
+            )
+        except NotImplementedError:
+            stream = None
+        if stream is not None:
+            parts: list[str] = []
+            try:
+                async for ev in stream:
+                    if ev.type == "token" and ev.delta:
+                        parts.append(ev.delta)
+                        await _reporter.partial(
+                            "llm_token", {"delta": ev.delta}
+                        )
+                    elif ev.type == "done":
+                        # ``ev.text`` is authoritative when present (the
+                        # provider already assembled it); fall back to the
+                        # accumulated parts if the stream omits it.
+                        text = ev.text if ev.text is not None else "".join(parts)
+                        finish_reason = ev.finish_reason
+                        usage = ev.usage
+            except NotImplementedError:
+                stream = None  # provider raised on first iteration
+            if stream is not None and text is None:
+                # Stream closed without a done event — accept the parts.
+                text = "".join(parts)
+        if stream is None:
+            response = await _llm.complete(
+                system="You are the query-answering component of dikw-core.",
+                user=user_prompt,
+                model=cfg.provider.llm_model,
+                max_tokens=cfg.provider.llm_max_tokens_query,
+                temperature=0.2,
+            )
+            text = response.text
+            finish_reason = response.finish_reason
+            usage = response.usage
+        assert text is not None  # both branches set it
         await _reporter.partial(
             "llm_done",
             {
-                "text": response.text,
-                "finish_reason": response.finish_reason,
-                "usage": response.usage,
+                "text": text,
+                "finish_reason": finish_reason,
+                "usage": usage,
             },
         )
         return QueryResult(
-            answer=response.text.strip(),
+            answer=text.strip(),
             citations=citations,
             applied_wisdom=applied_refs,
         )

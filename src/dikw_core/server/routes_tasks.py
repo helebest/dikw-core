@@ -27,6 +27,7 @@ from .errors import BadRequest, NotFoundError
 from .ingest_op import make_ingest_runner
 from .ndjson import ndjson_lines, stream_response
 from .runtime import ServerRuntime, get_runtime
+from .synth_op import make_distill_runner, make_eval_runner, make_synth_runner
 from .tasks import (
     TaskRow,
     TaskRunner,
@@ -84,6 +85,45 @@ class IngestSubmit(BaseModel):
 
     upload_id: str | None = None
     no_embed: bool = False
+
+
+class SynthSubmit(BaseModel):
+    """Body for ``POST /v1/synth``.
+
+    ``force_all`` re-synthesises every source doc even if the wiki log
+    already records a ``synth`` entry — needed when the prompt or model
+    has changed and prior pages should be regenerated.
+
+    ``no_embed`` skips the K-layer embed pass; pages still land on disk
+    so dense retrieval recovers on the next ingest run.
+    """
+
+    force_all: bool = False
+    no_embed: bool = False
+
+
+class DistillSubmit(BaseModel):
+    """Body for ``POST /v1/distill``.
+
+    ``pages_per_call`` caps how many K-layer pages are fed to a single
+    LLM call; the default mirrors ``api.distill`` and keeps prompt
+    tokens bounded for vendors with tight context limits.
+    """
+
+    pages_per_call: int = 8
+
+
+class EvalSubmit(BaseModel):
+    """Body for ``POST /v1/eval``.
+
+    ``dataset`` accepts a registered dataset name (resolved under the
+    packaged datasets root) or a directory path — same surface as
+    ``dikw eval``. ``mode`` and ``cache_mode`` mirror ``run_eval`` knobs.
+    """
+
+    dataset: str
+    mode: str = "hybrid"
+    cache_mode: str = "read_write"
 
 
 class TaskHandle(BaseModel):
@@ -168,6 +208,82 @@ def make_router(*, auth_dep: Any) -> APIRouter:
             params={
                 "upload_id": body.upload_id,
                 "no_embed": body.no_embed,
+            },
+        )
+        return _handle(row)
+
+    @router.post("/synth", response_model=TaskHandle)
+    async def submit_synth(
+        request: Request,
+        body: SynthSubmit = Body(default_factory=SynthSubmit),
+    ) -> TaskHandle:
+        rt: ServerRuntime = get_runtime(request.app)
+        runner: TaskRunner = make_synth_runner(
+            wiki_root=rt.root,
+            cfg=rt.cfg,
+            force_all=body.force_all,
+            no_embed=body.no_embed,
+        )
+        row = await rt.manager.submit(
+            op="synth",
+            runner=runner,
+            params={
+                "force_all": body.force_all,
+                "no_embed": body.no_embed,
+            },
+        )
+        return _handle(row)
+
+    @router.post("/distill", response_model=TaskHandle)
+    async def submit_distill(
+        request: Request,
+        body: DistillSubmit = Body(default_factory=DistillSubmit),
+    ) -> TaskHandle:
+        rt: ServerRuntime = get_runtime(request.app)
+        if body.pages_per_call < 1:
+            raise BadRequest(
+                f"pages_per_call must be >= 1, got {body.pages_per_call}"
+            )
+        runner: TaskRunner = make_distill_runner(
+            wiki_root=rt.root,
+            cfg=rt.cfg,
+            pages_per_call=body.pages_per_call,
+        )
+        row = await rt.manager.submit(
+            op="distill",
+            runner=runner,
+            params={"pages_per_call": body.pages_per_call},
+        )
+        return _handle(row)
+
+    @router.post("/eval", response_model=TaskHandle)
+    async def submit_eval(
+        request: Request,
+        body: EvalSubmit = Body(...),
+    ) -> TaskHandle:
+        rt: ServerRuntime = get_runtime(request.app)
+        if body.mode not in ("hybrid", "bm25", "vector", "all"):
+            raise BadRequest(
+                f"mode must be one of hybrid|bm25|vector|all, got {body.mode!r}"
+            )
+        if body.cache_mode not in ("read_write", "rebuild", "off"):
+            raise BadRequest(
+                f"cache_mode must be one of read_write|rebuild|off, got {body.cache_mode!r}"
+            )
+        runner: TaskRunner = make_eval_runner(
+            wiki_root=rt.root,
+            cfg=rt.cfg,
+            dataset=body.dataset,
+            mode=body.mode,
+            cache_mode=body.cache_mode,
+        )
+        row = await rt.manager.submit(
+            op="eval",
+            runner=runner,
+            params={
+                "dataset": body.dataset,
+                "mode": body.mode,
+                "cache_mode": body.cache_mode,
             },
         )
         return _handle(row)

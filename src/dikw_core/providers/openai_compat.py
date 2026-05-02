@@ -156,13 +156,66 @@ class OpenAICompatLLM:
         temperature: float = 0.2,
         tools: list[ToolSpec] | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
-        # Streaming lands in Phase 4 of the client/server migration; until
-        # then callers must catch NotImplementedError and fall back to
-        # ``complete`` + a single synthetic ``done`` event.
-        del system, user, model, max_tokens, temperature, tools
-        raise NotImplementedError(
-            "OpenAICompatLLM.complete_stream is not implemented yet; use complete()"
-        )
+        # Tool-call streaming would need to interleave token + tool_use
+        # events; query/synth/distill don't use tools yet, so the stream
+        # path mirrors ``complete``'s tool-free shape.
+        _ = tools
+        client = self._get_client()
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+        async def _gen() -> AsyncIterator[LLMStreamEvent]:
+            # ``stream_options.include_usage`` asks the server to emit one
+            # final chunk carrying token usage — without it the SDK only
+            # surfaces usage on non-streamed responses, so a streamed call
+            # would always report empty usage to the bus subscriber.
+            # The SDK's TypedDict for ``stream_options`` and the literal-True
+            # overload's ``messages`` typing both reject our plain dicts; the
+            # values are structurally correct, so silence both at the call.
+            stream = await client.chat.completions.create(  # type: ignore[call-overload]
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            parts: list[str] = []
+            finish_reason: str | None = None
+            usage: dict[str, int] = {}
+            try:
+                async for chunk in stream:
+                    # Some servers (Gitee AI, vLLM) emit a usage-only
+                    # chunk with no choices; gate on truthy choices.
+                    if chunk.choices:
+                        choice = chunk.choices[0]
+                        delta_text = getattr(choice.delta, "content", None) or ""
+                        if delta_text:
+                            parts.append(delta_text)
+                            yield LLMStreamEvent(type="token", delta=delta_text)
+                        if choice.finish_reason:
+                            finish_reason = choice.finish_reason
+                    if chunk.usage is not None:
+                        usage = {
+                            "input_tokens": int(chunk.usage.prompt_tokens or 0),
+                            "output_tokens": int(chunk.usage.completion_tokens or 0),
+                        }
+            finally:
+                # Older SDK versions expose ``aclose`` on the stream;
+                # newer ones close on iteration completion. Guard both.
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            yield LLMStreamEvent(
+                type="done",
+                text="".join(parts),
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+
+        return _gen()
 
 
 class OpenAICompatEmbeddings:

@@ -324,3 +324,46 @@ async def test_cancellation_aborts_ingest(wiki_with_fixtures: Path) -> None:
         await api.ingest(
             wiki_with_fixtures, embedder=FakeEmbeddings(), reporter=reporter
         )
+
+
+# ---- streaming LLM ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_query_streaming_emits_llm_token_partials(
+    wiki_with_fixtures: Path,
+) -> None:
+    """When the LLM provider supports ``complete_stream``, ``api.query``
+    must surface each token through ``reporter.partial("llm_token", ...)``
+    in arrival order, then close with ``llm_done`` carrying the full
+    assembled answer."""
+    embedder = FakeEmbeddings()
+    await api.ingest(wiki_with_fixtures, embedder=embedder)
+
+    reporter = ListReporter()
+    chunks = ["Karpathy ", "says ", "scoping ", "is ", "deterministic."]
+    llm = FakeLLM(stream_chunks=chunks)
+    result = await api.query(
+        "what does Karpathy say about scoping?",
+        wiki_with_fixtures,
+        limit=3,
+        llm=llm,
+        embedder=embedder,
+        reporter=reporter,
+    )
+
+    token_partials = [
+        e for e in reporter.events
+        if e.kind == "partial" and e.payload["kind"] == "llm_token"
+    ]
+    assert [p.payload["payload"]["delta"] for p in token_partials] == chunks
+
+    # Order: retrieval_done before any llm_token, llm_done after the last.
+    kinds = reporter.partial_kinds()
+    assert kinds[0] == "retrieval_done"
+    assert kinds[-1] == "llm_done"
+    assert kinds.count("llm_token") == len(chunks)
+
+    # The engine returns the streamed text; ``done`` event's authoritative
+    # text matches the joined chunks.
+    assert result.answer == "".join(chunks).strip()

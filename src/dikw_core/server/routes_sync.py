@@ -296,12 +296,25 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         kind: str | None = Query(default=None),
     ) -> list[WisdomItem]:
         rt: ServerRuntime = get_runtime(request.app)
+        from ..schemas import WisdomKind
+
+        # Validate ``kind`` BEFORE opening storage so a typo'd query
+        # param surfaces as 4xx rather than crashing through the
+        # exception handler as a 500.
+        kind_enum: WisdomKind | None = None
+        if kind:
+            try:
+                kind_enum = WisdomKind(kind)
+            except ValueError as e:
+                valid = ", ".join(k.value for k in WisdomKind)
+                raise BadRequest(
+                    f"unknown wisdom kind {kind!r} (valid: {valid})",
+                    code="invalid_wisdom_kind",
+                ) from e
+
         cfg, _root, storage = await api._with_storage(rt.root)
         del cfg
         try:
-            from ..schemas import WisdomKind
-
-            kind_enum = WisdomKind(kind) if kind else None
             return await storage.list_wisdom(status=status, kind=kind_enum)
         finally:
             await storage.close()

@@ -32,6 +32,14 @@ def commit_staging(wiki_root: Path, upload_id: str) -> dict[str, int]:
     wiki's ``sources/`` and ``assets/`` subtrees, then drop the staging
     dir. Returns counts so the caller can log.
 
+    **Additive only.** Files that exist in the wiki but NOT in the upload
+    are left in place — uploading is treated as "merge in these files",
+    not "mirror this directory". Deleting on-disk content as a side
+    effect of an upload would be a destructive surprise; users that
+    actually want a sync-style replace should remove the wiki files
+    explicitly first (a future ``--mirror`` flag could opt into
+    delete-sync, but no user has asked yet).
+
     Same-filesystem ``os.replace`` keeps each rename atomic; cross-tree
     visibility (a half-committed staging is not observable) is the
     server's contract because we hold the upload lock for the duration.

@@ -171,7 +171,7 @@ def build_upload(
 
 
 _DEFAULT_EXTENSIONS = frozenset(
-    {".md", ".html", ".htm", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"}
+    {".md", ".html", ".htm", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".pdf"}
 )
 
 
@@ -271,14 +271,14 @@ def _discover(
                 yield _make_entry(path, archive_path=rel)
         return
 
-    # No sources/ or assets/ subtree → re-root: markdown lands under
-    # ``sources/``, everything else under ``assets/``. The default
-    # whitelist includes image / pdf extensions for the assets path,
-    # so a flat dir with ``note.md + diagram.png`` gets the png mapped
-    # to ``assets/diagram.png`` (where commit_staging + ingest expect
-    # asset files) rather than ``sources/diagram.png`` (where ingest
-    # would skip or misclassify it).
-    _MD_LIKE = {".md", ".html", ".htm"}
+    # No sources/ or assets/ subtree → re-root EVERYTHING under
+    # ``sources/`` preserving the relative path. This keeps a flat
+    # ``note.md + diagram.png`` co-located on disk after upload so
+    # ``materialize_asset``'s sibling-of-md resolution still finds the
+    # asset ref ``![](diagram.png)``. Splitting them into
+    # ``sources/note.md`` + ``assets/diagram.png`` would break that
+    # resolution silently — ingest's ``**/*.md`` pattern already skips
+    # binaries in ``sources/`` so co-locating costs nothing.
     for path in sorted(_walk_files(src)):
         if path.name == "_payload.tar.gz":
             continue
@@ -288,8 +288,7 @@ def _discover(
                 f"(allowed: {sorted(allowed_ext)})"
             )
         rel = path.relative_to(src).as_posix()
-        bucket = "sources" if path.suffix.lower() in _MD_LIKE else "assets"
-        yield _make_entry(path, archive_path=f"{bucket}/{rel}")
+        yield _make_entry(path, archive_path=f"sources/{rel}")
 
 
 def _walk_files(root: Path) -> Iterator[Path]:

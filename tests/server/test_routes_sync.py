@@ -128,6 +128,19 @@ async def test_wisdom_listing_starts_empty(
 
 
 @pytest.mark.asyncio
+async def test_wisdom_listing_rejects_unknown_kind_with_4xx(
+    server_client: httpx.AsyncClient,
+) -> None:
+    """A typo'd ``?kind=`` query param must be a 400, not a 500 — the
+    raw ``WisdomKind(kind)`` cast would otherwise raise ``ValueError``
+    and bubble through as a 500."""
+    resp = await server_client.get("/v1/wisdom?kind=bogus")
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "invalid_wisdom_kind"
+
+
+@pytest.mark.asyncio
 async def test_approve_unknown_wisdom_is_404_or_409(
     server_client: httpx.AsyncClient,
 ) -> None:

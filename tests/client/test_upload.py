@@ -123,11 +123,13 @@ def test_extra_extensions_admitted(tmp_path: Path) -> None:
         bundle.close()
 
 
-def test_flat_dir_routes_assets_to_assets_bucket(tmp_path: Path) -> None:
-    """A flat input dir with ``note.md + diagram.png`` must put the
-    image under ``assets/`` (so commit_staging + ingest treat it as an
-    asset), not under ``sources/`` (where ingest skips/misclassifies
-    binaries)."""
+def test_flat_dir_keeps_md_and_assets_co_located(tmp_path: Path) -> None:
+    """A flat input dir with ``note.md + diagram.png`` must keep the two
+    files SIBLING after upload so the engine's ``materialize_asset``
+    resolves ``![](diagram.png)`` against the markdown's parent
+    directory. Splitting them into ``sources/note.md`` +
+    ``assets/diagram.png`` breaks that resolution silently — ingest's
+    ``**/*.md`` glob skips the png in ``sources/`` either way."""
     src = tmp_path / "flat"
     src.mkdir()
     (src / "note.md").write_text("# n\n![](diagram.png)\n", encoding="utf-8")
@@ -138,7 +140,7 @@ def test_flat_dir_routes_assets_to_assets_bucket(tmp_path: Path) -> None:
     try:
         manifest = json.loads(bundle.manifest_json)
         paths = sorted(e["path"] for e in manifest["files"])
-        assert paths == ["assets/diagram.png", "sources/note.md"]
+        assert paths == ["sources/diagram.png", "sources/note.md"]
     finally:
         bundle.close()
 

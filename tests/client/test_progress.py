@@ -1,0 +1,166 @@
+"""Renderer behaviour tests.
+
+Drives the renderers with a hand-rolled NDJSON event sequence and
+inspects the rendered text via rich's ``Console(record=True)``. We check
+shape (presence of expected substrings + final-event return value),
+not exact whitespace — rich's table glyphs vary per terminal width and
+are not part of the contract.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Any
+
+import pytest
+from rich.console import Console
+
+from dikw_core.client.progress import (
+    QueryStreamRenderer,
+    TaskProgressRenderer,
+    render_distill_report,
+    render_eval_report,
+    render_ingest_report,
+    render_status,
+)
+
+
+async def _scripted(events: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    for ev in events:
+        yield ev
+
+
+@pytest.mark.asyncio
+async def test_task_progress_renderer_returns_final_event() -> None:
+    console = Console(record=True, width=80, force_terminal=False)
+    renderer = TaskProgressRenderer(console, plain=True)
+    events = [
+        {"type": "task_started", "task_id": "abc", "op": "ingest"},
+        {"type": "progress", "phase": "scan", "current": 1, "total": 3},
+        {"type": "progress", "phase": "scan", "current": 3, "total": 3},
+        {"type": "progress", "phase": "embed_chunks", "current": 1, "total": 1},
+        {"type": "log", "level": "WARN", "message": "low disk"},
+        {
+            "type": "final",
+            "status": "succeeded",
+            "result": {"scanned": 3, "added": 3, "embedded": 7},
+        },
+    ]
+    with renderer.live():
+        final = await renderer.run(_scripted(events))
+    assert final.status == "succeeded"
+    assert final.result == {"scanned": 3, "added": 3, "embedded": 7}
+    assert final.error is None
+    out = console.export_text()
+    assert "low disk" in out
+
+
+@pytest.mark.asyncio
+async def test_task_progress_renderer_falls_back_when_no_final() -> None:
+    """A stream that closes without ``final`` surfaces as a synthetic
+    ``failed`` so the caller doesn't have to special-case it."""
+    console = Console(record=True, width=80, force_terminal=False)
+    renderer = TaskProgressRenderer(console, plain=True)
+    events: list[dict[str, Any]] = [
+        {"type": "progress", "phase": "scan", "current": 0, "total": 1},
+    ]
+    with renderer.live():
+        final = await renderer.run(_scripted(events))
+    assert final.status == "failed"
+    assert final.result is None
+
+
+@pytest.mark.asyncio
+async def test_query_renderer_streams_tokens_and_emits_citations(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    console = Console(record=True, width=80, force_terminal=False)
+    renderer = QueryStreamRenderer(console, plain=False)
+    events = [
+        {"type": "query_started"},
+        {"type": "retrieval_done", "hits": [{"chunk_id": 1, "path": "a.md"}]},
+        {"type": "llm_token", "delta": "Hello "},
+        {"type": "llm_token", "delta": "world."},
+        {
+            "type": "final",
+            "status": "succeeded",
+            "result": {
+                "answer": "Hello world.",
+                "citations": [
+                    {"n": 1, "layer": "source", "path": "a.md", "seq": 0, "excerpt": "Hello world."}
+                ],
+            },
+        },
+    ]
+    final = await renderer.run(_scripted(events))
+    assert final.status == "succeeded"
+    captured_stdout = capsys.readouterr().out
+    # Tokens streamed to stdout in arrival order.
+    assert "Hello world." in captured_stdout
+    # Citations table on the rich console.
+    assert "citations" in console.export_text()
+
+
+def test_render_ingest_report_table_has_metrics() -> None:
+    console = Console(record=True, width=80, force_terminal=False)
+    render_ingest_report(
+        console,
+        {
+            "scanned": 4,
+            "added": 4,
+            "updated": 0,
+            "unchanged": 0,
+            "chunks": 8,
+            "embedded": 8,
+        },
+    )
+    out = console.export_text()
+    # Renderer labels the embedding row "embeddings" (mirroring
+    # IngestReport.embedded → display name); accept either spelling.
+    assert "scanned" in out
+    assert "embeddings" in out or "embedded" in out
+
+
+def test_render_status_handles_missing_keys() -> None:
+    """A pre-init wiki returns mostly zeros; renderer must not blow up
+    on missing optional fields like ``last_wiki_log_ts``."""
+    console = Console(record=True, width=80, force_terminal=False)
+    render_status(
+        console,
+        {
+            "documents_by_layer": {},
+            "chunks": 0,
+            "embeddings": 0,
+            "links": 0,
+            "wisdom_by_status": {},
+        },
+    )
+    out = console.export_text()
+    assert "source" in out and "wisdom" in out
+
+
+def test_render_distill_report_renders_zeroes() -> None:
+    console = Console(record=True, width=80, force_terminal=False)
+    render_distill_report(
+        console,
+        {"pages_read": 3, "candidates_added": 0, "rejected": 0, "errors": 0},
+    )
+    out = console.export_text()
+    assert "K pages read" in out
+
+
+def test_render_eval_report_marks_failures() -> None:
+    """A failing metric must show up as ``FAIL`` so CI logs are
+    grep-able for regressions."""
+    console = Console(record=True, width=80, force_terminal=False)
+    render_eval_report(
+        console,
+        {
+            "dataset_name": "toy",
+            "metrics": {"hit_at_3": 0.10, "mrr": 0.40},
+            "thresholds": {"hit_at_3": 0.50, "mrr": 0.30},
+        },
+    )
+    out = console.export_text()
+    assert "FAIL" in out
+    assert "pass" in out

@@ -9,12 +9,13 @@ imports; new code should reach into ``dikw_core.eval.fake_embedder``.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
 from dikw_core.config import ProviderConfig
 from dikw_core.eval.fake_embedder import EMBED_DIM, FakeEmbeddings
-from dikw_core.providers import LLMResponse, ToolSpec
+from dikw_core.providers import LLMResponse, LLMStreamEvent, ToolSpec
 from dikw_core.schemas import EmbeddingVersion, MultimodalInput
 
 __all__ = [
@@ -148,9 +149,18 @@ class CountingEmbedder:
 
 @dataclass
 class FakeLLM:
-    """Captures the last call and returns a scripted or default response."""
+    """Captures the last call and returns a scripted or default response.
+
+    ``stream_chunks`` (optional) lets a test exercise the streaming path:
+    when set, ``complete_stream`` yields one ``token`` event per chunk
+    followed by a ``done`` event whose ``text`` is the joined chunks.
+    With ``stream_chunks=None`` the default Phase-1 behaviour holds and
+    ``complete_stream`` raises ``NotImplementedError``, matching the
+    real provider stubs.
+    """
 
     response_text: str = "STUB: wired up."
+    stream_chunks: list[str] | None = None
     last_system: str | None = field(default=None, init=False)
     last_user: str | None = field(default=None, init=False)
     last_max_tokens: int | None = field(default=None, init=False)
@@ -170,6 +180,37 @@ class FakeLLM:
         self.last_user = user
         self.last_max_tokens = max_tokens
         return LLMResponse(text=self.response_text, finish_reason="end_turn")
+
+    def complete_stream(
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str,
+        max_tokens: int = 4096,
+        temperature: float = 0.2,
+        tools: list[ToolSpec] | None = None,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        _ = (model, temperature, tools)
+        self.last_system = system
+        self.last_user = user
+        self.last_max_tokens = max_tokens
+        chunks = self.stream_chunks
+        if chunks is None:
+            raise NotImplementedError(
+                "FakeLLM.complete_stream requires stream_chunks to be set"
+            )
+
+        async def _gen() -> AsyncIterator[LLMStreamEvent]:
+            for chunk in chunks:
+                yield LLMStreamEvent(type="token", delta=chunk)
+            yield LLMStreamEvent(
+                type="done",
+                text="".join(chunks),
+                finish_reason="end_turn",
+            )
+
+        return _gen()
 
 
 @dataclass

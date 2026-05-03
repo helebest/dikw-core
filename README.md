@@ -16,7 +16,7 @@ Inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6
   - **W**isdom — evidence-backed principles / lessons / patterns, human-approved, surfaced at query time.
 - Pluggable LLM providers (API-first): Anthropic + OpenAI-compatible (covers OpenAI, Azure, Ollama, DeepSeek, Gemini-compat).
 - Pluggable storage: SQLite+sqlite-vec (default), Postgres+pgvector (enterprise), Filesystem/Vault (Obsidian-native, DB-less) — swap by config.
-- Agent-first: MCP server exposes the engine to Claude Code, Claude Desktop, and any MCP client. A CLI (`dikw`) wraps the same core.
+- **Client / server architecture.** A long-lived `dikw serve` (FastAPI + NDJSON) hosts the engine; the `dikw client …` Typer CLI talks to it over HTTP, streams progress events for long ops, and supports cancel / resume.
 
 ## Install & quick start
 
@@ -29,15 +29,32 @@ uv sync
 
 uv run dikw init my-wiki --description "my research wiki"
 cd my-wiki
-# drop some markdown or HTML into sources/, then:
-uv run dikw ingest --no-embed     # or: uv run dikw ingest (needs DIKW_EMBEDDING_API_KEY)
-uv run dikw status
-uv run dikw synth                  # K layer (needs ANTHROPIC_API_KEY or OpenAI-compat)
-uv run dikw distill                # W-layer candidates
-uv run dikw review list
-uv run dikw review approve W-abcdef123456
-uv run dikw query "What does Karpathy mean by deterministic scoping?"
+# Drop some markdown into sources/, then run any single command via
+# `serve-and-run` — it spawns a local server, runs the inner command,
+# and tears it down.
+uv run dikw serve-and-run -- ingest --no-embed
+uv run dikw serve-and-run -- query "What does Karpathy mean by deterministic scoping?"
 ```
+
+For interactive sessions or long iterations, run `dikw serve` once and
+keep using `dikw client *` against it:
+
+```bash
+uv run dikw serve --wiki .   # in one terminal
+# in another:
+uv run dikw client status
+uv run dikw client synth               # K layer (needs ANTHROPIC_API_KEY or OpenAI-compat)
+uv run dikw client distill             # W-layer candidates
+uv run dikw client review list
+uv run dikw client review approve W-abcdef123456
+uv run dikw client query "What does Karpathy mean by deterministic scoping?"
+```
+
+> Top-level aliases (`dikw status`, `dikw query`, …) are kept as shortcuts and
+> route through the same client.
+
+Server deployment, security posture, and the wire contract live in
+[`docs/server.md`](./docs/server.md).
 
 End-to-end walkthrough: [`docs/getting-started.md`](./docs/getting-started.md).
 Architecture brief: [`docs/architecture.md`](./docs/architecture.md).
@@ -45,19 +62,30 @@ Approved design doc: [`docs/design.md`](./docs/design.md).
 
 ## Commands
 
+Local-only commands run in this process:
+
 | command                     | does                                                                          |
 | --------------------------- | ----------------------------------------------------------------------------- |
+| `dikw version`              | print the package version                                                     |
 | `dikw init <path>`          | scaffold a wiki directory (sources / wiki / wisdom / `.dikw/` + `dikw.yml`)   |
-| `dikw ingest [--no-embed]`  | parse sources (MD, HTML), chunk, FTS-index, optionally embed                  |
-| `dikw query "<q>"`          | hybrid search + LLM answer with citations and applicable wisdom               |
-| `dikw synth [--all]`        | LLM turns source docs into K-layer wiki pages; maintains `index.md`+`log.md`  |
-| `dikw lint`                 | report broken wikilinks, orphan pages, duplicate titles                       |
-| `dikw distill`              | LLM proposes W-layer candidates (each needs ≥ 2 pieces of evidence)           |
-| `dikw review {list,approve,reject}` | drive the candidate -> approved / archived state machine             |
-| `dikw mcp [--stdio]`        | launch the MCP server (exposes the engine to Claude Code / Claude Desktop)    |
-| `dikw status`               | counts across DIKW layers                                                     |
-| `dikw check`                | ping the configured LLM + embedding endpoints to verify `dikw.yml` + keys     |
-| `dikw eval [--dataset]`     | run retrieval-quality evaluation against packaged or custom datasets          |
+| `dikw serve --wiki <path>`  | start the FastAPI + NDJSON server bound to one wiki                           |
+| `dikw serve-and-run -- <cmd>` | spawn a local server, run an inner client command against it, tear it down |
+
+Everything else lives under `dikw client *` and talks to a running server
+(top-level aliases keep the old muscle memory):
+
+| command                     | does                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| `dikw client status`        | counts across DIKW layers                                                     |
+| `dikw client check`         | ping the configured LLM + embedding endpoints to verify `dikw.yml` + keys     |
+| `dikw client ingest [--no-embed] [--from <dir>]` | upload local sources/ + parse, chunk, FTS-index, embed         |
+| `dikw client query "<q>"`   | hybrid search + LLM answer (streams tokens via NDJSON) with citations         |
+| `dikw client synth [--all]` | LLM turns source docs into K-layer wiki pages; maintains `index.md`+`log.md`  |
+| `dikw client lint`          | report broken wikilinks, orphan pages, duplicate titles                       |
+| `dikw client distill`       | LLM proposes W-layer candidates (each needs ≥ 2 pieces of evidence)           |
+| `dikw client review {list,approve,reject}` | drive the candidate -> approved / archived state machine       |
+| `dikw client eval [--dataset]` | run retrieval-quality evaluation against packaged or custom datasets       |
+| `dikw client tasks {list,show,follow,cancel}` | inspect running / past async tasks on the server               |
 
 ## Providers
 
@@ -134,14 +162,15 @@ Verify connectivity **before** running ingest/query. The two legs can be
 probed separately, which is useful when you set up one vendor first:
 
 ```bash
-uv run dikw check --llm-only     # just LLM — useful before Gitee is wired up
-uv run dikw check --embed-only   # just embedding
-uv run dikw check                # both
+uv run dikw client check --llm-only     # just LLM — useful before Gitee is wired up
+uv run dikw client check --embed-only   # just embedding
+uv run dikw client check                # both
 ```
 
-`dikw check` pings each provider with one tiny request and prints a status
-table with endpoint, latency, and dim/tokens. Exit code is 0 on success,
-1 on failure, 2 on flag misuse — scriptable in CI or a shell one-liner.
+`dikw client check` pings each provider with one tiny request and prints a
+status table with endpoint, latency, and dim/tokens. Exit code is 0 on
+success, 1 on failure, 2 on flag misuse — scriptable in CI or a shell
+one-liner.
 
 ## Source formats
 

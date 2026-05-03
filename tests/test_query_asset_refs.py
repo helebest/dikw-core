@@ -10,7 +10,7 @@ ranking via RRF (k=60):
 The asset leg lets a text query like "transformer architecture diagram"
 promote chunks that *reference* a matching image, even when the chunk
 text itself doesn't say "transformer". Each returned Hit carries the
-``asset_refs`` it touches so downstream consumers (CLI, MCP, LLM
+``asset_refs`` it touches so downstream consumers (CLI, server, LLM
 synthesis) can render or cite them.
 
 Backward-compat invariant: searches that don't pass a multimodal

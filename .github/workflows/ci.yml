@@ -36,8 +36,34 @@ jobs:
       - name: Mypy
         run: uv run mypy src
 
-      - name: Pytest
-        run: uv run pytest -v
+      - name: Pytest (fast, excludes slow + perf)
+        run: uv run pytest -v -m "not slow and not perf"
+
+  server-e2e:
+    name: Server e2e (serve-and-run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Slow tests (subprocess + bind real port)
+        # Covers ``client/serve_and_run.py`` end-to-end: spawns the real
+        # ``dikw serve`` process, polls /v1/healthz, runs the inner
+        # client command, and asserts a clean shutdown. Splitting this
+        # out from the matrix job keeps the failure mode visible (a
+        # broken subprocess lifecycle dominates the CI report instead
+        # of being one row in a pytest summary).
+        run: uv run pytest -v -m "slow"
 
   postgres-contract:
     name: Postgres contract tests

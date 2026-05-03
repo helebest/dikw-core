@@ -10,9 +10,10 @@ OpenAI-compatible provider.
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from .base import LLMResponse, ProviderError, ToolSpec
+from .base import LLMResponse, LLMStreamEvent, ProviderError, ToolSpec
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
@@ -128,3 +129,62 @@ class AnthropicLLM:
             finish_reason=resp.stop_reason,
             usage=usage,
         )
+
+    def complete_stream(
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str,
+        max_tokens: int = 4096,
+        temperature: float = 0.2,
+        tools: list[ToolSpec] | None = None,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        _ = tools
+        client = self._get_client()
+        # Same cache-eligible system block as ``complete`` so a streamed
+        # call still benefits from prompt cache hits across query/synth
+        # bursts. cache_control + streaming are orthogonal in the SDK.
+        system_block: list[dict[str, Any]] = [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ]
+
+        async def _gen() -> AsyncIterator[LLMStreamEvent]:
+            async with client.messages.stream(
+                model=model,
+                system=system_block,  # type: ignore[arg-type]
+                messages=[{"role": "user", "content": user}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ) as stream:
+                async for delta in stream.text_stream:
+                    if delta:
+                        yield LLMStreamEvent(type="token", delta=delta)
+                final = await stream.get_final_message()
+            parts: list[str] = []
+            for block in final.content:
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+            usage: dict[str, int] = {}
+            if final.usage is not None:
+                usage = {
+                    "input_tokens": int(getattr(final.usage, "input_tokens", 0) or 0),
+                    "output_tokens": int(
+                        getattr(final.usage, "output_tokens", 0) or 0
+                    ),
+                    "cache_creation_input_tokens": int(
+                        getattr(final.usage, "cache_creation_input_tokens", 0) or 0
+                    ),
+                    "cache_read_input_tokens": int(
+                        getattr(final.usage, "cache_read_input_tokens", 0) or 0
+                    ),
+                }
+            yield LLMStreamEvent(
+                type="done",
+                text="".join(parts),
+                finish_reason=final.stop_reason,
+                usage=usage,
+            )
+
+        return _gen()

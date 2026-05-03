@@ -72,8 +72,9 @@ src/dikw_core/
 │       ├── sqlite/          schema SQL
 │       └── postgres/        schema SQL (vector extension)
 ├── prompts/               versioned LLM prompts loaded via importlib.resources
-├── mcp_server.py          MCP tools grouped by layer
-└── cli.py                 typer app
+├── server/                FastAPI app + auth + sync/task/upload/query routes + task subsystem
+├── client/                Remote Typer CLI + httpx transport + NDJSON progress
+└── cli.py                 top-level Typer app: version, init, serve + dikw client subgroup
 ```
 
 ## Seams on purpose

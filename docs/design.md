@@ -19,7 +19,7 @@ Design decisions already locked in (via clarifying Q&A):
 1. **DIKW as first-class layers** — each layer has its own storage, schemas, and operations. The pipeline between layers is explicit (not an implicit by-product of retrieval).
 2. **Wiki-as-artifact** — Knowledge & Wisdom layers are plain markdown on disk, versioned with git by the user, editable by humans and LLMs. The engine is a tool; the wiki is the product.
 3. **Scoping deterministic, reasoning probabilistic** (Karpathy) — navigation uses deterministic structure (index.md, link graph, FTS); LLM calls are reserved for synthesis, distillation, and answering.
-4. **Agent-native first, CLI second** — primary interface is an MCP server exposing high-level operations; CLI wraps the same core for humans.
+4. **Server-as-the-engine, CLI-as-the-client** — the engine is a long-lived `dikw serve` (FastAPI + NDJSON streaming) process that owns storage and provider connections; humans drive it through `dikw client *`, agents through HTTP. There is no in-process import path for end-user operations.
 5. **Local-first data, pluggable compute** — the wiki lives on the user's filesystem; the default index is a local SQLite DB; only LLM calls leave the machine (and are provider-abstracted).
 6. **Pluggable storage** — the engine talks to an abstract **Storage** interface, not to SQL directly. Three backends are planned: **SQLite+sqlite-vec** (MVP, single-user local), **Postgres+pgvector** (enterprise, multi-user), and **Filesystem/Vault** (DB-less, Obsidian-native — matches Karpathy's small-scale philosophy). Swapping backends is a config change.
 7. **Obsidian-compatible on-disk format** — the K & W layers are written as a plain markdown tree that Obsidian (or any MD editor) opens as a vault: `[[wikilinks]]`, YAML front-matter with tags, folder-based organization, daily-note conventions. The engine is a collaborator, not a walled garden; the user owns the files.
@@ -40,7 +40,14 @@ The W layer is the novel bit and is spelled out in "Wisdom Layer Design" below.
 
 ```
                  ┌──────────────────────────────────────────┐
- User & Agents → │  Interfaces:  MCP server   │   CLI       │
+ User & Agents → │  Remote CLI (dikw client …)              │
+                 │  Typer + httpx + rich + NDJSON           │
+                 └────────────────┬─────────────────────────┘
+                                  │ HTTP + NDJSON streaming
+                 ┌────────────────▼─────────────────────────┐
+                 │  Server (dikw serve — FastAPI + Uvicorn) │
+                 │  sync RPC + async task subsystem +       │
+                 │  ProgressBus + per-task NDJSON event tap │
                  └────────────────┬─────────────────────────┘
                                   │
                  ┌────────────────▼─────────────────────────┐
@@ -87,8 +94,8 @@ Module boundaries are chosen so each subpackage fits in a single reading pass an
 - **Markdown**: `markdown-it-py` + `python-frontmatter`; wiki-link parsing via a small in-repo module (not a heavy dep)
 - **LLM SDKs**: `anthropic`, `openai` (the `openai` SDK covers all OpenAI-compatible endpoints), behind a thin provider interface
 - **Embeddings**: default through an OpenAI-compatible `embeddings` endpoint (works for OpenAI, Ollama, TEI, etc.); Anthropic path uses OpenAI-compat for embeddings since Anthropic has no embeddings API
-- **MCP**: `mcp` Python SDK (stdio transport first; HTTP optional)
-- **CLI & output**: `typer` + `rich`
+- **HTTP server**: `fastapi` + `uvicorn[standard]` + `python-multipart` for source uploads
+- **CLI & output**: `typer` + `httpx` + `rich`
 - **Quality**: `pytest`, `pytest-asyncio`, `ruff`, `mypy --strict` where practical
 - **CI**: GitHub Actions — lint + type-check + tests on 3.12/3.13
 
@@ -97,7 +104,7 @@ Known patterns to reuse from references (concrete sources):
 - **SQLite schema design + content-addressed storage** — `mineru-doc-explorer/src/db-schema.ts`, `mineru-doc-explorer/src/store.ts` (documents table with indexed content hash, links table, wiki_log).
 - **Smart markdown chunking (~900 tokens, 15% overlap, heading-aware)** — `mineru-doc-explorer/src/store.ts` chunking section; `qmd/src/store.ts` lines ~257–310.
 - **Wikilink parsing + forward/backward graph** — `mineru-doc-explorer/src/links.ts`, `mineru-doc-explorer/src/wiki/{log,lint,index-gen}.ts`. Port to a small `knowledge/links.py`.
-- **MCP tool grouping** — `mineru-doc-explorer/src/mcp/tools/{core,document,wiki}.ts`. Mirror the grouping shape in Python.
+- **HTTP route grouping** — server endpoints map 1:1 to `dikw_core.api` methods, grouped under `/v1/{sync,tasks,upload,query}` so the wire surface mirrors the engine seam. Long ops (ingest / synth / distill / eval / query) stream NDJSON; sync ops return JSON directly.
 - **YAML config + schema validation** — `mineru-doc-explorer/src/config-schema.ts` (Zod) → Pydantic v2 equivalent in `dikw_core/config.py`.
 - **Strong-signal short-circuit** (skip expensive LLM expansion when FTS already gives a confident top hit) — `qmd/src/store.ts:4057–4076`.
 
@@ -114,7 +121,7 @@ dikw-core/
 ├── .gitignore
 ├── src/dikw_core/
 │   ├── __init__.py
-│   ├── api.py                # thin facade used by CLI + MCP
+│   ├── api.py                # engine facade — server routes + eval runner depend on it
 │   ├── config.py             # Pydantic models + YAML loader
 │   ├── schemas.py            # cross-layer record types
 │   │
@@ -163,8 +170,9 @@ dikw-core/
 │   │   ├── query.md
 │   │   └── lint.md
 │   │
-│   ├── mcp_server.py         # MCP tools grouped by layer
-│   └── cli.py                # typer app: init, ingest, query, synth, distill, lint, mcp
+│   ├── server/               # FastAPI app, auth, sync + task routes, NDJSON streamer
+│   ├── client/               # remote Typer CLI + httpx transport + NDJSON progress + sources upload
+│   └── cli.py                # top-level typer app: version, init, serve + dikw client subgroup
 │
 ├── tests/
 │   ├── fixtures/             # small MD corpora
@@ -174,7 +182,8 @@ dikw-core/
 │   ├── test_distill.py
 │   ├── test_providers.py     # uses recorded responses
 │   ├── test_storage_contract.py  # same contract test runs against every backend
-│   └── test_mcp.py
+│   ├── server/               # HTTP-level tests against an in-memory ASGI app
+│   └── client/               # transport, config, upload, progress renderer tests
 └── examples/
     └── personal-wiki/        # runnable demo wiki
 ```
@@ -370,7 +379,7 @@ coexist; each row produces its own `vec_*_v<n>` table).
 
 ## Core Operations
 
-Each operation is implemented in `dikw_core.api` and surfaced identically in CLI and MCP.
+Each operation is implemented in `dikw_core.api` and surfaced over HTTP by the server (`dikw_core.server`); the remote CLI (`dikw_core.client`) and any agent / web UI consume the same wire contract.
 
 | Op | Input | Output | Notes |
 |---|---|---|---|
@@ -380,7 +389,7 @@ Each operation is implemented in `dikw_core.api` and surfaced identically in CLI
 | `review()` | — | interactive CLI workflow to approve/edit/reject candidates | W gate; writes final files to `wisdom/*.md` |
 | `query(q)` | user question | answer + citations (from D, I, K, W) | uses hybrid search + page retrieval + applicable wisdom; prompts/query.md |
 | `lint()` | — | report of broken links, stale claims, orphan pages, duplicated entities | K+W hygiene; prompts/lint.md |
-| `status()` | — | counts per layer, last-ingest, last-synthesize, pending review | for CLI and MCP dashboards |
+| `status()` | — | counts per layer, last-ingest, last-synthesize, pending review | for CLI and HTTP `/v1/status` |
 
 ## Wisdom Layer Design (the novel bit)
 
@@ -524,31 +533,34 @@ Prompt caching: when the provider is Anthropic, use the `cache_control` param on
 
 ## Interfaces
 
-**CLI** (`dikw ...`):
+**Local CLI** (run in this process; no server required):
+- `dikw version` — print package version
 - `dikw init [path]` — scaffold `dikw.yml`, `sources/`, `wiki/`, `wisdom/`, `.dikw/`
-- `dikw ingest [paths]` — D→I
-- `dikw synth [--since TS|--all]` — K synthesis
-- `dikw distill [--topic STR|--recent]` — produce W candidates
-- `dikw review` — interactive approval of W candidates
-- `dikw query "<q>"` — free-form Q&A with citations
-- `dikw lint` — hygiene report
-- `dikw status`
-- `dikw mcp [--stdio|--http --port 8181]`
+- `dikw serve --wiki <path>` — start the FastAPI + NDJSON server bound to one wiki
 
-**MCP tools** (grouped to mirror the reference projects):
-- `core.query`, `core.status`
-- `doc.read`, `doc.search`, `doc.links`
-- `wiki.list`, `wiki.get`, `wiki.synthesize`, `wiki.log`
-- `wisdom.list`, `wisdom.apply`, `wisdom.distill`, `wisdom.review`
-- `admin.ingest`, `admin.lint`
+**Remote CLI** (`dikw client *`, also reachable via top-level aliases):
+- `dikw client status` — counts per layer
+- `dikw client check [--llm-only|--embed-only]` — provider connectivity probe
+- `dikw client ingest [--from <dir>] [--no-embed]` — upload local sources, run ingest, stream progress
+- `dikw client synth [--all]` — K synthesis
+- `dikw client distill` — propose W-layer candidates
+- `dikw client review {list,approve,reject}` — drive the W review state machine
+- `dikw client query "<q>"` — streamed Q&A with citations and applicable wisdom
+- `dikw client lint` — hygiene report
+- `dikw client eval [--dataset]` — run retrieval-quality evaluation
+- `dikw client tasks {list,show,follow,cancel}` — inspect the server's async task queue
 
-Each tool validates input with Pydantic and returns structured JSON plus a markdown-rendered companion string (so agents can paste answers directly).
+**HTTP surface** (the server is the canonical wire contract):
+- Sync RPC under `/v1/` — `status`, `check`, `lint`, `init`, wiki page list/read, doc search, chunk fetch, wisdom list/approve/reject.
+- Async tasks under `/v1/{ingest,synth,distill,eval}` — submit returns `task_id`; `GET /v1/tasks/{id}/events` streams NDJSON progress; `/result` and `/cancel` complete the lifecycle.
+- Streaming query — `POST /v1/query` returns NDJSON: `query_started → retrieval_done → llm_token* → final{succeeded|failed|cancelled}`.
+- Sources upload — `POST /v1/upload/sources` accepts a manifest + tar.gz, validates sha256, stages atomically before ingest reads from disk.
 
 ## Phasing
 
 - **Phase 0 — Scaffold (small):** repo layout, `uv` init, CI, ruff/mypy, typer CLI with `init`/`status`, config loader, **`Storage` Protocol + DTOs in `storage/base.py`**, SQLite bootstrap in `storage/sqlite.py`, `storage/__init__.py` factory, contract-test skeleton, minimal `providers/base.py` + Anthropic stub, a golden-path test that runs end-to-end on an empty wiki.
-- **Phase 1 — D + I (foundation):** markdown backend, content-hash store, heading-aware chunker, embedding batch pipeline via OpenAI-compat, FTS5 index and sqlite-vec index implemented on the SQLite adapter, RRF hybrid `search` (fusion lives in `info/search.py`, calling `storage.fts_search` + `storage.vec_search`), `ingest` + `query` CLI + MCP tool. Acceptance: ingest a 50-file corpus, `query` returns citations in <2s warm.
-- **Phase 2 — K (wiki):** `synthesize` prompt + worker, wiki page writer, link graph, `index.md` regenerator, `log.md` append, `lint`, `wiki.*` MCP tools. Acceptance: running `synth` on the Phase-1 corpus produces a non-empty `wiki/` with valid cross-links; `lint` reports 0 errors.
+- **Phase 1 — D + I (foundation):** markdown backend, content-hash store, heading-aware chunker, embedding batch pipeline via OpenAI-compat, FTS5 index and sqlite-vec index implemented on the SQLite adapter, RRF hybrid `search` (fusion lives in `info/search.py`, calling `storage.fts_search` + `storage.vec_search`), `ingest` + `query` CLI + HTTP routes. Acceptance: ingest a 50-file corpus, `query` returns citations in <2s warm.
+- **Phase 2 — K (wiki):** `synthesize` prompt + worker, wiki page writer, link graph, `index.md` regenerator, `log.md` append, `lint`, wiki HTTP routes. Acceptance: running `synth` on the Phase-1 corpus produces a non-empty `wiki/` with valid cross-links; `lint` reports 0 errors.
 - **Phase 3 — W (wisdom, the differentiator):** `distill` prompt + worker, `wisdom_items` table, `_candidates/` flow, interactive `review`, `wisdom.apply` at query time, tests covering candidate→approved transitions and the "at least N=2 evidence" invariant.
 - **Phase 4 — Polish:** OpenAI-compat provider completeness (Ollama and Azure verified), prompt-caching on Anthropic paths, packaging for PyPI (`pip install dikw-core`), docs site, GitHub Actions release automation, source-backend extension point exercised with one additional backend (likely `html` since it's trivial — keeps the seam real without committing to MinerU).
 - **Phase 5 — Alternate storage adapters:**
@@ -570,7 +582,7 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 - `src/dikw_core/info/chunk.py` — heading-aware chunker (port logic from qmd `store.ts:257–310`)
 - `src/dikw_core/info/search.py` — RRF fusion on top of `storage.fts_search` + `storage.vec_search` (port from `mineru-doc-explorer/src/hybrid-search.ts`)
 - `src/dikw_core/providers/{base,anthropic,openai_compat}.py`
-- `src/dikw_core/cli.py`, `src/dikw_core/mcp_server.py`
+- `src/dikw_core/cli.py`, `src/dikw_core/server/app.py`, `src/dikw_core/client/cli_app.py`
 - `tests/test_storage_contract.py` — parameterized over backends
 - `.github/workflows/ci.yml`
 
@@ -583,7 +595,7 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 5. `uv run dikw synth`; check `wiki/index.md` and `wiki/log.md` updated, at least one `entities/`/`concepts/` page created, all wikilinks resolve in `lint`.
 6. `uv run dikw distill --recent` creates ≥1 candidate in `wisdom/_candidates/`; `uv run dikw review` accepts one; the corresponding `wisdom_items.status` flips to `approved` and a rendered page exists in `wisdom/principles.md` (or kind-appropriate file).
 7. `uv run dikw query "what principles apply when choosing retrieval over a wiki?"` now cites the approved wisdom item.
-8. `uv run dikw mcp --stdio` launches; a round-trip from an MCP client calls `core.query` and receives the same answer as step 7.
+8. `uv run dikw serve --wiki .` launches; a `POST /v1/query` round-trip from any HTTP client (e.g. `dikw client query`) returns the same answer as step 7.
 9. Swap provider in `dikw.yml` from Anthropic to OpenAI-compatible (pointed at Ollama locally or OpenAI) and repeat step 4 — works unchanged.
 10. (After Phase 5, Postgres) `docker compose up postgres` (with `pgvector` image), set `storage.backend: postgres` in `dikw.yml`, rerun steps 3–8 against the Postgres adapter — every assertion holds, no engine code changes. The storage contract test suite runs green under `DIKW_TEST_POSTGRES_DSN=...` in CI.
 11. (After Phase 5, Vault) Scaffold an Obsidian vault under `examples/obsidian-vault` with a hand-written `dikw.yml` (`storage.backend: filesystem`, `root: .dikw/fs`), open the folder in Obsidian, confirm wikilinks in `wiki/` render and files can be hand-edited; run `dikw synth` + `dikw distill` + `dikw query`; confirm the engine falls back to LLM-navigation mode (filesystem is FTS-only, `vec_search` raises `NotSupported`) and still returns cited answers from `index.md`-driven retrieval; verify `.dikw/` is present in Obsidian's ignore list.

@@ -53,6 +53,7 @@ from ..config import (
 from ..data.backends import parse_any
 from ..data.hashing import hash_file
 from ..info.search import HybridSearcher, MultimodalSearch, RetrievalMode
+from ..progress import NoopReporter, ProgressReporter
 from ..providers import (
     EmbeddingProvider,
     MultimodalEmbeddingProvider,
@@ -364,6 +365,7 @@ async def run_eval(
     raw_dump_path: Path | None = None,
     cache_mode: CacheMode = "read_write",
     cache_root: Path | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> EvalReport:
     """Run a single dataset end-to-end; return metrics + diagnostics.
 
@@ -407,6 +409,7 @@ async def run_eval(
     if not spec.corpus_dir.is_dir():
         raise EvalError(f"corpus directory not found: {spec.corpus_dir}")
 
+    _reporter: ProgressReporter = reporter or NoopReporter()
     effective_embedder: EmbeddingProvider = embedder or FakeEmbeddings()
     effective_provider_cfg = provider_config or ProviderConfig(
         embedding_model="fake",
@@ -440,13 +443,16 @@ async def run_eval(
     if cache_mode == "off":
         # Original behaviour: throwaway temp dir, no cache touched.
         with tempfile.TemporaryDirectory(prefix="dikw-eval-") as tmp:
+            await _reporter.progress(phase="ingest", current=0, total=0)
             wiki = await _build(Path(tmp))
+            await _reporter.progress(phase="ingest", current=1, total=1)
             per_mode = await _run_queries(
                 wiki,
                 spec,
                 embedder=effective_embedder,
                 embedding_model=effective_provider_cfg.embedding_model,
                 modes=modes,
+                reporter=_reporter,
             )
     else:
         # read_write or rebuild: persistent snapshot under cache_root.
@@ -473,9 +479,18 @@ async def run_eval(
             if partial_dir.exists():
                 shutil.rmtree(partial_dir)
             partial_dir.mkdir(parents=True)
+            await _reporter.progress(phase="ingest", current=0, total=0)
             await _build(partial_dir)
+            await _reporter.progress(phase="ingest", current=1, total=1)
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
             os.replace(partial_dir, cache_dir)
+        else:
+            await _reporter.progress(
+                phase="ingest",
+                current=1,
+                total=1,
+                detail={"cache_hit": True},
+            )
         wiki = cache_dir / "wiki"
 
         per_mode = await _run_queries(
@@ -484,6 +499,7 @@ async def run_eval(
             embedder=effective_embedder,
             embedding_model=effective_provider_cfg.embedding_model,
             modes=modes,
+            reporter=_reporter,
         )
 
     # Metrics scored only over positive queries. Including negatives would
@@ -832,6 +848,7 @@ async def _run_queries(
     embedder: EmbeddingProvider,
     embedding_model: str,
     modes: list[RetrievalMode],
+    reporter: ProgressReporter | None = None,
 ) -> dict[RetrievalMode, tuple[list[PerQueryRow], list[NegativeRow]]]:
     """Run every query in ``spec`` once per mode against a single storage
     connection. Returns a dict keyed by mode.
@@ -891,10 +908,13 @@ async def _run_queries(
         results: dict[
             RetrievalMode, tuple[list[PerQueryRow], list[NegativeRow]]
         ] = {}
+        total_q = len(spec.queries)
         for m in modes:
             positives: list[PerQueryRow] = []
             negatives: list[NegativeRow] = []
-            for q in spec.queries:
+            for q_idx, q in enumerate(spec.queries, start=1):
+                if reporter is not None:
+                    reporter.cancel_token().raise_if_cancelled()
                 hits = await searcher.search(q.q, limit=SEARCH_LIMIT, mode=m)
                 ranked_docs = _project_doc_view(hits)
                 ranked_chunks = _project_chunk_view(
@@ -919,6 +939,13 @@ async def _run_queries(
                             ranked_chunks=tuple(ranked_chunks),
                             ranked_assets=tuple(ranked_assets),
                         )
+                    )
+                if reporter is not None:
+                    await reporter.progress(
+                        phase="query",
+                        current=q_idx,
+                        total=total_q,
+                        detail={"mode": m, "q_id": q.id},
                     )
             results[m] = (positives, negatives)
         return results

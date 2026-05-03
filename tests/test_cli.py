@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from dikw_core.cli import app
@@ -52,10 +53,16 @@ def test_init_refuses_to_overwrite_existing_wiki(tmp_path: Path) -> None:
     assert second.exit_code == 1
 
 
-def test_serve_help_lists_options() -> None:
+def test_serve_help_lists_options(monkeypatch: pytest.MonkeyPatch) -> None:
     """``dikw serve --help`` should at least mention the bind-host
     and token flags so the operator can configure auth posture
-    without reading source code."""
+    without reading source code.
+
+    Forces a wide terminal so rich/typer doesn't wrap option names
+    across visual lines (CI's narrow default broke ``--host`` apart).
+    """
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("TERM", "dumb")  # disable colour escapes
     result = runner.invoke(app, ["serve", "--help"])
     assert result.exit_code == 0
     out = result.stdout

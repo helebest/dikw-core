@@ -470,17 +470,18 @@ def distill_cmd(
 @app.command("eval")
 def eval_cmd(
     dataset: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--dataset",
             "-d",
             help=(
                 "Dataset name (resolved on the server) or path on the "
                 "server. The client doesn't ship dataset bytes — the "
-                "server reads them from its packaged datasets root."
+                "server reads them from its packaged datasets root. "
+                "Omit to run every packaged dataset."
             ),
         ),
-    ],
+    ] = None,
     mode: Annotated[
         str,
         typer.Option(
@@ -517,9 +518,17 @@ def eval_cmd(
                 plain=plain,
             )
         if status == "succeeded" and result is not None:
-            render_eval_report(console, result)
-            if not bool(result.get("passed", True)):
-                raise typer.Exit(code=1)
+            # No-arg server path returns ``{datasets: [...], passed: bool}``;
+            # render each report and gate exit on the aggregate pass.
+            if "datasets" in result and isinstance(result["datasets"], list):
+                for ds in result["datasets"]:
+                    render_eval_report(console, ds)
+                if not bool(result.get("passed", True)):
+                    raise typer.Exit(code=1)
+            else:
+                render_eval_report(console, result)
+                if not bool(result.get("passed", True)):
+                    raise typer.Exit(code=1)
         _exit_on_failure(status, error)
 
     _run(_go())

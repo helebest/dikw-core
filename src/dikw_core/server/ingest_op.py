@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import api
+from ..config import CONFIG_FILENAME, load_config
 from ..progress import ProgressReporter
 from ..providers import build_embedder, build_multimodal_embedder
 from .errors import BadRequest, NotFoundError
@@ -90,7 +91,6 @@ def _ingest_report_to_dict(
 def make_ingest_runner(
     *,
     wiki_root: Path,
-    cfg: Any,  # DikwConfig — typed Any to avoid re-importing across modules
     upload_id: str | None,
     no_embed: bool,
     lock: asyncio.Lock | None = None,
@@ -117,6 +117,15 @@ def make_ingest_runner(
         # the only safe story.
         guard = lock if lock is not None else asyncio.Lock()
         async with guard:
+            # Reload cfg from disk INSIDE the runner so the provider
+            # objects we build below stay aligned with whatever
+            # ``api.ingest`` reads (it does its own ``_with_storage`` →
+            # ``load_config`` reload). Otherwise an operator who edits
+            # ``dikw.yml`` while the long-lived server is up gets
+            # vectors tagged with the FRESH ``embed_version`` but
+            # produced by the STALE provider URL/model — silent corruption.
+            cfg = load_config(wiki_root / CONFIG_FILENAME)
+
             upload_commit: dict[str, int] | None = None
             if upload_id is not None:
                 await reporter.progress(

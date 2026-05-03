@@ -77,6 +77,20 @@ def test_build_rejects_mixed_top_and_subtree(tmp_path: Path) -> None:
         build_upload(src)
 
 
+def test_build_rejects_stray_top_level_dir_with_subtree(tmp_path: Path) -> None:
+    """A user with ``src/sources/...`` plus ``src/drafts/foo.md`` would
+    otherwise have ``drafts/`` silently dropped — every byte they expect
+    to ship must either travel or trigger an error."""
+    src = tmp_path / "inbox-strayd"
+    (src / "sources").mkdir(parents=True)
+    (src / "sources" / "alpha.md").write_text("# A\n", encoding="utf-8")
+    (src / "drafts").mkdir()
+    (src / "drafts" / "extra.md").write_text("# extra\n", encoding="utf-8")
+
+    with pytest.raises(UploadError, match=r"stray|disambiguate"):
+        build_upload(src)
+
+
 def test_build_rejects_unsupported_extension(tmp_path: Path) -> None:
     src = tmp_path / "inbox-bad"
     (src / "sources").mkdir(parents=True)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -100,15 +101,24 @@ async def build_runtime(
     # task DB another live replica of *the same wiki* may have in-flight
     # tasks that belong to its own asyncio loop; cancelling them here
     # would mark a healthy peer's work as failed{server_restart}.
-    # Postgres operators must reap stuck rows out-of-band (planned: a
-    # ``dikw client tasks reap`` admin command).
-    if isinstance(task_store, SqliteTaskStore):
+    #
+    # Single-server Postgres deployments (the common case) lose orphan
+    # cleanup unless they opt in via ``DIKW_TASK_REAP_ON_START=1``. Set
+    # that env var only when you're SURE no other ``dikw serve`` instance
+    # shares the task DSN — multi-replica deployments must leave it unset.
+    force_reap = os.getenv("DIKW_TASK_REAP_ON_START", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if isinstance(task_store, SqliteTaskStore) or force_reap:
         await manager.restart_cleanup()
     else:
         logger.info(
             "skipping restart_cleanup for shared task store (%s); "
             "stuck rows from a previous incarnation must be reaped "
-            "out-of-band",
+            "out-of-band, or set DIKW_TASK_REAP_ON_START=1 if this is "
+            "the only server bound to the task DSN",
             type(task_store).__name__,
         )
 

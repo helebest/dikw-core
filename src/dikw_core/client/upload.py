@@ -217,20 +217,46 @@ def _discover(
     assets_dir = src / "assets"
     has_sources_subtree = sources_dir.is_dir()
     has_assets_subtree = assets_dir.is_dir()
+    has_subtree = has_sources_subtree or has_assets_subtree
 
-    top_files = [
-        p
-        for p in src.iterdir()
-        if p.is_file() and p.suffix.lower() in allowed_ext
-    ]
+    # Inventory every visible top-level entry so we can loud-fail on
+    # anything that wouldn't ship. Hidden entries (``.dikw/``, ``.git/``)
+    # are excluded since ``_walk_files`` skips them anyway.
+    top_entries = [p for p in sorted(src.iterdir()) if not p.name.startswith(".")]
 
-    if (has_sources_subtree or has_assets_subtree) and top_files:
-        raise UploadError(
-            f"{src} contains both sources/ (or assets/) and top-level files; "
-            "move the loose files under sources/ to disambiguate."
-        )
+    if has_subtree:
+        # Subtree-shape: every top-level entry must be either ``sources/``
+        # or ``assets/``. Loose files (even allowed-ext ones) are
+        # rejected as ambiguous — the user clearly meant the subtree
+        # layout, so a stray ``stray.md`` is more likely a mistake than
+        # a deliberate addition. Other top-level dirs (``drafts/``,
+        # ``docs/``) would otherwise be silently dropped.
+        stray = [p for p in top_entries if p.name not in _ALLOWED_TOP_DIRS]
+        if stray:
+            raise UploadError(
+                f"{src} contains stray top-level entries alongside "
+                f"sources/ or assets/: {[p.name for p in stray]}; "
+                "move them under sources/ or assets/ to disambiguate — "
+                "silently dropping them would ship an incomplete tree."
+            )
+    else:
+        # Flat-folder shape: every top-level entry must be a
+        # whitelisted file. A top-level dir is a hint the user
+        # forgot to wrap things in ``sources/``; surface it instead
+        # of silently skipping its contents.
+        bad: list[Path] = [
+            p
+            for p in top_entries
+            if p.is_dir()
+            or (p.is_file() and p.suffix.lower() not in allowed_ext)
+        ]
+        if bad:
+            raise UploadError(
+                f"{src} contains entries that aren't recognised as "
+                f"sources or assets: {[p.name for p in bad]}"
+            )
 
-    if has_sources_subtree or has_assets_subtree:
+    if has_subtree:
         for top in _ALLOWED_TOP_DIRS:
             top_path = src / top
             if not top_path.is_dir():

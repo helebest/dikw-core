@@ -16,6 +16,7 @@ from dikw_core.eval.dataset import (
     DatasetError,
     DatasetSpec,
     Query,
+    iter_packaged_datasets,
     load_dataset,
 )
 
@@ -44,6 +45,15 @@ def _write_valid_dataset(root: Path, *, name: str = "toy") -> Path:
         encoding="utf-8",
     )
     return ds
+
+
+def test_iter_packaged_datasets_returns_known_names() -> None:
+    """The packaged datasets directory ships at least one dataset; the
+    enumerator powers ``dikw eval`` (no-arg) on the server."""
+    names = iter_packaged_datasets()
+    # Known packaged datasets at the time of writing (kept loose so a
+    # future addition doesn't break the assertion).
+    assert "scifact" in names or "mvp" in names or "cmteb-t2-subset" in names
 
 
 def test_load_dataset_from_path_returns_populated_spec(tmp_path: Path) -> None:

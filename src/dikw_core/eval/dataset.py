@@ -225,6 +225,27 @@ def datasets_root() -> Path:
     return installed
 
 
+def iter_packaged_datasets() -> list[str]:
+    """List every packaged dataset (registered name only).
+
+    Walks ``datasets_root()`` and returns dataset names — i.e. the
+    immediate-subdir names that ``load_dataset`` accepts. Used by the
+    ``dikw eval`` no-arg path that runs every packaged dataset
+    back-to-back. Skips dot-files and any subdir without a
+    ``dataset.yaml`` so the discovery never trips on README dirs etc.
+    """
+    root = datasets_root()
+    if not root.is_dir():
+        return []
+    out = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if (entry / "dataset.yaml").is_file():
+            out.append(entry.name)
+    return out
+
+
 def load_dataset(name_or_path: str | Path) -> DatasetSpec:
     """Load and validate a dataset by registered name or filesystem path."""
     path = _resolve_path(name_or_path)

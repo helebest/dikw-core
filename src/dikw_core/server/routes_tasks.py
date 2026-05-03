@@ -118,10 +118,12 @@ class EvalSubmit(BaseModel):
 
     ``dataset`` accepts a registered dataset name (resolved under the
     packaged datasets root) or a directory path — same surface as
-    ``dikw eval``. ``mode`` and ``cache_mode`` mirror ``run_eval`` knobs.
+    ``dikw eval``. Omit it to run every packaged dataset back-to-back
+    (preserves the in-process ``dikw eval`` no-arg workflow).
+    ``mode`` and ``cache_mode`` mirror ``run_eval`` knobs.
     """
 
-    dataset: str
+    dataset: str | None = None
     mode: str = "hybrid"
     cache_mode: str = "read_write"
 
@@ -198,7 +200,6 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         rt: ServerRuntime = get_runtime(request.app)
         runner: TaskRunner = make_ingest_runner(
             wiki_root=rt.root,
-            cfg=rt.cfg,
             upload_id=body.upload_id,
             no_embed=body.no_embed,
             lock=rt.ingest_lock,
@@ -221,7 +222,6 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         rt: ServerRuntime = get_runtime(request.app)
         runner: TaskRunner = make_synth_runner(
             wiki_root=rt.root,
-            cfg=rt.cfg,
             force_all=body.force_all,
             no_embed=body.no_embed,
         )
@@ -247,7 +247,6 @@ def make_router(*, auth_dep: Any) -> APIRouter:
             )
         runner: TaskRunner = make_distill_runner(
             wiki_root=rt.root,
-            cfg=rt.cfg,
             pages_per_call=body.pages_per_call,
         )
         row = await rt.manager.submit(
@@ -273,7 +272,6 @@ def make_router(*, auth_dep: Any) -> APIRouter:
             )
         runner: TaskRunner = make_eval_runner(
             wiki_root=rt.root,
-            cfg=rt.cfg,
             dataset=body.dataset,
             mode=body.mode,
             cache_mode=body.cache_mode,

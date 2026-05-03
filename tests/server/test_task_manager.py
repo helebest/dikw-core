@@ -26,7 +26,7 @@ from dikw_core.server.tasks import (
 
 
 async def _wait_terminal(
-    store: SqliteTaskStore, task_id: str, *, timeout: float = 5.0
+    store: SqliteTaskStore, task_id: str, *, timeout: float = 30.0
 ) -> None:
     """Wait until the task is fully terminal — both the row's status
     is in a terminal state AND the matching ``final`` event has been
@@ -123,8 +123,12 @@ async def test_pre_cancel_via_token(
         return {"done": True}
 
     row = await manager.submit(op="echo", runner=_runner)
-    # Race a cancel against the runner's first checkpoint.
-    await asyncio.sleep(0)  # let the runner schedule
+    # Race a cancel against the runner's first checkpoint. Yield long
+    # enough that the asyncio.Task is reliably scheduled (a single
+    # ``sleep(0)`` was tight enough on 3.13 + slow CI to occasionally
+    # leave the task PENDING when ``cancel()`` arrived, producing a
+    # phantom hang the 5s wait couldn't recover).
+    await asyncio.sleep(0.05)
     await manager.cancel(row.task_id)
     await _wait_terminal(store, row.task_id)
     final_row = await store.get(row.task_id)

@@ -14,9 +14,9 @@ Lifecycle:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -38,16 +38,53 @@ from .tasks import (
 logger = logging.getLogger(__name__)
 
 
+_WIKI_ID_FILENAME = "wiki_id"
+
+
 def _wiki_scope_id(root: Path) -> str:
     """Stable identifier for the wiki this server is bound to.
 
     Used by the task store to scope every read + write so a shared
-    Postgres task DB does not leak rows across wikis. Hostname is
-    *not* part of the identity — multiple replicas of the same wiki
-    must share state so that ``GET /v1/tasks/{id}`` issued against
-    replica B can find a task submitted via replica A.
+    Postgres task DB does not leak rows across wikis, AND so multiple
+    replicas of the same wiki share state (a follow/cancel routed to
+    replica B must find the task submitted via replica A).
+
+    Resolution order:
+      1. ``DIKW_WIKI_INSTANCE_ID`` env var — operator override for
+         exotic deployments (e.g. multiple wikis intentionally pooled
+         under one task ID).
+      2. ``<root>/.dikw/wiki_id`` — a UUID4 generated on first run and
+         persisted to the wiki tree. Survives the wiki being mounted
+         at different paths in different containers, which a
+         path-hash scheme cannot.
+      3. Generate a fresh UUID4, write it to (2), return it.
+
+    A path-based hash was the previous scheme but broke whenever two
+    replicas mounted the same wiki under different filesystem paths —
+    every cross-replica read filtered under a different scope and the
+    public task APIs silently stopped working.
     """
-    return hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
+    env_override = os.getenv("DIKW_WIKI_INSTANCE_ID", "").strip()
+    if env_override:
+        return env_override
+
+    dikw_dir = root / ".dikw"
+    dikw_dir.mkdir(parents=True, exist_ok=True)
+    id_path = dikw_dir / _WIKI_ID_FILENAME
+    try:
+        existing = id_path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except FileNotFoundError:
+        pass
+    new_id = uuid.uuid4().hex
+    # ``write_text`` is sufficient — concurrent first-runs of the same
+    # wiki against the same volume would race here, but the file is
+    # tiny + atomic at the FS layer (POSIX) and read-on-startup means
+    # a brief mismatch only loses already-orphaned tasks. Operators
+    # that fan out from cold should pre-seed the file.
+    id_path.write_text(new_id + "\n", encoding="utf-8")
+    return new_id
 
 
 @dataclass

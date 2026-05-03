@@ -34,7 +34,7 @@ from pydantic import BaseModel
 from .. import api
 from ..progress import CancelToken
 from .errors import ApiError
-from .ndjson import stream_response
+from .ndjson import HEARTBEAT_INTERVAL, stream_response
 from .runtime import ServerRuntime, get_runtime
 
 logger = logging.getLogger(__name__)
@@ -227,8 +227,22 @@ def make_router(*, auth_dep: Any) -> APIRouter:
                 }
             )
             try:
+                # Heartbeat-or-event loop: a non-streaming LLM
+                # (``complete()`` fallback) or a slow first token would
+                # otherwise leave the wire silent past the client's
+                # 60s read timeout. Mirrors ``ndjson_lines``'s 15s
+                # heartbeat cadence so reverse proxies don't close the
+                # long-poll either.
                 while True:
-                    event = await queue.get()
+                    try:
+                        event = await asyncio.wait_for(
+                            queue.get(), timeout=HEARTBEAT_INTERVAL
+                        )
+                    except TimeoutError:
+                        yield _serialise(
+                            {"type": "heartbeat", "ts": _isoformat()}
+                        )
+                        continue
                     if event is None:
                         break
                     yield _serialise(event)

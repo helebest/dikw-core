@@ -180,13 +180,21 @@ _WILDCARD_HOSTS = {"0.0.0.0", "::", "*", ""}
 
 def _client_host(server_host: str) -> str:
     """Loopback address the in-process client should use to reach the
-    server we just spawned. ``::`` (IPv6 wildcard) routes to ``[::1]``;
-    everything else (including ``0.0.0.0`` and ``*``) routes to
-    ``127.0.0.1``."""
+    server we just spawned, formatted for use inside an HTTP URL.
+
+    ``::`` (IPv6 wildcard) routes to ``[::1]``; ``0.0.0.0`` / ``*``
+    route to ``127.0.0.1``. IPv6 literals get bracketed so the colons
+    don't collide with the URL's port separator (``http://[::1]:8765``,
+    not ``http://::1:8765`` which is an invalid URI).
+    """
     if server_host == "::":
         return "[::1]"
     if server_host in _WILDCARD_HOSTS:
         return "127.0.0.1"
+    # Bracket bare IPv6 literals (``::1``, ``2001:db8::1``); leave
+    # already-bracketed forms and IPv4 / hostnames untouched.
+    if ":" in server_host and not server_host.startswith("["):
+        return f"[{server_host}]"
     return server_host
 
 

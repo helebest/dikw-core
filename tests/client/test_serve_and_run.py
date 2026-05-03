@@ -97,6 +97,24 @@ def test_build_inner_env_sets_url_and_optional_token() -> None:
     assert env["DIKW_SERVER_URL"] == "http://127.0.0.1:9123"
     assert "DIKW_SERVER_TOKEN" not in env
 
+
+def test_client_host_brackets_ipv6_literals() -> None:
+    """IPv6 hosts must be bracketed in the URL — ``http://::1:PORT``
+    is an invalid URI (the colons collide with the port separator),
+    so the server is unreachable from a client that took ``--host ::1``
+    at face value."""
+    assert sar._client_host("::1") == "[::1]"
+    assert sar._client_host("2001:db8::1") == "[2001:db8::1]"
+    # Already bracketed → leave alone.
+    assert sar._client_host("[::1]") == "[::1]"
+    # IPv6 wildcard maps to bracketed loopback.
+    assert sar._client_host("::") == "[::1]"
+    # IPv4 / hostnames untouched.
+    assert sar._client_host("127.0.0.1") == "127.0.0.1"
+    assert sar._client_host("localhost") == "localhost"
+    # IPv4 wildcards still rewrite to loopback.
+    assert sar._client_host("0.0.0.0") == "127.0.0.1"
+
     # Wildcard server bind must NOT leak into the client URL — the inner
     # CLI would try to dial 0.0.0.0 (not routable) and fail. Loopback is
     # the only sensible client-side rewrite when the server bound to

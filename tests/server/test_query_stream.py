@@ -148,6 +148,52 @@ async def test_query_stream_falls_back_when_provider_lacks_streaming(
 
 
 @pytest.mark.asyncio
+async def test_query_stream_keeps_alive_during_slow_llm(
+    server_client: httpx.AsyncClient,
+    ingested_wiki: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-streaming LLM whose ``complete()`` takes longer than the
+    heartbeat interval would otherwise leave the wire silent past the
+    client's read timeout. The route must inject a heartbeat event in
+    the gap so the client stays connected and proxies don't reap the
+    long-poll."""
+    import asyncio as _asyncio
+
+    from dikw_core.server import routes_query
+
+    class _SlowLLM(FakeLLM):
+        sleep_for: float = 0.4
+
+        async def complete(self, **kwargs: object) -> object:  # type: ignore[override]
+            await _asyncio.sleep(self.sleep_for)
+            return await super().complete(**kwargs)  # type: ignore[arg-type]
+
+    llm = _SlowLLM(response_text="slow but eventually here")
+    _patch_providers(monkeypatch, llm=llm)
+    # Squeeze the heartbeat cadence so the test stays sub-second.
+    monkeypatch.setattr(routes_query, "HEARTBEAT_INTERVAL", 0.05)
+
+    async with server_client.stream(
+        "POST",
+        "/v1/query",
+        json={"q": "scoping?", "limit": 3},
+    ) as resp:
+        events = [
+            json.loads(line)
+            for line in [ln async for ln in resp.aiter_lines()]
+            if line.strip()
+        ]
+
+    types = [e["type"] for e in events]
+    assert "heartbeat" in types, (
+        f"slow LLM must trigger at least one heartbeat; got types={types}"
+    )
+    assert types[-1] == "final"
+    assert events[-1]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_query_stream_rejects_empty_q(
     server_client: httpx.AsyncClient,
 ) -> None:

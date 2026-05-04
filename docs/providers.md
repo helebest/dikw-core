@@ -115,7 +115,7 @@ automation, wrap the call in your own retry layer (e.g., `tenacity`).
 
 ### 4. Prompt caching only on the `anthropic_compat` leg
 
-The `AnthropicLLM` provider passes `cache_control: {"type": "ephemeral"}`
+The `AnthropicCompatLLM` provider passes `cache_control: {"type": "ephemeral"}`
 on the system prompt, cutting repeat-call input-token cost by ~90%
 within a 5-minute TTL. Synth / query / distill all benefit.
 

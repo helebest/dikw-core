@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dikw_core.info.chunk import chunk_markdown
+from dikw_core.domains.info.chunk import chunk_markdown
 
 
 def test_empty_body_returns_no_chunks() -> None:
@@ -82,7 +82,7 @@ def test_ascii_token_count_equals_whitespace_split() -> None:
     ``len(body.split())``. Locks budget tuning against drift if anyone
     swaps the underlying tokenizer.
     """
-    from dikw_core.info.tokenize import count_tokens
+    from dikw_core.domains.info.tokenize import count_tokens
 
     for body in [
         "lorem " * 40,

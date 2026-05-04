@@ -1,4 +1,4 @@
-"""Streaming SHA-256 helper — ``src/dikw_core/data/hashing.py``."""
+"""Streaming SHA-256 helper — ``src/dikw_core/domains/data/hashing.py``."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from dikw_core.data.hashing import hash_file
+from dikw_core.domains.data.hashing import hash_file
 
 # SHA-256 of zero bytes — well-known constant.
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

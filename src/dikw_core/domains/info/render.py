@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ..schemas import AssetRecord, ChunkAssetRef, ChunkRecord
+from ...schemas import AssetRecord, ChunkAssetRef, ChunkRecord
 
 
 def render_chunk(

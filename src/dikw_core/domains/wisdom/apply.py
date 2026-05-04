@@ -16,7 +16,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..schemas import WisdomItem
+from ...schemas import WisdomItem
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9']+")
 

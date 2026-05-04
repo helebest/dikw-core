@@ -20,7 +20,7 @@ from collections.abc import Iterable, Sequence
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..info.tokenize import WORD_OR_CJK_CHARS
+from ..domains.info.tokenize import WORD_OR_CJK_CHARS
 from ..schemas import (
     AssetEmbeddingRow,
     AssetKind,

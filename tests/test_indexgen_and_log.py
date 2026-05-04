@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dikw_core.knowledge.indexgen import INDEX_PATH, regenerate_index
-from dikw_core.knowledge.log import LOG_PATH, render_log
-from dikw_core.knowledge.wiki import build_page, write_page
+from dikw_core.domains.knowledge.indexgen import INDEX_PATH, regenerate_index
+from dikw_core.domains.knowledge.log import LOG_PATH, render_log
+from dikw_core.domains.knowledge.wiki import build_page, write_page
 from dikw_core.schemas import WikiLogEntry
 
 

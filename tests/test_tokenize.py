@@ -1,10 +1,10 @@
-"""CJK-aware FTS preprocessing — ``src/dikw_core/info/tokenize.py``."""
+"""CJK-aware FTS preprocessing — ``src/dikw_core/domains/info/tokenize.py``."""
 
 from __future__ import annotations
 
 import pytest
 
-from dikw_core.info.tokenize import count_tokens, has_cjk, preprocess_for_fts
+from dikw_core.domains.info.tokenize import count_tokens, has_cjk, preprocess_for_fts
 
 
 def test_has_cjk_detects_basic_ideographs() -> None:
@@ -137,7 +137,7 @@ def test_count_tokens_falls_back_when_jieba_missing(
     """
     import sys
 
-    import dikw_core.info.tokenize as tk
+    import dikw_core.domains.info.tokenize as tk
 
     monkeypatch.setattr(tk, "_JIEBA_MODULE", None)
     monkeypatch.setattr(tk, "_JIEBA_TRIED", False)

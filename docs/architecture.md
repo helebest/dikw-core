@@ -34,31 +34,32 @@ src/dikw_core/
 │                          review, query, lint, status)
 ├── config.py              Pydantic config + YAML loader
 ├── schemas.py             cross-layer DTOs
-├── data/
-│   ├── sources.py         source-file scanner (glob + ignore)
-│   ├── assets.py          image/asset materialization (sha-streamed)
-│   ├── hashing.py         streaming + in-memory SHA-256 helpers
-│   └── backends/          registry-dispatched parsers
-│       ├── base.py        SourceBackend Protocol + registry
-│       ├── markdown.py    .md / .markdown
-│       └── html.py        .html / .htm (stdlib-only)
-├── info/
-│   ├── chunk.py           heading-aware paragraph chunker
-│   ├── tokenize.py        CJK-aware preprocessing + token counting
-│   ├── embed.py           batched embedding worker
-│   └── search.py          RRF-fused FTS + vector hybrid
-├── knowledge/
-│   ├── wiki.py            WikiPage I/O (Obsidian-compatible front-matter)
-│   ├── synthesize.py      LLM -> <page> blocks -> WikiPage
-│   ├── links.py           [[wikilinks]] + md + URL parser
-│   ├── indexgen.py        regenerate wiki/index.md
-│   ├── log.py             render wiki/log.md from wiki_log rows
-│   └── lint.py            broken wikilinks, orphans, duplicate titles
-├── wisdom/
-│   ├── distill.py         LLM -> <wisdom> blocks; enforces N>=2 evidence
-│   ├── io.py              candidate files + aggregate regenerators
-│   ├── review.py          approve/reject state machine
-│   └── apply.py           stem-aware token overlap at query time
+├── domains/                 DIKW domain model (the four layers)
+│   ├── data/
+│   │   ├── sources.py       source-file scanner (glob + ignore)
+│   │   ├── assets.py        image/asset materialization (sha-streamed)
+│   │   ├── hashing.py       streaming + in-memory SHA-256 helpers
+│   │   └── backends/        registry-dispatched parsers
+│   │       ├── base.py      SourceBackend Protocol + registry
+│   │       ├── markdown.py  .md / .markdown
+│   │       └── html.py      .html / .htm (stdlib-only)
+│   ├── info/
+│   │   ├── chunk.py         heading-aware paragraph chunker
+│   │   ├── tokenize.py      CJK-aware preprocessing + token counting
+│   │   ├── embed.py         batched embedding worker
+│   │   └── search.py        RRF-fused FTS + vector hybrid
+│   ├── knowledge/
+│   │   ├── wiki.py          WikiPage I/O (Obsidian-compatible front-matter)
+│   │   ├── synthesize.py    LLM -> <page> blocks -> WikiPage
+│   │   ├── links.py         [[wikilinks]] + md + URL parser
+│   │   ├── indexgen.py      regenerate wiki/index.md
+│   │   ├── log.py           render wiki/log.md from wiki_log rows
+│   │   └── lint.py          broken wikilinks, orphans, duplicate titles
+│   └── wisdom/
+│       ├── distill.py       LLM -> <wisdom> blocks; enforces N>=2 evidence
+│       ├── io.py            candidate files + aggregate regenerators
+│       ├── review.py        approve/reject state machine
+│       └── apply.py         stem-aware token overlap at query time
 ├── providers/
 │   ├── base.py            LLMProvider + EmbeddingProvider Protocols
 │   ├── anthropic.py       anthropic SDK, system-prompt cache_control

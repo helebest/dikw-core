@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
-from ..config import SourceConfig
+from ...config import SourceConfig
 
 
 def iter_source_files(

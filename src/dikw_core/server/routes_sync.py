@@ -17,8 +17,9 @@ from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel
 
 from .. import __version__, api
-from ..info.search import HybridSearcher
-from ..knowledge.lint import LintReport
+from ..domains.info.search import HybridSearcher
+from ..domains.knowledge.lint import LintReport
+from ..domains.wisdom.review import ReviewError, ReviewResult
 from ..providers import build_embedder
 from ..schemas import (
     ChunkRecord,
@@ -29,7 +30,6 @@ from ..schemas import (
     WisdomItem,
     WisdomStatus,
 )
-from ..wisdom.review import ReviewError, ReviewResult
 from .errors import BadRequest, Conflict, NotFoundError
 from .runtime import ServerRuntime, get_runtime
 

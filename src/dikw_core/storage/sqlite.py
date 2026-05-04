@@ -20,8 +20,8 @@ from typing import Any, Literal
 
 import sqlite_vec
 
-from ..data.hashing import hash_bytes
-from ..info.tokenize import CjkTokenizer, initialize_jieba, preprocess_for_fts
+from ..domains.data.hashing import hash_bytes
+from ..domains.info.tokenize import CjkTokenizer, initialize_jieba, preprocess_for_fts
 from ..schemas import (
     AssetEmbeddingRow,
     AssetKind,

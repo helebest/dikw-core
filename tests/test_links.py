@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dikw_core.knowledge.links import parse_links, resolve_links
+from dikw_core.domains.knowledge.links import parse_links, resolve_links
 from dikw_core.schemas import LinkType
 
 

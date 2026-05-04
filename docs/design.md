@@ -135,29 +135,30 @@ dikw-core/
 │   │       ├── sqlite/       #   schema.sql
 │   │       └── postgres/     #   schema.sql
 │   │
-│   ├── data/                 # D layer
-│   │   ├── sources.py        # source registry, hashing, mtime tracking
-│   │   └── backends/
-│   │       ├── __init__.py   # backend registry (extension point)
-│   │       └── markdown.py   # MD parser + front-matter + deep-read
-│   │
-│   ├── info/                 # I layer
-│   │   ├── chunk.py          # heading-aware markdown chunking
-│   │   ├── embed.py          # batched embedding via provider
-│   │   ├── index.py          # FTS5 + sqlite-vec writes
-│   │   └── search.py         # BM25 + vector + RRF + optional rerank
-│   │
-│   ├── knowledge/            # K layer
-│   │   ├── wiki.py           # page read/write, front-matter conventions
-│   │   ├── synthesize.py     # ingest → wiki pages (LLM-driven)
-│   │   ├── links.py          # wikilink/markdown/URL link graph
-│   │   ├── indexgen.py       # regenerate index.md from wiki/
-│   │   └── log.py            # append-only wiki_log + log.md renderer
-│   │
-│   ├── wisdom/               # W layer (see dedicated section)
-│   │   ├── distill.py        # propose principles/lessons/patterns
-│   │   ├── review.py         # human-confirmation workflow
-│   │   └── apply.py          # surface applicable wisdom at query time
+│   ├── domains/              # DIKW domain model — the four layers
+│   │   ├── data/             # D layer
+│   │   │   ├── sources.py    # source registry, hashing, mtime tracking
+│   │   │   └── backends/
+│   │   │       ├── __init__.py  # backend registry (extension point)
+│   │   │       └── markdown.py  # MD parser + front-matter + deep-read
+│   │   │
+│   │   ├── info/             # I layer
+│   │   │   ├── chunk.py      # heading-aware markdown chunking
+│   │   │   ├── embed.py      # batched embedding via provider
+│   │   │   ├── index.py      # FTS5 + sqlite-vec writes
+│   │   │   └── search.py     # BM25 + vector + RRF + optional rerank
+│   │   │
+│   │   ├── knowledge/        # K layer
+│   │   │   ├── wiki.py       # page read/write, front-matter conventions
+│   │   │   ├── synthesize.py # ingest → wiki pages (LLM-driven)
+│   │   │   ├── links.py      # wikilink/markdown/URL link graph
+│   │   │   ├── indexgen.py   # regenerate index.md from wiki/
+│   │   │   └── log.py        # append-only wiki_log + log.md renderer
+│   │   │
+│   │   └── wisdom/           # W layer (see dedicated section)
+│   │       ├── distill.py    # propose principles/lessons/patterns
+│   │       ├── review.py     # human-confirmation workflow
+│   │       └── apply.py      # surface applicable wisdom at query time
 │   │
 │   ├── providers/            # LLM + embedding abstraction
 │   │   ├── base.py           # LLMProvider, EmbeddingProvider protocols
@@ -578,9 +579,9 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 - `src/dikw_core/storage/sqlite.py` — SQLite + sqlite-vec + FTS5 implementation
 - `src/dikw_core/storage/migrations/sqlite/schema.sql` — reference schema
 - `src/dikw_core/storage/__init__.py` — factory resolving backend from config
-- `src/dikw_core/data/backends/markdown.py` — MD parser + front-matter
-- `src/dikw_core/info/chunk.py` — heading-aware chunker (port logic from qmd `store.ts:257–310`)
-- `src/dikw_core/info/search.py` — RRF fusion on top of `storage.fts_search` + `storage.vec_search` (port from `mineru-doc-explorer/src/hybrid-search.ts`)
+- `src/dikw_core/domains/data/backends/markdown.py` — MD parser + front-matter
+- `src/dikw_core/domains/info/chunk.py` — heading-aware chunker (port logic from qmd `store.ts:257–310`)
+- `src/dikw_core/domains/info/search.py` — RRF fusion on top of `storage.fts_search` + `storage.vec_search` (port from `mineru-doc-explorer/src/hybrid-search.ts`)
 - `src/dikw_core/providers/{base,anthropic,openai_compat}.py`
 - `src/dikw_core/cli.py`, `src/dikw_core/server/app.py`, `src/dikw_core/client/cli_app.py`
 - `tests/test_storage_contract.py` — parameterized over backends

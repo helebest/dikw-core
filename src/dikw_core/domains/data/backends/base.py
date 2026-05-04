@@ -16,7 +16,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from ...schemas import AssetRef
+from ....schemas import AssetRef
 
 
 class ParsedDocument(BaseModel):

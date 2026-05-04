@@ -22,7 +22,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from dikw_core.info.render import render_chunk
+from dikw_core.domains.info.render import render_chunk
 from dikw_core.schemas import (
     AssetKind,
     AssetRecord,

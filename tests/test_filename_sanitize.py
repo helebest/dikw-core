@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from dikw_core.data.assets import assets_relative_path
+from dikw_core.domains.data.assets import assets_relative_path
 
 # 64-hex sha256 stub; only the first 8 chars affect the filename, but the full
 # hash is required for the API contract.

@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from dikw_core.data.backends.markdown import extract_image_refs
-from dikw_core.info.chunk import chunk_markdown
+from dikw_core.domains.data.backends.markdown import extract_image_refs
+from dikw_core.domains.info.chunk import chunk_markdown
 
 
 def _spans_from_refs(body: str) -> list[tuple[int, int]]:

@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..schemas import WikiLogEntry
+from ...schemas import WikiLogEntry
 
 LOG_PATH = "wiki/log.md"
 

@@ -33,7 +33,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from ..info.tokenize import WORD_OR_CJK_CHARS, CjkTokenizer, preprocess_for_fts
+from ..domains.info.tokenize import WORD_OR_CJK_CHARS, CjkTokenizer, preprocess_for_fts
 from ..schemas import (
     AssetEmbeddingRow,
     AssetRecord,

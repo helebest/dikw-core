@@ -18,7 +18,7 @@ from typing import Any
 
 import frontmatter
 
-from ...schemas import AssetRef
+from ....schemas import AssetRef
 from .base import ParsedDocument
 
 # Backwards-compatible alias for existing callers.

@@ -19,8 +19,8 @@ from typing import Any
 
 import yaml
 
+from ...schemas import WisdomEvidence, WisdomKind
 from ..knowledge.wiki import slugify
-from ..schemas import WisdomEvidence, WisdomKind
 
 _WISDOM_BLOCK = re.compile(
     r"<wisdom\s+([^>]*?)>\s*(.*?)\s*</wisdom>",

@@ -16,16 +16,13 @@ from .base import (
     register,
     supported_extensions,
 )
-from .html import HtmlBackend
 from .markdown import MarkdownBackend
 
 # Built-in registrations happen exactly once at import.
 register(MarkdownBackend())
-register(HtmlBackend())
 
 
 __all__ = [
-    "HtmlBackend",
     "MarkdownBackend",
     "ParsedDocument",
     "SourceBackend",

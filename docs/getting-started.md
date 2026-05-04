@@ -55,7 +55,7 @@ Leave it running. Every `dikw <op>` shown below is a top-level alias for
 
 ## 3. Add source material and ingest
 
-Drop markdown or HTML files anywhere under `sources/`, then:
+Drop markdown files anywhere under `sources/`, then:
 
 ```bash
 # Offline mode — indexes FTS only, no API calls.

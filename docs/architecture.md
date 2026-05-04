@@ -16,7 +16,7 @@ Everything else is plumbing.
 
 | Layer                | What lives here                                  | Writer                         |
 | -------------------- | ------------------------------------------------ | ------------------------------ |
-| **D** — Data         | raw source files (markdown, HTML today)          | human                          |
+| **D** — Data         | raw source files (markdown)                      | human                          |
 | **I** — Information  | parsed, chunked, FTS-indexed, embedded           | engine (deterministic)         |
 | **K** — Knowledge    | LLM-authored wiki pages, link graph, `index.md`  | LLM, human-editable            |
 | **W** — Wisdom       | principles / lessons / patterns with evidence    | LLM proposes, human approves   |
@@ -41,8 +41,7 @@ src/dikw_core/
 │   │   ├── hashing.py       streaming + in-memory SHA-256 helpers
 │   │   └── backends/        registry-dispatched parsers
 │   │       ├── base.py      SourceBackend Protocol + registry
-│   │       ├── markdown.py  .md / .markdown
-│   │       └── html.py      .html / .htm (stdlib-only)
+│   │       └── markdown.py  .md / .markdown
 │   ├── info/
 │   │   ├── chunk.py         heading-aware paragraph chunker
 │   │   ├── tokenize.py      CJK-aware preprocessing + token counting

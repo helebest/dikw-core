@@ -174,10 +174,10 @@ one-liner.
 
 ## Source formats
 
-Markdown and HTML ship out of the box. A new format is one `SourceBackend`
+Markdown ships out of the box. A new format is one `SourceBackend`
 subclass + a `register()` call away — see
-[`domains/data/backends/html.py`](./src/dikw_core/domains/data/backends/html.py) for a
-stdlib-only reference.
+[`domains/data/backends/markdown.py`](./src/dikw_core/domains/data/backends/markdown.py)
+for the reference impl.
 
 ## Storage
 

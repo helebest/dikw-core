@@ -176,7 +176,7 @@ one-liner.
 
 Markdown and HTML ship out of the box. A new format is one `SourceBackend`
 subclass + a `register()` call away — see
-[`data/backends/html.py`](./src/dikw_core/data/backends/html.py) for a
+[`domains/data/backends/html.py`](./src/dikw_core/domains/data/backends/html.py) for a
 stdlib-only reference.
 
 ## Storage

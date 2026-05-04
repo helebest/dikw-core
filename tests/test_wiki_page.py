@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dikw_core.knowledge.wiki import (
+from dikw_core.domains.knowledge.wiki import (
     build_page,
     default_page_path,
     make_page_id,

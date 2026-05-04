@@ -10,7 +10,7 @@ from ..config import (
     SQLiteStorageConfig,
     StorageConfig,
 )
-from ..info.tokenize import CjkTokenizer
+from ..domains.info.tokenize import CjkTokenizer
 from .base import NotSupported, Storage, StorageError
 from .filesystem import FilesystemStorage
 from .sqlite import SQLiteStorage

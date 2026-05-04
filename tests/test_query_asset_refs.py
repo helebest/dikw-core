@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from dikw_core.info.search import HybridSearcher, MultimodalSearch
+from dikw_core.domains.info.search import HybridSearcher, MultimodalSearch
 from dikw_core.schemas import (
     AssetEmbeddingRow,
     AssetKind,

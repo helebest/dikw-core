@@ -114,7 +114,7 @@ async def test_query_returns_asset_refs_for_image_bearing_chunk(
     # which we don't want to invoke here). The Phase L wiring is what
     # makes this work end-to-end through the SQLite storage on disk.
     from dikw_core.api import _with_storage
-    from dikw_core.info.search import HybridSearcher, MultimodalSearch
+    from dikw_core.domains.info.search import HybridSearcher, MultimodalSearch
 
     cfg, _root, storage = await _with_storage(project_with_image_doc)
     try:

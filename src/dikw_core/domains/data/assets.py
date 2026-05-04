@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ..schemas import AssetKind, AssetRecord, AssetRef, ImageMediaMeta
+from ...schemas import AssetKind, AssetRecord, AssetRef, ImageMediaMeta
 from .hashing import hash_bytes, hash_file
 
 logger = logging.getLogger(__name__)

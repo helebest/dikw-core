@@ -35,6 +35,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from dikw_core import api
+from dikw_core.domains.info.search import HybridSearcher, RetrievalMode
 from dikw_core.eval.dataset import DatasetSpec, load_dataset
 from dikw_core.eval.runner import (
     NegativeRow,
@@ -42,7 +43,6 @@ from dikw_core.eval.runner import (
     _compute_view_metrics,
     _resolve_modes,
 )
-from dikw_core.info.search import HybridSearcher, RetrievalMode
 from dikw_core.providers import build_embedder
 from dikw_core.providers.base import EmbeddingProvider
 from dikw_core.storage import build_storage

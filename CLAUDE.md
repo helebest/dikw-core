@@ -55,10 +55,11 @@ src/dikw_core/
 ├── progress.py            ProgressReporter Protocol + CancelToken (engine-side progress contract)
 ├── config.py              pydantic config + YAML loader (dikw.yml)
 ├── schemas.py             cross-layer DTOs (cross the Storage Protocol boundary — no SQL types)
-├── data/                  D layer — sources + SourceBackend registry (markdown, html)
-├── info/                  I layer — chunk, embed, RRF-fused hybrid search
-├── knowledge/             K layer — wiki pages, [[wikilinks]], index.md, log.md, lint
-├── wisdom/                W layer — distill, review state machine, apply-at-query
+├── domains/               DIKW domain model — the four layers grouped together
+│   ├── data/              D layer — sources + SourceBackend registry (markdown, html)
+│   ├── info/              I layer — chunk, embed, RRF-fused hybrid search
+│   ├── knowledge/         K layer — wiki pages, [[wikilinks]], index.md, log.md, lint
+│   └── wisdom/            W layer — distill, review state machine, apply-at-query
 ├── providers/             LLMProvider + EmbeddingProvider Protocols (anthropic, openai_compat)
 ├── storage/               Storage Protocol + adapters (sqlite, postgres, filesystem)
 ├── eval/                  retrieval-quality eval — metrics, dataset loader, runner, packaged datasets
@@ -74,7 +75,7 @@ src/dikw_core/
 
 ### Named seams — extend here, not elsewhere
 
-1. **`SourceBackend`** (`data/backends/base.py`) — new formats: one subclass + `register()`. Example: `data/backends/html.py` is stdlib-only.
+1. **`SourceBackend`** (`domains/data/backends/base.py`) — new formats: one subclass + `register()`. Example: `domains/data/backends/html.py` is stdlib-only.
 2. **`Storage` Protocol** (`storage/base.py`) — three backends ship (sqlite, postgres, filesystem); engine code depends only on the Protocol. Hybrid-search fusion (RRF), chunking, link-graph parsing, and wisdom scoring live **outside** adapters — adapters expose primitives only.
 3. **`LLMProvider` / `EmbeddingProvider`** (`providers/base.py`) — Anthropic uses `cache_control` on the system prompt; openai_compat works against any base URL.
 

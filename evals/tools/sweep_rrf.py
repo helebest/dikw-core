@@ -37,13 +37,13 @@ if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from dikw_core.config import RetrievalConfig  # noqa: E402
+from dikw_core.domains.info.search import reciprocal_rank_fusion  # noqa: E402
 from dikw_core.eval.metrics import (  # noqa: E402
     mean_hit_at_k,
     mean_ndcg_at_k,
     mean_recall_at_k,
     mean_reciprocal_rank,
 )
-from dikw_core.info.search import reciprocal_rank_fusion  # noqa: E402
 
 DEFAULT_K_GRID = (40, 60, 100)
 DEFAULT_W_BM25_GRID = (0.3, 0.5, 0.7, 1.0)

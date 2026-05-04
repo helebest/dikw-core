@@ -68,9 +68,9 @@ class DocumentRecord(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _derive_path_key(cls, values: object) -> object:
-        # Local import to avoid the data/ → schemas import cycle at
-        # module load time.
-        from .data.path_norm import normalize_path
+        # Local import to avoid the domains.data → schemas import cycle
+        # at module load time.
+        from .domains.data.path_norm import normalize_path
 
         if isinstance(values, dict) and not values.get("path_key"):
             path = values.get("path")

@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from dikw_core.info.embed import ChunkToEmbed, embed_assets, embed_chunks_multimodal
+from dikw_core.domains.info.embed import ChunkToEmbed, embed_assets, embed_chunks_multimodal
 from dikw_core.schemas import (
     AssetEmbeddingRow,
     AssetKind,

@@ -618,7 +618,7 @@ async def test_pg_fts_search_multi_word_or(storage: Storage) -> None:
     """
     if type(storage).__name__ != "PostgresStorage":
         pytest.skip("PG-specific to_tsquery translation")
-    from dikw_core.info.search import _sanitize_fts
+    from dikw_core.domains.info.search import _sanitize_fts
 
     doc_a = _make_doc("sources/a.md")
     doc_b = _make_doc("sources/b.md")

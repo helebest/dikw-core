@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from dikw_core.data.backends import (
+from dikw_core.domains.data.backends import (
     HtmlBackend,
     MarkdownBackend,
     UnsupportedFormat,

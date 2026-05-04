@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dikw_core.info.search import (
+from dikw_core.domains.info.search import (
     HybridSearcher,
     MultimodalSearch,
     _sanitize_fts,
@@ -321,9 +321,9 @@ async def test_hybrid_search_returns_hits(tmp_path) -> None:
     import time
     from pathlib import Path
 
-    from dikw_core.data.backends.markdown import parse_file
-    from dikw_core.info.chunk import chunk_markdown
-    from dikw_core.info.embed import ChunkToEmbed, embed_chunks
+    from dikw_core.domains.data.backends.markdown import parse_file
+    from dikw_core.domains.info.chunk import chunk_markdown
+    from dikw_core.domains.info.embed import ChunkToEmbed, embed_chunks
     from dikw_core.schemas import ChunkRecord, DocumentRecord, Layer
 
     fixtures = Path(__file__).parent / "fixtures" / "notes"
@@ -383,9 +383,9 @@ async def _populate_fixture_corpus(storage):
     import time
     from pathlib import Path
 
-    from dikw_core.data.backends.markdown import parse_file
-    from dikw_core.info.chunk import chunk_markdown
-    from dikw_core.info.embed import ChunkToEmbed, embed_chunks
+    from dikw_core.domains.data.backends.markdown import parse_file
+    from dikw_core.domains.info.chunk import chunk_markdown
+    from dikw_core.domains.info.embed import ChunkToEmbed, embed_chunks
     from dikw_core.schemas import ChunkRecord, DocumentRecord, Layer
 
     fixtures = Path(__file__).parent / "fixtures" / "notes"
@@ -553,7 +553,7 @@ async def _populate_multi_chunk_corpus(storage: SQLiteStorage) -> FakeEmbeddings
     """
     import time
 
-    from dikw_core.info.embed import ChunkToEmbed, embed_chunks
+    from dikw_core.domains.info.embed import ChunkToEmbed, embed_chunks
     from dikw_core.schemas import ChunkRecord, DocumentRecord, Layer
 
     doc_specs: list[tuple[str, list[str]]] = [

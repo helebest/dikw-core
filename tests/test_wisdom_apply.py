@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 
+from dikw_core.domains.wisdom.apply import pick_applicable
 from dikw_core.schemas import WisdomItem, WisdomKind, WisdomStatus
-from dikw_core.wisdom.apply import pick_applicable
 
 
 def _item(title: str, body: str, kind: WisdomKind = WisdomKind.PRINCIPLE) -> WisdomItem:

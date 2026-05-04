@@ -18,8 +18,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ...schemas import WisdomEvidence, WisdomItem, WisdomKind
 from ..knowledge.wiki import now_iso
-from ..schemas import WisdomEvidence, WisdomItem, WisdomKind
 from .distill import WisdomCandidate, candidate_path
 
 

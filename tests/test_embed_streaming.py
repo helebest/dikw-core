@@ -17,13 +17,13 @@ from pathlib import Path
 import pytest
 
 from dikw_core import api
-from dikw_core.data.backends.markdown import content_hash
-from dikw_core.eval.fake_embedder import FakeEmbeddings
-from dikw_core.info.embed import (
+from dikw_core.domains.data.backends.markdown import content_hash
+from dikw_core.domains.info.embed import (
     ChunkToEmbed,
     embed_chunks,
     embed_chunks_multimodal,
 )
+from dikw_core.eval.fake_embedder import FakeEmbeddings
 from dikw_core.schemas import CachedEmbeddingRow, EmbeddingRow
 from dikw_core.storage.sqlite import SQLiteStorage
 

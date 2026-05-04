@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dikw_core.data.backends.markdown import content_hash, parse_file, parse_text
+from dikw_core.domains.data.backends.markdown import content_hash, parse_file, parse_text
 
 
 def test_parse_text_uses_frontmatter_title() -> None:

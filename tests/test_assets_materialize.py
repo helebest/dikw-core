@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from dikw_core.data.assets import materialize_asset
+from dikw_core.domains.data.assets import materialize_asset
 from dikw_core.schemas import AssetKind, AssetRecord, AssetRef
 
 # ---- Helpers -------------------------------------------------------------
@@ -319,7 +319,7 @@ async def test_materialize_revalidates_cache_hit_against_current_file(
 
     hashes = iter([stale_sha, canonical])
     monkeypatch.setattr(
-        "dikw_core.data.assets.hash_file",
+        "dikw_core.domains.data.assets.hash_file",
         lambda _p: next(hashes),
     )
 
@@ -362,7 +362,7 @@ async def test_materialize_uses_canonical_hash_when_streaming_hash_disagrees(
     md.write_text("placeholder", encoding="utf-8")
 
     stale_sha = "0" * 64
-    monkeypatch.setattr("dikw_core.data.assets.hash_file", lambda _p: stale_sha)
+    monkeypatch.setattr("dikw_core.domains.data.assets.hash_file", lambda _p: stale_sha)
 
     _store, get, upsert = _make_fake_storage()
     rec = await materialize_asset(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dikw_core.knowledge.synthesize import SynthesisError, parse_synthesis_response
+from dikw_core.domains.knowledge.synthesize import SynthesisError, parse_synthesis_response
 
 _RESPONSE = """
 Here's the page:

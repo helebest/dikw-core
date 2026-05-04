@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .info.tokenize import CjkTokenizer
+from .domains.info.tokenize import CjkTokenizer
 
 
 class ProviderConfig(BaseModel):

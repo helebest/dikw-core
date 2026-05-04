@@ -18,8 +18,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..schemas import WikiLogEntry, WisdomEvidence, WisdomItem, WisdomKind, WisdomStatus
-from ..storage.base import Storage
+from ...schemas import WikiLogEntry, WisdomEvidence, WisdomItem, WisdomKind, WisdomStatus
+from ...storage.base import Storage
 from .io import delete_candidate_file, regenerate_aggregate
 
 

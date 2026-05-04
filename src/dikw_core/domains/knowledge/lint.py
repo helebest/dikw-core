@@ -18,8 +18,8 @@ from pathlib import Path
 
 import frontmatter
 
-from ..schemas import Layer, LinkType
-from ..storage.base import Storage
+from ...schemas import Layer, LinkType
+from ...storage.base import Storage
 from .links import parse_links
 
 

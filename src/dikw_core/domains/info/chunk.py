@@ -29,7 +29,7 @@ from typing import NamedTuple
 
 from pydantic import BaseModel
 
-from dikw_core.info.tokenize import CjkTokenizer, count_tokens
+from .tokenize import CjkTokenizer, count_tokens
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
 _PARA_SEP = re.compile(r"\n\s*\n")

@@ -18,7 +18,7 @@ import unicodedata
 
 import pytest
 
-from dikw_core.data.path_norm import normalize_path
+from dikw_core.domains.data.path_norm import normalize_path
 from dikw_core.schemas import DocumentRecord, Layer
 
 

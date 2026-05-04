@@ -32,8 +32,8 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from ..providers import EmbeddingProvider, MultimodalEmbeddingProvider
-from ..schemas import (
+from ...providers import EmbeddingProvider, MultimodalEmbeddingProvider
+from ...schemas import (
     AssetRecord,
     AssetVecHit,
     ChunkRecord,
@@ -43,7 +43,7 @@ from ..schemas import (
     MultimodalInput,
     VecHit,
 )
-from ..storage.base import NotSupported, Storage
+from ...storage.base import NotSupported, Storage
 from .tokenize import WORD_OR_CJK_CHARS, CjkTokenizer, preprocess_for_fts
 
 

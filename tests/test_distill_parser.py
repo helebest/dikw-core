@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dikw_core.schemas import WisdomKind
-from dikw_core.wisdom.distill import (
+from dikw_core.domains.wisdom.distill import (
     MIN_EVIDENCE,
     make_wisdom_id,
     parse_distill_response,
 )
+from dikw_core.schemas import WisdomKind
 
 _GOOD = """
 <wisdom kind="principle">

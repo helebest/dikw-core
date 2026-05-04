@@ -8,7 +8,7 @@ cover the literal reference syntax. ``parse_text`` populates
 
 from __future__ import annotations
 
-from dikw_core.data.backends.markdown import extract_image_refs, parse_text
+from dikw_core.domains.data.backends.markdown import extract_image_refs, parse_text
 
 
 def test_extract_markdown_image() -> None:

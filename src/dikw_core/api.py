@@ -55,26 +55,35 @@ from .config import (
     find_config,
     load_config,
 )
-from .data.assets import materialize_asset
-from .data.backends import UnsupportedFormat, parse_any
-from .data.backends.base import ParsedDocument
-from .data.backends.markdown import content_hash
-from .data.sources import iter_source_files
-from .info.chunk import chunk_markdown
-from .info.embed import (
+from .domains.data.assets import materialize_asset
+from .domains.data.backends import UnsupportedFormat, parse_any
+from .domains.data.backends.base import ParsedDocument
+from .domains.data.backends.markdown import content_hash
+from .domains.data.sources import iter_source_files
+from .domains.info.chunk import chunk_markdown
+from .domains.info.embed import (
     ChunkToEmbed,
     embed_assets,
     embed_chunks,
     is_unembeddable_asset_mime,
 )
-from .info.search import HybridSearcher, MultimodalSearch
-from .info.tokenize import CjkTokenizer
-from .knowledge.indexgen import regenerate_index
-from .knowledge.links import parse_links, resolve_links
-from .knowledge.lint import LintReport, run_lint
-from .knowledge.log import render_log
-from .knowledge.synthesize import SynthesisError, parse_synthesis_response
-from .knowledge.wiki import WikiPage, now_iso, write_page
+from .domains.info.search import HybridSearcher, MultimodalSearch
+from .domains.info.tokenize import CjkTokenizer
+from .domains.knowledge.indexgen import regenerate_index
+from .domains.knowledge.links import parse_links, resolve_links
+from .domains.knowledge.lint import LintReport, run_lint
+from .domains.knowledge.log import render_log
+from .domains.knowledge.synthesize import SynthesisError, parse_synthesis_response
+from .domains.knowledge.wiki import WikiPage, now_iso, write_page
+from .domains.wisdom.apply import ApplicableWisdom, pick_applicable
+from .domains.wisdom.distill import WisdomCandidate, parse_distill_response
+from .domains.wisdom.io import write_candidate_file
+from .domains.wisdom.review import (
+    ReviewError,
+    ReviewResult,
+)
+from .domains.wisdom.review import approve as _approve_item
+from .domains.wisdom.review import reject as _reject_item
 from .progress import NoopReporter, ProgressReporter
 from .providers import (
     EmbeddingProvider,
@@ -103,15 +112,6 @@ from .schemas import (
 )
 from .storage import Storage, build_storage
 from .storage.base import NotSupported
-from .wisdom.apply import ApplicableWisdom, pick_applicable
-from .wisdom.distill import WisdomCandidate, parse_distill_response
-from .wisdom.io import write_candidate_file
-from .wisdom.review import (
-    ReviewError,
-    ReviewResult,
-)
-from .wisdom.review import approve as _approve_item
-from .wisdom.review import reject as _reject_item
 
 logger = logging.getLogger(__name__)
 
@@ -700,7 +700,7 @@ def _doc_id_for(layer: Layer, logical_path: str) -> str:
     # resolves to the same doc_id. Without this, ``MyDoc.md`` and
     # ``mydoc.md`` would each become their own row on re-ingest after
     # a rename. See ``data/path_norm.py``.
-    from .data.path_norm import normalize_path
+    from .domains.data.path_norm import normalize_path
 
     return f"{layer.value}:{normalize_path(logical_path)}"
 

@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 from dikw_core import api
+from dikw_core.domains.wisdom.io import aggregate_path, candidate_path
 from dikw_core.schemas import WisdomKind, WisdomStatus
-from dikw_core.wisdom.io import aggregate_path, candidate_path
 
 from .fakes import FakeEmbeddings, FakeLLM, init_test_wiki
 

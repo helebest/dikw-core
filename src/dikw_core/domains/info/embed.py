@@ -26,9 +26,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..data.backends.markdown import content_hash
-from ..providers import EmbeddingProvider, MultimodalEmbeddingProvider
-from ..schemas import (
+from ...providers import EmbeddingProvider, MultimodalEmbeddingProvider
+from ...schemas import (
     AssetEmbeddingRow,
     AssetRecord,
     CachedEmbeddingRow,
@@ -36,7 +35,8 @@ from ..schemas import (
     ImageContent,
     MultimodalInput,
 )
-from ..storage.base import NotSupported, Storage
+from ...storage.base import NotSupported, Storage
+from ..data.backends.markdown import content_hash
 
 logger = logging.getLogger(__name__)
 

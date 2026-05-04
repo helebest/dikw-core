@@ -6,6 +6,7 @@ loudly if anyone re-introduces an HtmlBackend or registers .html / .htm.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import pytest
@@ -17,10 +18,9 @@ from dikw_core.domains.data.backends import (
 )
 
 
-def test_html_backend_symbol_gone() -> None:
-    import dikw_core.domains.data.backends as backends_pkg
-
-    assert not hasattr(backends_pkg, "HtmlBackend")
+def test_html_backend_module_gone() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("dikw_core.domains.data.backends.html")
 
 
 def test_supported_extensions_are_markdown_only() -> None:

@@ -61,7 +61,7 @@ src/dikw_core/
 │   ├── knowledge/         K layer — wiki pages, [[wikilinks]], index.md, log.md, lint
 │   └── wisdom/            W layer — distill, review state machine, apply-at-query
 ├── providers/             LLMProvider + EmbeddingProvider Protocols (anthropic, openai_compat)
-├── storage/               Storage Protocol + adapters (sqlite, postgres, filesystem)
+├── storage/               Storage Protocol + adapters (sqlite, postgres)
 ├── eval/                  retrieval-quality eval — metrics, dataset loader, runner, packaged datasets
 ├── prompts/               versioned LLM prompts (importlib.resources)
 ├── server/                FastAPI app, auth, sync + task routes, NDJSON streaming, task subsystem
@@ -76,7 +76,7 @@ src/dikw_core/
 ### Named seams — extend here, not elsewhere
 
 1. **`SourceBackend`** (`domains/data/backends/base.py`) — new formats: one subclass + `register()`. Reference impl: `domains/data/backends/markdown.py`.
-2. **`Storage` Protocol** (`storage/base.py`) — three backends ship (sqlite, postgres, filesystem); engine code depends only on the Protocol. Hybrid-search fusion (RRF), chunking, link-graph parsing, and wisdom scoring live **outside** adapters — adapters expose primitives only.
+2. **`Storage` Protocol** (`storage/base.py`) — two backends ship (sqlite, postgres); engine code depends only on the Protocol. Hybrid-search fusion (RRF), chunking, link-graph parsing, and wisdom scoring live **outside** adapters — adapters expose primitives only.
 3. **`LLMProvider` / `EmbeddingProvider`** (`providers/base.py`) — Anthropic uses `cache_control` on the system prompt; openai_compat works against any base URL.
 
 ### Core invariants

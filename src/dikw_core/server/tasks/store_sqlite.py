@@ -1,9 +1,8 @@
 """SQLite-backed TaskStore.
 
-Used for both wiki backends that don't bring their own DB:
-``SQLiteStorageConfig`` (so ``server-tasks.db`` lives next to
-``index.sqlite``) and ``FilesystemStorageConfig`` (where the wiki has
-no DB and a tiny SQLite file for tasks is the simplest dependency).
+Used when the wiki's storage backend is ``SQLiteStorageConfig``, so
+``server-tasks.db`` lives next to ``index.sqlite``. Postgres wikis
+get a separate ``PostgresTaskStore`` whose DSN comes from the env.
 
 Pattern mirrors ``storage/sqlite.py``: stdlib ``sqlite3`` wrapped in
 ``asyncio.to_thread`` so the rest of the engine stays async without

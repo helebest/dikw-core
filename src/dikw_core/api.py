@@ -285,9 +285,9 @@ async def _register_text_version(
 ) -> int | None:
     """Register the text ``embed_versions`` row from the provider config.
 
-    Returns the version_id, or ``None`` if the storage backend doesn't
-    implement versioning (filesystem). Callers degrade gracefully on
-    None — text embedding is disabled for the run.
+    Returns the version_id, or ``None`` if the adapter raises
+    ``NotSupported`` (e.g. a future "lite" backend). Callers degrade
+    gracefully on None — text embedding is disabled for the run.
     """
     try:
         return await storage.upsert_embed_version(
@@ -525,13 +525,9 @@ def _build_probe_png_1x1() -> bytes:
 _PROBE_PNG_1X1 = _build_probe_png_1x1()
 
 # Storage backends that support multimodal embed versioning today.
-# Mirrors ``upsert_embed_version`` support in
-# ``storage/{sqlite,postgres,filesystem}.py``: postgres and filesystem
-# raise ``NotSupported`` from that method, so when the user has
-# ``assets.multimodal`` configured against one of them, ``ingest()``
-# silently degrades to text-only (api.py: ``except NotSupported``).
-# ``check_providers`` mirrors that fallback so the probe describes the
-# same behaviour operators will actually get.
+# Both shipped adapters (sqlite, postgres) implement
+# ``upsert_embed_version`` for the multimodal modality. ``check_providers``
+# uses this set to label "supported" vs "not supported" in the probe report.
 _MULTIMODAL_STORAGE_BACKENDS: frozenset[str] = frozenset({"sqlite", "postgres"})
 
 
@@ -830,9 +826,9 @@ async def ingest(
             # Materialize image references before chunking so asset_ids
             # are available when chunk_asset_refs land. Decoupled from
             # mm_cfg so eval rigs see the chunk ↔ asset bridge even
-            # without multimodal embedding configured; backends that
-            # don't implement assets (e.g., filesystem) raise
-            # NotSupported on the first call and we drop refs silently.
+            # without multimodal embedding configured; adapters that
+            # raise NotSupported on the asset-bridge methods drop refs
+            # silently.
             ref_assets: dict[int, AssetRecord] = {}
             if parsed.asset_refs:
                 by_original_path: dict[str, AssetRecord] = {}

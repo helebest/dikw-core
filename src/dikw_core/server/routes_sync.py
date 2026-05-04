@@ -65,9 +65,9 @@ class DocSearchRequest(BaseModel):
     layer: Layer | None = None
     # ``"hybrid"`` mirrors the CLI default (BM25 + dense fused via RRF);
     # ``"bm25"`` is the FTS-only escape hatch when the wiki has no active
-    # embedding version (e.g. fresh init, filesystem backend) — the engine
-    # would otherwise need a working embedding endpoint just to get a
-    # text-only search response.
+    # embedding version (e.g. fresh init) — the engine would otherwise
+    # need a working embedding endpoint just to get a text-only search
+    # response.
     mode: Literal["hybrid", "bm25", "vector"] = "hybrid"
 
 
@@ -241,9 +241,8 @@ def make_router(*, auth_dep: Any) -> APIRouter:
             # Build an embedder only when the dense leg is actually
             # going to run AND the storage has an active text version.
             # This lets ``mode="bm25"`` work on a wiki that has never
-            # been ingested (e.g. fresh init), and on backends without
-            # embedding support (filesystem) — instead of failing on the
-            # embedder factory before search even runs.
+            # been ingested (e.g. fresh init) — instead of failing on
+            # the embedder factory before search even runs.
             embedder = None
             if body.mode in ("hybrid", "vector"):
                 try:

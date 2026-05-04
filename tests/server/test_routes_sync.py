@@ -17,7 +17,7 @@ async def test_info_endpoint(server_client: httpx.AsyncClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["wiki_root"]
-    assert body["storage_backend"] in {"sqlite", "filesystem", "postgres"}
+    assert body["storage_backend"] in {"sqlite", "postgres"}
     assert body["auth_required"] is False  # localhost-no-token default
 
 

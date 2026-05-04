@@ -2,7 +2,7 @@
 
 ## Context
 
-`/Users/bytedance/Projects/dikw-core` is greenfield. The goal is an **AI-native knowledge engine** inspired by Karpathy's "LLM Wiki" pattern ([gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)), but extended end-to-end across the **DIKW pyramid** — Data → Information → Knowledge → Wisdom.
+`dikw-core` is a greenfield, open-source project. The goal is an **AI-native knowledge engine** inspired by Karpathy's "LLM Wiki" pattern ([gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)), but extended end-to-end across the **DIKW pyramid** — Data → Information → Knowledge → Wisdom.
 
 Why this project exists:
 - Karpathy's LLM-Wiki pattern captures a real gap in today's RAG stacks: **knowledge should be a compounding artifact, not a query-time search result.** His pattern stops at Knowledge (markdown wiki with index.md + log.md).

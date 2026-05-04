@@ -5,9 +5,9 @@ A dataset is a directory with up to **four** entries:
   <dataset>/
     dataset.yaml     — name, description, thresholds (optionally namespaced
                        as ``<view>/<metric>``)
-    corpus/*.md      — documents to ingest (also *.html); image files
-                       referenced via ``![](path)`` live in ``corpus/`` too
-                       (any sub-directory layout is fine).
+    corpus/*.md      — documents to ingest; image files referenced via
+                       ``![](path)`` live in ``corpus/`` too (any
+                       sub-directory layout is fine).
     targets.yaml     — *(optional)* assets + chunks named-id catalog. When
                        present, queries can express chunk-level / asset-level
                        ground truth via ``expect_chunk_any`` /

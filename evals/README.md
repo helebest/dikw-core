@@ -11,7 +11,7 @@ dataset:
 ```
 evals/datasets/<name>/
 ├── dataset.yaml       # name, description, thresholds
-├── corpus/            # *.md or *.html — the docs to ingest
+├── corpus/            # *.md — the docs to ingest
 └── queries.yaml       # {q, expect_any: [doc_stem, …]} pairs
 ```
 
@@ -35,8 +35,7 @@ exploratory datasets you haven't calibrated yet).
 
 ### `corpus/`
 
-Any `*.md` or `*.html` under this directory is ingested; subdirectories
-are fine. File stem (filename without extension) becomes the doc's
+Any `*.md` under this directory is ingested; subdirectories are fine. File stem (filename without extension) becomes the doc's
 identity in `expect_any`.
 
 ### `queries.yaml`

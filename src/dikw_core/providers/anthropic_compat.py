@@ -1,10 +1,12 @@
-"""Anthropic LLM provider.
+"""Anthropic-compatible LLM provider.
 
-Wraps the official ``anthropic`` SDK. Prompt caching is applied to the system
-prompt via ``cache_control`` — the system prompt is the near-static part
-across ``synthesize``/``query``/``distill`` sessions, so it benefits most.
-Anthropic has no embeddings endpoint; embeddings must go through the
-OpenAI-compatible provider.
+Wraps the official ``anthropic`` SDK and points at any Anthropic-protocol-
+compatible endpoint via ``base_url`` (api.anthropic.com by default; MiniMax's
+``https://api.minimaxi.com/anthropic`` and other gateway endpoints work too).
+Prompt caching is applied to the system prompt via ``cache_control`` — the
+system prompt is the near-static part across ``synthesize``/``query``/``distill``
+sessions, so it benefits most. The Anthropic protocol has no embeddings
+endpoint; embeddings must go through the OpenAI-compatible provider.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ def _resolve_api_key(explicit: str | None) -> str:
     return key
 
 
-class AnthropicLLM:
+class AnthropicCompatLLM:
     def __init__(
         self,
         *,

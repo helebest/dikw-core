@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..config import ProviderConfig
-from .anthropic import AnthropicLLM
+from .anthropic_compat import AnthropicCompatLLM
 from .base import (
     EmbeddingProvider,
     LLMProvider,
@@ -19,7 +19,7 @@ from .openai_compat import OpenAICompatEmbeddings, OpenAICompatLLM
 
 def build_llm(config: ProviderConfig) -> LLMProvider:
     if config.llm == "anthropic_compat":
-        return AnthropicLLM(
+        return AnthropicCompatLLM(
             base_url=config.llm_base_url,
             max_retries=config.llm_max_retries,
             timeout_seconds=config.llm_timeout_seconds,
@@ -36,7 +36,8 @@ def build_llm(config: ProviderConfig) -> LLMProvider:
 def build_embedder(
     config: ProviderConfig, *, dim_override: int | None = None
 ) -> EmbeddingProvider:
-    # Anthropic has no embeddings API; both paths route through OpenAI-compat
+    # The Anthropic protocol has no embeddings endpoint; both paths route
+    # through OpenAI-compat
     # using ``embedding_base_url`` so users configure one endpoint explicitly.
     # ``dim_override`` lets query() pin to the active embed_versions row's
     # dim when cfg has drifted (yml edited but no re-ingest yet) — without

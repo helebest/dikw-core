@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import assert_never
 
 from ...config import (
     DikwConfig,
@@ -82,9 +83,7 @@ def build_task_store(
             path=root / _DEFAULT_TASKS_DB_PATH, instance_id=instance_id
         )
 
-    raise TaskStoreError(
-        f"unrecognised storage backend: {type(storage_cfg).__name__}"
-    )
+    assert_never(storage_cfg)
 
 
 __all__ = [

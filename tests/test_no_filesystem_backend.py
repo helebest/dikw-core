@@ -35,10 +35,17 @@ def test_filesystem_storage_class_is_gone() -> None:
 def test_load_config_rejects_filesystem_backend(tmp_path: Path) -> None:
     path = tmp_path / CONFIG_FILENAME
     path.write_text(
-        "provider:\n  embedding_dim: 1536\n  embedding_revision: ''\n"
-        "  embedding_normalize: true\n  embedding_distance: cosine\n"
-        "storage:\n  backend: filesystem\n  root: .dikw/fs\n"
-        "sources: []\n",
+        """
+provider:
+  embedding_dim: 1536
+  embedding_revision: ''
+  embedding_normalize: true
+  embedding_distance: cosine
+storage:
+  backend: filesystem
+  root: .dikw/fs
+sources: []
+""",
         encoding="utf-8",
     )
     with pytest.raises(ValidationError):

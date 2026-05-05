@@ -282,38 +282,25 @@ def _qualified_provider(protocol: str, base_url: str) -> str:
 
 async def _register_text_version(
     storage: Storage, cfg_provider: ProviderConfig
-) -> int | None:
-    """Register the text ``embed_versions`` row from the provider config.
-
-    Returns the version_id, or ``None`` if the adapter raises
-    ``NotSupported`` (e.g. a future "lite" backend). Callers degrade
-    gracefully on None — text embedding is disabled for the run.
-    """
-    try:
-        return await storage.upsert_embed_version(
-            EmbeddingVersion(
-                # Encode the endpoint host into ``provider`` so two
-                # OpenAI-compatible vendors serving the same model name
-                # don't collide on a single version_id (their vectors
-                # live in different spaces and must not share a table).
-                provider=_qualified_provider(
-                    cfg_provider.embedding, cfg_provider.embedding_base_url
-                ),
-                model=cfg_provider.embedding_model,
-                revision=cfg_provider.embedding_revision,
-                dim=cfg_provider.embedding_dim,
-                normalize=cfg_provider.embedding_normalize,
-                distance=cfg_provider.embedding_distance,
-                modality="text",
-            )
+) -> int:
+    """Register the text ``embed_versions`` row from the provider config."""
+    return await storage.upsert_embed_version(
+        EmbeddingVersion(
+            # Encode the endpoint host into ``provider`` so two
+            # OpenAI-compatible vendors serving the same model name
+            # don't collide on a single version_id (their vectors
+            # live in different spaces and must not share a table).
+            provider=_qualified_provider(
+                cfg_provider.embedding, cfg_provider.embedding_base_url
+            ),
+            model=cfg_provider.embedding_model,
+            revision=cfg_provider.embedding_revision,
+            dim=cfg_provider.embedding_dim,
+            normalize=cfg_provider.embedding_normalize,
+            distance=cfg_provider.embedding_distance,
+            modality="text",
         )
-    except NotSupported as e:
-        logger.warning(
-            "storage backend doesn't support text versioning "
-            "(%s); skipping text embedding for this run",
-            e,
-        )
-        return None
+    )
 
 
 # ---- public result models ------------------------------------------------
@@ -524,13 +511,6 @@ def _build_probe_png_1x1() -> bytes:
 
 _PROBE_PNG_1X1 = _build_probe_png_1x1()
 
-# Storage backends that support multimodal embed versioning today.
-# Both shipped adapters (sqlite, postgres) implement
-# ``upsert_embed_version`` for the multimodal modality. ``check_providers``
-# uses this set to label "supported" vs "not supported" in the probe report.
-_MULTIMODAL_STORAGE_BACKENDS: frozenset[str] = frozenset({"sqlite", "postgres"})
-
-
 async def _probe_multimodal(
     embedder: MultimodalEmbeddingProvider,
     model: str,
@@ -619,17 +599,6 @@ async def check_providers(
     llm_target = cfg.provider.llm_base_url or "(provider default)"
     embed_label = cfg.provider.embedding_provider_label
     mm_cfg = cfg.assets.multimodal
-    # If the storage backend can't hold multimodal version rows,
-    # ``ingest()`` silently degrades to text-only — describe that here
-    # too, otherwise check would fail on a multimodal endpoint that
-    # ingest never reaches.
-    if mm_cfg is not None and cfg.storage.backend not in _MULTIMODAL_STORAGE_BACKENDS:
-        logger.warning(
-            "storage backend %r doesn't support multimodal versioning; "
-            "real ingest would fall back to text-only — probing text leg instead",
-            cfg.storage.backend,
-        )
-        mm_cfg = None
     # Per-leg target. Multimodal probe hits ``assets.multimodal.base_url``
     # (or the provider's default), which is independent of the text leg's
     # ``embedding_base_url``; reporting the wrong one makes a green check
@@ -741,42 +710,30 @@ async def ingest(
 
         # Resolve text + multimodal versions once per run so every chunk
         # and asset embedded below carries a stable version_id from the
-        # embed_versions registry. Storage backends that don't implement
-        # the version APIs raise NotSupported; we degrade per-modality
-        # rather than failing the run.
+        # embed_versions registry.
         text_version_id: int | None = None
         if embedder is not None:
             text_version_id = await _register_text_version(storage, cfg.provider)
-            if text_version_id is None:
-                embedder = None  # disable text-vec pathway
 
         mm_version_id: int | None = None
         mm_cfg = cfg.assets.multimodal
         if mm_cfg is not None:
-            try:
-                mm_version_id = await storage.upsert_embed_version(
-                    EmbeddingVersion(
-                        # Same endpoint-aware identity as the text leg —
-                        # mm_cfg.provider names the wire shape, base_url
-                        # selects the actual backend.
-                        provider=_qualified_provider(
-                            mm_cfg.provider, mm_cfg.base_url or ""
-                        ),
-                        model=mm_cfg.model,
-                        revision=mm_cfg.revision,
-                        dim=mm_cfg.dim,
-                        normalize=mm_cfg.normalize,
-                        distance=mm_cfg.distance,
-                        modality="multimodal",
-                    )
+            mm_version_id = await storage.upsert_embed_version(
+                EmbeddingVersion(
+                    # Same endpoint-aware identity as the text leg —
+                    # mm_cfg.provider names the wire shape, base_url
+                    # selects the actual backend.
+                    provider=_qualified_provider(
+                        mm_cfg.provider, mm_cfg.base_url or ""
+                    ),
+                    model=mm_cfg.model,
+                    revision=mm_cfg.revision,
+                    dim=mm_cfg.dim,
+                    normalize=mm_cfg.normalize,
+                    distance=mm_cfg.distance,
+                    modality="multimodal",
                 )
-            except NotSupported as e:
-                logger.warning(
-                    "storage backend doesn't support multimodal versioning "
-                    "(%s); falling back to text-only ingest",
-                    e,
-                )
-                mm_cfg = None  # disable mm pathway for the rest of this run
+            )
 
         # Auto-build the multimodal embedder from config when one wasn't
         # injected — symmetric with query()'s behavior, so the typical
@@ -826,9 +783,7 @@ async def ingest(
             # Materialize image references before chunking so asset_ids
             # are available when chunk_asset_refs land. Decoupled from
             # mm_cfg so eval rigs see the chunk ↔ asset bridge even
-            # without multimodal embedding configured; adapters that
-            # raise NotSupported on the asset-bridge methods drop refs
-            # silently.
+            # without multimodal embedding configured.
             ref_assets: dict[int, AssetRecord] = {}
             if parsed.asset_refs:
                 by_original_path: dict[str, AssetRecord] = {}

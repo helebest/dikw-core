@@ -509,21 +509,13 @@ class HybridSearcher:
 
         retrieved_chunk_ids = [cid for cid, _ in top]
 
-        # Backends that don't implement the asset bridge raise NotSupported —
-        # degrade to empty refs so the legacy text-query path keeps working.
-        try:
-            refs_by_chunk = await self._storage.chunk_asset_refs_for_chunks(
-                retrieved_chunk_ids
-            )
-        except NotSupported:
-            refs_by_chunk = {cid: [] for cid in retrieved_chunk_ids}
+        refs_by_chunk = await self._storage.chunk_asset_refs_for_chunks(
+            retrieved_chunk_ids
+        )
         all_asset_ids = list(
             {r.asset_id for refs in refs_by_chunk.values() for r in refs}
         )
-        try:
-            fetched_assets = await self._storage.get_assets(all_asset_ids)
-        except NotSupported:
-            fetched_assets = []
+        fetched_assets = await self._storage.get_assets(all_asset_ids)
         assets_by_id: dict[str, AssetRecord] = {
             a.asset_id: a for a in fetched_assets
         }

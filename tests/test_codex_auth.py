@@ -335,3 +335,29 @@ def test_save_codex_tokens_writes_with_owner_only_permissions(
     if sys.platform != "win32":
         mode = stat.S_IMODE(os.stat(auth_path).st_mode)
         assert mode == 0o600, f"expected 0o600, got {mode:o}"
+
+
+def test_save_codex_tokens_overrides_leftover_tmp_permissions(
+    codex_dir: Path,
+) -> None:
+    """A leftover ``auth.json.tmp`` from a previous crashed writer (or a
+    manual touch) used to be reused by O_CREAT|O_TRUNC, which silently
+    carried its old permissions onto auth.json after os.replace. The
+    write path now unlinks any pre-existing tmp first, so the next
+    save lands with mode 0o600 regardless of the leftover."""
+    import os
+    import stat
+    import sys
+
+    leftover = codex_dir / "auth.json.tmp"
+    leftover.write_text("{}", encoding="utf-8")
+    if sys.platform != "win32":
+        os.chmod(leftover, 0o644)
+
+    save_codex_tokens({"access_token": "at", "refresh_token": "rt"})
+    auth_path = codex_dir / "auth.json"
+    assert auth_path.is_file()
+    assert not leftover.exists()
+    if sys.platform != "win32":
+        mode = stat.S_IMODE(os.stat(auth_path).st_mode)
+        assert mode == 0o600

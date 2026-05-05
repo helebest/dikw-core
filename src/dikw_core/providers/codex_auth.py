@@ -351,13 +351,16 @@ def _write_tokens_unlocked(home: Path, tokens: dict[str, str]) -> None:
         datetime.now(UTC).isoformat().replace("+00:00", "Z")
     )
     tmp_path = path.with_name(path.name + ".tmp")
-    # Open with O_CREAT|O_EXCL|O_WRONLY|0o600 so a permissive umask (e.g.
-    # 022) doesn't leave OAuth tokens world-readable on POSIX. mode is
+    # Open with O_CREAT|O_WRONLY|0o600 so a permissive umask (e.g. 022)
+    # doesn't leave OAuth tokens world-readable on POSIX. mode is
     # effectively a no-op on Windows where NTFS ACLs handle privacy at
-    # the user level. O_EXCL avoids re-using a leftover .tmp from a
-    # crashed writer (we hold the advisory lock so this is just defence).
+    # the user level. **First unlink any leftover .tmp** — POSIX honours
+    # the mode argument only on creation; reusing a pre-existing file
+    # (e.g. from a crashed writer or a manual touch) would silently
+    # carry that file's permissions onto auth.json after os.replace.
+    tmp_path.unlink(missing_ok=True)
     payload = json.dumps(existing, indent=2).encode("utf-8")
-    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+    flags = os.O_CREAT | os.O_WRONLY | os.O_EXCL
     fd = os.open(tmp_path, flags, 0o600)
     try:
         with os.fdopen(fd, "wb") as f:

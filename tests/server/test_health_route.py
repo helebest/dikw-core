@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from dikw_core import __version__
+from dikw_core import api as api_module
 
 
 @pytest.mark.asyncio
@@ -151,3 +152,46 @@ async def test_health_storage_engine_omits_dsn_and_path(
     # not appear (so the .sqlite path under wiki_root/.dikw/ is excluded).
     sqlite_path = wiki_root / ".dikw" / "index.sqlite"
     assert str(sqlite_path) not in raw
+
+
+@pytest.mark.asyncio
+async def test_health_strips_credentials_from_base_url(
+    server_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence-in-depth: even if a user encodes a token directly in
+    ``provider.llm_base_url`` (``https://user:token@host/`` or
+    ``?api_key=…``), the health response must never echo the credential.
+    Sanitisation lives in ``api._sanitize_base_url`` — this guards the
+    seam by tweaking the resolved config and asserting on the wire.
+    """
+    original_with_storage = api_module._with_storage
+    sentinel_token = "sk-leak-IN-URL-AAA-BBB"
+
+    async def _patched_with_storage(path: object) -> object:
+        cfg, root, storage = await original_with_storage(path)  # type: ignore[arg-type]
+        cfg.provider.llm_base_url = (
+            f"https://user:{sentinel_token}@api.example.com/v1"
+        )
+        cfg.provider.embedding_base_url = (
+            f"https://api.example.com/v1?api_key={sentinel_token}"
+        )
+        return cfg, root, storage
+
+    monkeypatch.setattr(api_module, "_with_storage", _patched_with_storage)
+
+    resp = await server_client.get("/v1/health")
+    raw = resp.text
+    body = resp.json()
+
+    assert sentinel_token not in raw
+    assert "user:" not in raw  # userinfo separator gone too
+    assert "api_key=" not in raw  # query param gone
+
+    # Positive check: a sanitised host still surfaces (so we didn't just
+    # drop the field altogether and call that "secure").
+    assert body["providers"]["llm"]["base_url"] == "https://api.example.com/v1"
+    assert (
+        body["providers"]["embedding"]["base_url"]
+        == "https://api.example.com/v1"
+    )

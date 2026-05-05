@@ -129,6 +129,50 @@ def test_query_streams_tokens_and_renders_answer(
     assert "citations" in result.stdout
 
 
+def test_health_default_emits_json(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    """``dikw client health`` defaults to JSON (the agent contract).
+    Smoke-test that the no-arg invocation succeeds against an in-memory
+    server and the output is parseable JSON containing the load-bearing
+    top-level keys."""
+    import json as _json
+
+    patch_transport_factory()
+    result = _run(["client", "health"])
+    assert result.exit_code == 0, result.stdout
+    payload = _json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert "providers" in payload
+    assert "layer_counts" in payload
+
+
+def test_health_table_mode_renders_tables(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    """``--format table`` exercises ``render_health_report`` end-to-end
+    (otherwise a renamed field could regress silently)."""
+    patch_transport_factory()
+    result = _run(["client", "health", "--format", "table"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    assert "dikw health" in out
+    assert "layer counts" in out
+    assert "providers" in out
+
+
+def test_health_rejects_invalid_format(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    patch_transport_factory()
+    result = _run(["client", "health", "--format", "csv"])
+    assert result.exit_code == 2
+    assert "must be 'json' or 'table'" in result.stdout
+
+
 def test_review_list_empty_on_fresh_wiki(
     asgi_client: tuple[Any, ServerRuntime],
     patch_transport_factory: Callable[[], None],

@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field
 from rich.console import Console
@@ -419,7 +419,7 @@ class LlmInfo(BaseModel):
     provider: Literal["anthropic_compat", "openai_compat"]
     model: str
     base_url: str | None
-    max_retries: int
+    max_retries: int = Field(ge=0)
     max_tokens_query: int = Field(gt=0)
     max_tokens_synth: int = Field(gt=0)
     max_tokens_distill: int = Field(gt=0)
@@ -455,7 +455,7 @@ class EmbeddingInfo(BaseModel):
     normalize: bool
     distance: Literal["cosine", "l2", "dot"]
     batch_size: int = Field(gt=0)
-    max_retries: int
+    max_retries: int = Field(ge=0)
     timeout_seconds: float = Field(gt=0)
     provider_label: str | None
     api_key_present: bool
@@ -541,8 +541,17 @@ async def _with_storage(path: str | Path | None) -> tuple[DikwConfig, Path, Stor
     storage = build_storage(
         cfg.storage, root=root, cjk_tokenizer=cfg.retrieval.cjk_tokenizer
     )
-    await storage.connect()
-    await storage.migrate()
+    # If connect or migrate raises, the partially opened pool / fd leaks
+    # unless we close it on the failure path. Agents probe ``/v1/health``
+    # frequently — a repeated migrate failure would otherwise accumulate
+    # SQLite fds or Postgres pool slots.
+    try:
+        await storage.connect()
+        await storage.migrate()
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await storage.close()
+        raise
     return cfg, root, storage
 
 
@@ -554,16 +563,49 @@ async def status(path: str | Path | None = None) -> StorageCounts:
         await storage.close()
 
 
+def _sanitize_base_url(url: str | None) -> str | None:
+    """Strip userinfo / query / fragment from a ``base_url`` before
+    exposing it on /v1/health.
+
+    Defends against credential leakage when a user puts a token directly
+    in the URL — ``https://user:token@api.example/`` or
+    ``…?api_key=…`` — by keeping only ``scheme://host[:port]/path``.
+    Returns ``None`` when the input is empty, unparseable, or has no
+    scheme/host: leaving a malformed URL on a probe response is worse
+    than dropping it.
+    """
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except (ValueError, TypeError):
+        return None
+    if not parts.scheme or not parts.hostname:
+        return None
+    netloc = parts.hostname
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
 def _llm_api_key_env(provider: Literal["anthropic_compat", "openai_compat"]) -> str:
     """Env-var lookup for the LLM leg's API key, sourced from the
-    provider modules so health and the runtime read the same constant."""
+    provider modules so health and the runtime read the same constant.
+
+    Explicit per-provider branch (rather than ``else: openai_compat``)
+    so adding a new LLM provider surfaces as a typed mypy error here +
+    a runtime ``ValueError`` instead of silently reporting the wrong
+    env var's presence on /v1/health.
+    """
     if provider == "anthropic_compat":
         from .providers.anthropic_compat import API_KEY_ENV
 
         return API_KEY_ENV
-    from .providers.openai_compat import API_KEY_ENV
+    if provider == "openai_compat":
+        from .providers.openai_compat import API_KEY_ENV
 
-    return API_KEY_ENV
+        return API_KEY_ENV
+    raise ValueError(f"unknown llm provider: {provider!r}")
 
 
 async def health(path: str | Path | None = None) -> HealthReport:
@@ -594,7 +636,7 @@ async def health(path: str | Path | None = None) -> HealthReport:
     llm_info = LlmInfo(
         provider=p.llm,
         model=p.llm_model,
-        base_url=p.llm_base_url,
+        base_url=_sanitize_base_url(p.llm_base_url),
         max_retries=p.llm_max_retries,
         max_tokens_query=p.llm_max_tokens_query,
         max_tokens_synth=p.llm_max_tokens_synth,
@@ -606,12 +648,14 @@ async def health(path: str | Path | None = None) -> HealthReport:
     mm_info: MultimodalInfo | None = None
     mm_cfg = cfg.assets.multimodal
     if mm_cfg is not None:
-        mm_info = MultimodalInfo.model_validate(mm_cfg.model_dump())
+        mm_dump = mm_cfg.model_dump()
+        mm_dump["base_url"] = _sanitize_base_url(mm_dump.get("base_url"))
+        mm_info = MultimodalInfo.model_validate(mm_dump)
 
     embedding_info = EmbeddingInfo(
         provider=p.embedding,
         model=p.embedding_model,
-        base_url=p.embedding_base_url,
+        base_url=_sanitize_base_url(p.embedding_base_url),
         dim=p.embedding_dim,
         revision=p.embedding_revision,
         normalize=p.embedding_normalize,

@@ -33,6 +33,7 @@ import zlib
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -104,6 +105,8 @@ from .schemas import (
     ImageContent,
     Layer,
     MultimodalInput,
+    PageRef,
+    RetrieveResult,
     StorageCounts,
     WikiLogEntry,
     WisdomEvidence,
@@ -121,8 +124,10 @@ __all__ = [
     "Citation",
     "DistillReport",
     "IngestReport",
+    "PageRef",
     "ProbeResult",
     "QueryResult",
+    "RetrieveResult",
     "ReviewError",
     "ReviewResult",
     "SynthReport",
@@ -137,6 +142,7 @@ __all__ = [
     "load_wiki",
     "query",
     "reject_wisdom",
+    "retrieve",
     "status",
     "synthesize",
 ]
@@ -1057,42 +1063,38 @@ def _replace(r: IngestReport, **kwargs: int) -> IngestReport:
 # ---- Phase 1: query ------------------------------------------------------
 
 
-async def query(
+async def _retrieve_inner(
+    storage: Storage,
+    cfg: DikwConfig,
     q: str,
-    path: str | Path | None = None,
     *,
-    limit: int = 5,
-    llm: LLMProvider | None = None,
+    limit: int,
     embedder: EmbeddingProvider | None = None,
     multimodal_embedder: MultimodalEmbeddingProvider | None = None,
     reporter: ProgressReporter | None = None,
-) -> QueryResult:
-    """Hybrid-search the wiki, feed the top hits to an LLM, and return cited answer.
+) -> tuple[list[Hit], MultimodalEmbeddingProvider | None]:
+    """Run hybrid search and return (hits, owned_mm_embedder).
 
-    When ``cfg.assets.multimodal`` is configured *and* a
-    ``multimodal_embedder`` is supplied (or buildable from the same
-    config), the searcher activates the asset-vector channel so visual
-    references contribute to retrieval.
+    Shared helper between ``query`` (LLM-driven RAG) and ``retrieve``
+    (retrieval-only). The caller is responsible for closing
+    ``owned_mm_embedder`` (returned non-None only when this helper had
+    to build the multimodal embedder itself; a caller-supplied embedder
+    is never owned here).
 
-    ``reporter`` (optional) emits a ``retrieval_done`` partial with the
-    raw hits before the LLM step, then a final ``llm_done`` partial with
-    the answer text + usage. Streaming token-level partials land in
-    Phase 4 once provider ``complete_stream`` exists.
+    Emits the ``retrieval_done`` partial via ``reporter`` so both wire
+    surfaces (``/v1/query`` + ``/v1/retrieve``) report the same shape;
+    pass ``None`` for ``reporter`` to silence the partial.
     """
-    cfg, _root, storage = await _with_storage(path)
-    owned_mm: MultimodalEmbeddingProvider | None = None
     _reporter: ProgressReporter = reporter or NoopReporter()
-    try:
-        _llm = llm
-        if _llm is None:
-            _llm = build_llm(cfg.provider)
+    owned_mm: MultimodalEmbeddingProvider | None = None
 
+    try:
         # Pin the text leg to the active text version's stored model AND
-        # dim so a mid-flight cfg edit (new embedding_model / embedding_dim
-        # in dikw.yml, no re-ingest) doesn't corrupt query rankings — same
-        # anti-drift guard the multimodal path applies below. We resolve
-        # the active version BEFORE building the embedder so the override
-        # can flow into ``default_dimensions``.
+        # dim so a mid-flight cfg edit (new embedding_model /
+        # embedding_dim in dikw.yml, no re-ingest) doesn't corrupt query
+        # rankings — same anti-drift guard the multimodal path applies
+        # below. We resolve the active version BEFORE building the
+        # embedder so the override can flow into ``default_dimensions``.
         text_version_id: int | None = None
         text_query_model = cfg.provider.embedding_model
         text_query_dim: int | None = None
@@ -1136,7 +1138,11 @@ async def query(
                         base_url=mm_cfg.base_url,
                         batch=mm_cfg.batch,
                     )
-                    owned_mm = mm_embedder  # close it ourselves below
+                    # Assign immediately so an exception between here and
+                    # the `return` below still goes through this scope's
+                    # cleanup — caller's finally only sees ``owned_mm``
+                    # after a successful return.
+                    owned_mm = mm_embedder
                 # Use the model recorded on the active version, not the
                 # current cfg model — if the user just edited dikw.yml to
                 # point at a new model but hasn't re-ingested yet, the
@@ -1158,9 +1164,148 @@ async def query(
             multimodal=mm_search,
         )
         hits = await searcher.search(q, limit=limit)
+        # Strip ``text`` from the partial event — clients consuming
+        # ``retrieval_done`` for live citation rendering only need
+        # snippet/path/score; the full chunk body lives on
+        # ``final.result.chunks`` for retrieve callers that actually need
+        # it. Halves the wire payload at limit=100 with ~1 KB chunks.
         await _reporter.partial(
             "retrieval_done",
-            {"hits": [h.model_dump(mode="json") for h in hits]},
+            {"hits": [h.model_dump(mode="json", exclude={"text"}) for h in hits]},
+        )
+        return hits, owned_mm
+    except BaseException:
+        # Catch ``BaseException`` (not just ``Exception``) so the cleanup
+        # runs on ``asyncio.CancelledError`` too — a cancelled retrieve
+        # mid-flight must not leak the multimodal embedder we just built.
+        #
+        # Inner ``except Exception`` (not ``BaseException``) is
+        # intentional: if ``aclose`` itself raises ``CancelledError`` /
+        # ``SystemExit`` / ``KeyboardInterrupt`` we let it propagate and
+        # replace the original exception. asyncio convention treats
+        # cancellation as a higher-priority signal that callers must see
+        # — masking it under ``raise`` of the original would break
+        # cooperative shutdown. Regular cleanup failures (network,
+        # provider crash) are logged and the original exception wins.
+        if owned_mm is not None and hasattr(owned_mm, "aclose"):
+            try:
+                await owned_mm.aclose()
+            except Exception:
+                logger.exception(
+                    "multimodal embedder aclose failed during _retrieve_inner cleanup"
+                )
+        raise
+
+
+def _build_page_refs(hits: list[Hit]) -> list[PageRef]:
+    """Aggregate fusion-ranked chunks into page-level refs.
+
+    ``score`` is the max chunk score for each path so an agent can
+    rank pages without re-aggregating. ``hit_chunk_ids`` is captured in
+    fusion-rank order (insertion order of hits) so the caller can
+    cross-reference back to ``chunks[]`` deterministically. Hits with
+    ``path=None`` are dropped — they cannot be cited as a page.
+    """
+    accum: dict[str, dict[str, Any]] = {}
+    for h in hits:
+        if h.path is None:
+            continue
+        bucket = accum.get(h.path)
+        if bucket is None:
+            accum[h.path] = {
+                "path": h.path,
+                "layer": h.layer,
+                "title": h.title,
+                "score": h.score,
+                "hit_chunk_ids": [h.chunk_id],
+            }
+        else:
+            bucket["hit_chunk_ids"].append(h.chunk_id)
+            if h.score > bucket["score"]:
+                bucket["score"] = h.score
+    refs = [PageRef(**bucket) for bucket in accum.values()]
+    refs.sort(key=lambda r: r.score, reverse=True)
+    return refs
+
+
+async def retrieve(
+    q: str,
+    path: str | Path | None = None,
+    *,
+    limit: int = 5,
+    embedder: EmbeddingProvider | None = None,
+    multimodal_embedder: MultimodalEmbeddingProvider | None = None,
+    reporter: ProgressReporter | None = None,
+) -> RetrieveResult:
+    """Hybrid-search the wiki and return chunks + page-level refs only.
+
+    Companion to ``query`` for retrieval-only consumers (typically AI
+    agents that intend to assemble their own answer): runs the same
+    fusion + multimodal pipeline as ``query`` via ``_retrieve_inner``
+    but skips the LLM step, so a caller without provider keys still
+    gets meaningful results.
+
+    ``reporter`` (optional) emits a ``retrieval_done`` partial mirroring
+    the wire shape used by ``/v1/query``; the route layer wraps this in
+    a ``final{result}`` event.
+    """
+    cfg, _root, storage = await _with_storage(path)
+    owned_mm: MultimodalEmbeddingProvider | None = None
+    try:
+        hits, owned_mm = await _retrieve_inner(
+            storage,
+            cfg,
+            q,
+            limit=limit,
+            embedder=embedder,
+            multimodal_embedder=multimodal_embedder,
+            reporter=reporter,
+        )
+        return RetrieveResult(chunks=hits, page_refs=_build_page_refs(hits))
+    finally:
+        if owned_mm is not None and hasattr(owned_mm, "aclose"):
+            await owned_mm.aclose()
+        await storage.close()
+
+
+async def query(
+    q: str,
+    path: str | Path | None = None,
+    *,
+    limit: int = 5,
+    llm: LLMProvider | None = None,
+    embedder: EmbeddingProvider | None = None,
+    multimodal_embedder: MultimodalEmbeddingProvider | None = None,
+    reporter: ProgressReporter | None = None,
+) -> QueryResult:
+    """Hybrid-search the wiki, feed the top hits to an LLM, and return cited answer.
+
+    When ``cfg.assets.multimodal`` is configured *and* a
+    ``multimodal_embedder`` is supplied (or buildable from the same
+    config), the searcher activates the asset-vector channel so visual
+    references contribute to retrieval.
+
+    ``reporter`` (optional) emits a ``retrieval_done`` partial with the
+    raw hits before the LLM step, then a final ``llm_done`` partial with
+    the answer text + usage. Streaming token-level partials land in
+    Phase 4 once provider ``complete_stream`` exists.
+    """
+    cfg, _root, storage = await _with_storage(path)
+    owned_mm: MultimodalEmbeddingProvider | None = None
+    _reporter: ProgressReporter = reporter or NoopReporter()
+    try:
+        _llm = llm
+        if _llm is None:
+            _llm = build_llm(cfg.provider)
+
+        hits, owned_mm = await _retrieve_inner(
+            storage,
+            cfg,
+            q,
+            limit=limit,
+            embedder=embedder,
+            multimodal_embedder=multimodal_embedder,
+            reporter=_reporter,
         )
 
         excerpts_block, citations = await _build_excerpts(storage, hits)

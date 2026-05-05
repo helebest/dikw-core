@@ -565,6 +565,10 @@ class HybridSearcher:
                     path=doc.path if doc else None,
                     title=doc.title if doc else None,
                     asset_refs=asset_records,
+                    layer=doc.layer if doc else None,
+                    start=chunk.start,
+                    end=chunk.end,
+                    text=chunk.text,
                 )
             )
         return hits

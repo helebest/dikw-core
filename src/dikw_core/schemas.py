@@ -134,6 +134,15 @@ class Hit(BaseModel):
     eval-side ``(path, seq) → named-id`` resolution. Image references
     appear via ``asset_refs``; per-asset retrieval as a first-class
     Hit kind is reserved for a follow-up PR.
+
+    ``layer`` / ``start`` / ``end`` / ``text`` are the agent-facing
+    fields populated by ``HybridSearcher.search`` for retrieval-only
+    consumers (``POST /v1/retrieve``): they let an agent assemble a
+    self-answer without re-fetching chunk text or guessing the doc's
+    layer from path conventions, and they form the anchor key joined
+    with ``GET /v1/base/pages/{path}`` 's ``anchors[]``. Pre-existing
+    ``snippet`` is the FTS-highlighted preview kept for human display;
+    ``text`` is the full chunk body for prompt assembly.
     """
 
     doc_id: str
@@ -144,6 +153,43 @@ class Hit(BaseModel):
     path: str | None = None
     title: str | None = None
     asset_refs: list[AssetRecord] = Field(default_factory=list)
+    layer: Layer | None = None
+    start: int | None = None
+    end: int | None = None
+    text: str | None = None
+
+
+class PageRef(BaseModel):
+    """One page-level aggregation of a retrieve response.
+
+    ``hit_chunk_ids`` lists the chunk_ids that landed under this page in
+    fusion-rank order; ``score`` is the max chunk score so the agent can
+    rank pages without re-aggregating. Exists only on the retrieve
+    surface — query keeps its citation list — so agents can decide
+    "read whole page" vs "use chunk excerpts" at one glance.
+    """
+
+    path: str
+    layer: Layer | None = None
+    title: str | None = None
+    score: float
+    hit_chunk_ids: list[int] = Field(default_factory=list)
+
+
+class RetrieveResult(BaseModel):
+    """Final payload for ``POST /v1/retrieve``.
+
+    Mirrors the wire-shape twin of ``QueryResult`` but without an LLM
+    answer: the caller (typically an AI agent) is expected to assemble
+    its own answer from ``chunks`` + ``page_refs``. ``chunks`` is a
+    superset of the same hits emitted earlier on the ``retrieval_done``
+    partial — that intermediate event omits ``text`` to keep the
+    streaming preview light, so callers needing the full chunk body
+    must read ``final.result.chunks`` (here).
+    """
+
+    chunks: list[Hit] = Field(default_factory=list)
+    page_refs: list[PageRef] = Field(default_factory=list)
 
 
 class LinkRecord(BaseModel):

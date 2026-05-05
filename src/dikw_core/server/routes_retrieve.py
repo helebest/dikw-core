@@ -1,20 +1,24 @@
-"""Query NDJSON streaming.
+"""Retrieve NDJSON streaming.
 
-``POST /v1/query`` is the one short-lived op that streams instead of going
-through the TaskManager: the response shape is a sequence of NDJSON
-events the client renders as it arrives. Wire shape:
+``POST /v1/retrieve`` is the retrieval-only sibling of ``/v1/query``: it
+runs the same hybrid-search pipeline but skips the LLM stage so an AI
+agent can assemble its own answer from chunks + page-level refs without
+spending a provider round-trip on the engine side. Wire shape:
 
-  {"type":"query_started","q":"...","limit":5}
+  {"type":"retrieve_started","q":"...","limit":5}
   {"type":"retrieval_done","hits":[...]}
-  {"type":"llm_token","delta":"..."}            # zero or more
-  {"type":"final","status":"succeeded","result":{...QueryResult...}}
+  {"type":"final","status":"succeeded","result":{...RetrieveResult...}}
 
-On error, the final event has ``status:"failed"`` and an ``error`` body.
-The route runs ``api.query`` in a sibling task, plumbs progress through a
-``_QueryStreamReporter`` into an asyncio queue, and yields each queued
-event out the response. Cancellation: when the client disconnects, the
-StreamingResponse generator's ``finally`` cancels the worker task — the
-engine's ``CancelToken`` then short-circuits the next retrieval/LLM step.
+Validation errors (empty ``q``, out-of-range ``limit``) return HTTP 4xx
+*before* the stream starts — clients branching on status code stay
+simple. Worker / runtime errors produce ``final{status:"failed"}`` with
+an ``error`` body so a partial stream is never surfaced as success. The
+hit list is intentionally repeated on ``final.result.chunks`` so a
+non-streaming caller can pick the single ``final`` event and drop the
+intermediate ``retrieval_done``. Cancellation: when the client
+disconnects, the StreamingResponse generator's ``finally`` cancels the
+worker task — the engine's ``CancelToken`` then short-circuits the next
+retrieval step.
 """
 
 from __future__ import annotations
@@ -42,16 +46,15 @@ from .runtime import ServerRuntime, get_runtime
 logger = logging.getLogger(__name__)
 
 
-class QueryRequest(BaseModel):
+class RetrieveRequest(BaseModel):
     q: str
     limit: int = 5
 
 
-class _QueryStreamReporter(StreamReporterBase):
-    """``api.query`` emits ``retrieval_done`` + ``llm_token`` partials and
-    a final ``llm_done`` we drop — the route reconstructs the full
-    ``QueryResult`` from the engine's return value, so ``llm_done`` would
-    be redundant on the wire."""
+class _RetrieveStreamReporter(StreamReporterBase):
+    """Only ``retrieval_done`` is meaningful for retrieve (no LLM tokens
+    to stream). Anything else falls through to the generic ``partial``
+    envelope inherited from the base."""
 
     async def partial(self, kind: str, payload: dict[str, Any]) -> None:
         if kind == "retrieval_done":
@@ -62,16 +65,6 @@ class _QueryStreamReporter(StreamReporterBase):
                     "hits": payload.get("hits", []),
                 }
             )
-        elif kind == "llm_token":
-            await self._queue.put(
-                {
-                    "type": "llm_token",
-                    "ts": isoformat_now(),
-                    "delta": payload.get("delta", ""),
-                }
-            )
-        elif kind == "llm_done":
-            return
         else:
             await super().partial(kind, payload)
 
@@ -79,10 +72,10 @@ class _QueryStreamReporter(StreamReporterBase):
 def make_router(*, auth_dep: Any) -> APIRouter:
     router = APIRouter(prefix="/v1", dependencies=[Depends(auth_dep)])
 
-    @router.post("/query")
-    async def post_query(
+    @router.post("/retrieve")
+    async def post_retrieve(
         request: Request,
-        body: QueryRequest = Body(...),
+        body: RetrieveRequest = Body(...),
     ) -> Any:
         rt: ServerRuntime = get_runtime(request.app)
         # Validate up front so a bad input fails the HTTP request rather
@@ -102,11 +95,11 @@ def make_router(*, auth_dep: Any) -> APIRouter:
             )
 
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        reporter = _QueryStreamReporter(queue)
+        reporter = _RetrieveStreamReporter(queue)
 
         async def _run() -> None:
             try:
-                result = await api.query(
+                result = await api.retrieve(
                     body.q, rt.root, limit=body.limit, reporter=reporter
                 )
                 await queue.put(
@@ -140,7 +133,7 @@ def make_router(*, auth_dep: Any) -> APIRouter:
                     }
                 )
             except Exception as e:
-                logger.exception("query stream worker failed")
+                logger.exception("retrieve stream worker failed")
                 await queue.put(
                     {
                         "type": "final",
@@ -161,19 +154,19 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         async def _gen() -> AsyncIterator[bytes]:
             yield serialise_event(
                 {
-                    "type": "query_started",
+                    "type": "retrieve_started",
                     "ts": isoformat_now(),
                     "q": body.q,
                     "limit": body.limit,
                 }
             )
             try:
-                # Heartbeat-or-event loop: a non-streaming LLM
-                # (``complete()`` fallback) or a slow first token would
-                # otherwise leave the wire silent past the client's
-                # 60s read timeout. Mirrors ``ndjson_lines``'s 15s
-                # heartbeat cadence so reverse proxies don't close the
-                # long-poll either.
+                # Heartbeat-or-event loop: retrieve is typically fast
+                # (sub-second) but a slow embedding endpoint or a large
+                # multimodal asset table can stretch the wire silent
+                # past the client's read timeout. Mirrors query's 15s
+                # cadence so reverse proxies don't close the long-poll
+                # either.
                 while True:
                     try:
                         event = await asyncio.wait_for(

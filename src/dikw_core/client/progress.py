@@ -276,6 +276,115 @@ class QueryStreamRenderer:
                 self._console.print(f"  - {hit}")
 
 
+class RetrieveStreamRenderer:
+    """Drain a ``POST /v1/retrieve`` NDJSON stream into a ``FinalEvent``.
+
+    Retrieve has no LLM stage to stream, so this renderer just collects
+    events until ``final`` and returns it — the CLI command picks the
+    output format (json / table) based on its own flag. Compared with
+    ``QueryStreamRenderer`` we deliberately don't print citations here:
+    the retrieve consumer is typically an agent that wants raw chunks +
+    page_refs JSON, and humans driving ``--format table`` get a
+    purpose-built table renderer at the CLI layer.
+    """
+
+    def __init__(self, console: Console, *, plain: bool = False) -> None:
+        self._console = console
+        self._plain = plain
+
+    async def run(
+        self, events: AsyncIterator[dict[str, Any]]
+    ) -> FinalEvent:
+        async for event in events:
+            ev_type = event.get("type")
+            if ev_type == "retrieve_started":
+                if not self._plain:
+                    self._console.print("[dim]retrieving…[/dim]", end="\r")
+            elif ev_type == "final":
+                return FinalEvent(
+                    status=str(event.get("status") or "succeeded"),
+                    result=_as_dict(event.get("result")),
+                    error=_as_dict(event.get("error")),
+                )
+            # retrieval_done / progress / log / partial / heartbeat all
+            # ignored — heartbeat is dropped at the transport layer; the
+            # rest are not user-facing for retrieve.
+        # Stream closed without final — synthetic failure for symmetry
+        # with QueryStreamRenderer.
+        return FinalEvent(status="failed", result=None, error=None)
+
+
+# Excerpt length cap for the retrieve table preview. Keeps each row to
+# roughly one terminal line; full text remains in ``--format json``
+# output for agents that need it.
+_RETRIEVE_TABLE_EXCERPT_CHARS = 120
+
+
+def render_retrieve_table(
+    console: Console, result: Mapping[str, Any]
+) -> None:
+    """Render a retrieve final.result as two stacked rich tables.
+
+    Optimised for human debugging of a retrieve call (``--format table``);
+    agents should use ``--format json`` instead.
+    """
+    chunks = result.get("chunks") or []
+    chunks_table = Table(
+        title="dikw retrieve · chunks",
+        show_header=True,
+        header_style="bold",
+    )
+    chunks_table.add_column("#", justify="right")
+    chunks_table.add_column("layer")
+    chunks_table.add_column("path")
+    chunks_table.add_column("seq", justify="right")
+    chunks_table.add_column("score", justify="right")
+    chunks_table.add_column("excerpt")
+    if isinstance(chunks, list):
+        for i, c in enumerate(chunks, start=1):
+            if not isinstance(c, dict):
+                continue
+            seq = c.get("seq")
+            score = c.get("score")
+            excerpt = str(c.get("snippet") or c.get("text") or "")
+            preview = excerpt[:_RETRIEVE_TABLE_EXCERPT_CHARS] + (
+                "…" if len(excerpt) > _RETRIEVE_TABLE_EXCERPT_CHARS else ""
+            )
+            chunks_table.add_row(
+                str(i),
+                str(c.get("layer") or ""),
+                str(c.get("path") or ""),
+                "" if seq is None else str(seq),
+                "" if score is None else f"{float(score):.3f}",
+                preview,
+            )
+    console.print(chunks_table)
+
+    page_refs = result.get("page_refs") or []
+    if isinstance(page_refs, list) and page_refs:
+        refs_table = Table(
+            title="dikw retrieve · page_refs",
+            show_header=True,
+            header_style="bold",
+        )
+        refs_table.add_column("layer")
+        refs_table.add_column("path")
+        refs_table.add_column("score", justify="right")
+        refs_table.add_column("hit chunks")
+        for r in page_refs:
+            if not isinstance(r, dict):
+                continue
+            score = r.get("score")
+            hit_ids = r.get("hit_chunk_ids") or []
+            refs_table.add_row(
+                str(r.get("layer") or ""),
+                str(r.get("path") or ""),
+                "" if score is None else f"{float(score):.3f}",
+                ", ".join(str(c) for c in hit_ids) if isinstance(hit_ids, list) else "",
+            )
+        console.print(refs_table)
+
+
 # ---- final-result rendering ---------------------------------------------
 
 
@@ -444,12 +553,14 @@ def _as_dict(value: Any) -> dict[str, Any] | None:
 __all__ = [
     "FinalEvent",
     "QueryStreamRenderer",
+    "RetrieveStreamRenderer",
     "TaskProgressRenderer",
     "render_check_report",
     "render_distill_report",
     "render_eval_report",
     "render_ingest_report",
     "render_lint_report",
+    "render_retrieve_table",
     "render_status",
     "render_synth_report",
 ]

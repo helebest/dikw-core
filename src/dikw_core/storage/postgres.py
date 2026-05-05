@@ -12,6 +12,7 @@ the ``vector(<dim>)`` column type. Mirrors the SQLite adapter exactly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
@@ -20,7 +21,12 @@ from collections.abc import Iterable, Sequence
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..domains.info.tokenize import WORD_OR_CJK_CHARS
+from ..domains.info.tokenize import (
+    WORD_OR_CJK_CHARS,
+    CjkTokenizer,
+    initialize_jieba,
+    preprocess_for_fts,
+)
 from ..schemas import (
     AssetEmbeddingRow,
     AssetKind,
@@ -76,11 +82,15 @@ class PostgresStorage:
         *,
         schema: str = "dikw",
         pool_size: int = 10,
+        cjk_tokenizer: CjkTokenizer = "none",
     ) -> None:
         self._dsn = dsn
         self._schema = schema
         self._pool_size = pool_size
         self._pool: AsyncConnectionPool | None = None
+        # Must match `_sanitize_fts` on the query side — locked at first
+        # ingest via `RetrievalConfig.cjk_tokenizer`.
+        self._cjk_tokenizer: CjkTokenizer = cjk_tokenizer
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -117,6 +127,11 @@ class PostgresStorage:
             open=False,
         )
         await self._pool.open()
+
+        # Warm up jieba's dictionary now so the ~0.3 s load lands in
+        # `connect()` instead of the first `replace_chunks` call.
+        if self._cjk_tokenizer == "jieba":
+            await asyncio.to_thread(initialize_jieba)
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -272,10 +287,26 @@ class PostgresStorage:
             async with conn.cursor() as cur:
                 await cur.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
                 for chunk in chunks:
+                    # `chunks.text` stores the original text; `chunks.fts`
+                    # is built from the same `preprocess_for_fts` output
+                    # the SQLite path uses, so jieba segmentation lands
+                    # in the index-side tsvector and matches the
+                    # `_sanitize_fts` query side byte-for-byte.
+                    fts_text = preprocess_for_fts(
+                        chunk.text, tokenizer=self._cjk_tokenizer
+                    )
                     await cur.execute(
-                        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text) "
-                        "VALUES (%s, %s, %s, %s, %s) RETURNING chunk_id",
-                        (doc_id, chunk.seq, chunk.start, chunk.end, chunk.text),
+                        "INSERT INTO chunks(doc_id, seq, start_off, end_off, text, fts) "
+                        "VALUES (%s, %s, %s, %s, %s, to_tsvector('simple', %s)) "
+                        "RETURNING chunk_id",
+                        (
+                            doc_id,
+                            chunk.seq,
+                            chunk.start,
+                            chunk.end,
+                            chunk.text,
+                            fts_text,
+                        ),
                     )
                     row = await cur.fetchone()
                     if row is None:
@@ -424,7 +455,11 @@ class PostgresStorage:
             return []
         sql = (
             "SELECT c.doc_id, c.chunk_id, "
-            "ts_rank(c.fts, to_tsquery('simple', %s)) AS score, "
+            # normalization=1: divides rank by 1 + log(document length).
+            # Default 0 ignores doclength entirely, which gives long docs an
+            # unfair advantage on CJK where common tokens dominate IDF-less
+            # ts_rank. Closer to BM25's length normalization.
+            "ts_rank(c.fts, to_tsquery('simple', %s), 1) AS score, "
             "ts_headline('simple', c.text, to_tsquery('simple', %s), "
             "  'StartSel=<mark>,StopSel=</mark>,ShortWord=2,MaxWords=25,MinWords=5') AS snip "
             "FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "

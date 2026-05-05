@@ -23,10 +23,12 @@ def build_storage(
     """Instantiate a Storage adapter. Paths are resolved relative to ``root`` if given.
 
     ``cjk_tokenizer`` controls how CJK text is segmented before being
-    written to the backend's full-text index. SQLite honours it via
-    ``preprocess_for_fts`` on ingest + query; Postgres ignores the knob
-    because its tokenization happens inside ``to_tsvector('simple', …)``
-    and isn't preprocessed in Python.
+    written to the backend's full-text index. Both backends honour it
+    symmetrically via ``preprocess_for_fts`` on ingest + query: SQLite
+    inserts the segmented body into ``documents_fts``; Postgres feeds
+    the same segmented string through ``to_tsvector('simple', …)`` into
+    a plain ``chunks.fts`` tsvector column. Same Python helper, same
+    byte-level result on both adapters.
     See ``RetrievalConfig.cjk_tokenizer`` for the wiki-level surface.
     """
     if isinstance(config, SQLiteStorageConfig):
@@ -43,7 +45,10 @@ def build_storage(
                 "install via `uv pip install dikw-core[postgres]`"
             ) from e
         return PostgresStorage(
-            config.dsn, schema=config.schema_, pool_size=config.pool_size
+            config.dsn,
+            schema=config.schema_,
+            pool_size=config.pool_size,
+            cjk_tokenizer=cjk_tokenizer,
         )
     raise StorageError(f"unknown storage backend: {config!r}")
 

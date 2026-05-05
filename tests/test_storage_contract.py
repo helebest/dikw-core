@@ -59,14 +59,16 @@ from .fakes import register_text_version
 async def storage(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Storage]:
     backend = request.param
     if backend == "sqlite":
-        s: Storage = SQLiteStorage(tmp_path / "index.sqlite")
+        s: Storage = SQLiteStorage(
+            tmp_path / "index.sqlite", cjk_tokenizer="jieba"
+        )
     elif backend == "postgres":
         from dikw_core.storage.postgres import PostgresStorage
 
         dsn = os.environ["DIKW_TEST_POSTGRES_DSN"]
         # Use a schema derived from the test tmpdir so parallel runs don't collide.
         schema = f"dikw_test_{abs(hash(str(tmp_path))) % 10_000_000:07d}"
-        s = PostgresStorage(dsn, schema=schema, pool_size=2)
+        s = PostgresStorage(dsn, schema=schema, pool_size=2, cjk_tokenizer="jieba")
     else:
         raise RuntimeError(f"unreachable: adapter {backend}")
 
@@ -538,6 +540,41 @@ async def test_fts_preserves_diacritics(storage: Storage) -> None:
         "indexed token (i.e. no implicit unaccent / remove_diacritics)"
     )
 
+
+async def test_fts_search_cjk_query_round_trip(storage: Storage) -> None:
+    """CJK ingest → CJK query must hit on both backends under jieba.
+
+    Regression guard for the asymmetry where PG's ``chunks.fts`` was a
+    ``GENERATED ALWAYS AS to_tsvector('simple', text)`` column: the
+    index side bypassed Python's jieba while the query side
+    (``_sanitize_fts``) still pre-segmented, so almost no Chinese
+    query could land a BM25 hit. Storage fixture pins
+    ``cjk_tokenizer='jieba'`` on both adapters; this test proves the
+    round-trip closes on both.
+    """
+    from dikw_core.domains.info.search import _sanitize_fts
+
+    doc = _make_doc("sources/cjk.md")
+    await storage.upsert_document(doc)
+    await storage.replace_chunks(
+        doc.doc_id,
+        [
+            ChunkRecord(
+                doc_id=doc.doc_id,
+                seq=0,
+                start=0,
+                end=12,
+                text="搜索引擎是信息检索的核心",
+            )
+        ],
+    )
+
+    sanitized = _sanitize_fts("搜索引擎", cjk_tokenizer="jieba")
+    hits = await storage.fts_search(sanitized, limit=10)
+    assert any(h.doc_id == doc.doc_id for h in hits), (
+        f"CJK round-trip failed on {type(storage).__name__}; "
+        f"sanitized query={sanitized!r}, hits={[h.doc_id for h in hits]}"
+    )
 
 
 def test_pg_fts_to_tsquery_string_translates_or_form() -> None:

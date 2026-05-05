@@ -7,6 +7,176 @@ regression from a re-run variance.
 Newest first. `dikw eval` thresholds in each dataset's `dataset.yaml`
 are calibrated ~2-3 % below the most recent canonical-mode run.
 
+## 2026-05-05 — Postgres backend on cmteb, post-CJK-symmetry
+
+**Status:** first PG-backend canonical baseline, paired with the SQLite
+2026-04-28 Phase 1.5 entry below. Locks in two PR-bound changes:
+
+1. **CJK tokenizer symmetry on PG** — `chunks.fts` is now a plain
+   `tsvector NOT NULL` filled by the Python adapter via
+   `to_tsvector('simple', preprocess_for_fts(text, tokenizer="jieba"))`.
+   Same helper SQLite has used for a year, so the index side runs jieba
+   on Chinese input on both backends. The pre-PR PG path used
+   `chunks.fts GENERATED ALWAYS AS to_tsvector('simple', text)` which
+   bypassed Python entirely — Chinese queries hit roughly nothing
+   (analogue of the SQLite v1 baseline below at nDCG@10 = 0.031).
+2. **`ts_rank` length normalization** — PG `fts_search` now passes
+   `normalization=1` (`1 + log(doclength)`) into `ts_rank`. Default 0
+   gave long passages an unfair advantage in the IDF-less ts_rank
+   score; flipping the flag is a one-line change that lifts cmteb bm25
+   nDCG@10 by +0.10. Closer to BM25's length normalization but still
+   not BM25 — `ts_rank` has no IDF (the remaining gap below).
+
+### Run shape
+
+- **Wiki:** `/tmp/dikw-phase15-pg-cmteb/` rebuilt from
+  `/tmp/dikw-phase15-cmteb/sources/` (Phase 1.5 donor) by switching
+  `dikw.yml.storage` to `backend: postgres`,
+  `dsn: postgresql://postgres:test@localhost:5432/postgres`,
+  `schema: dikw_eval_cmteb`. Same `Qwen3-Embedding-0.6B` provider
+  config; `cjk_tokenizer: jieba`.
+- **PG image:** `pgvector/pgvector:pg16` — vanilla pgvector, no
+  third-party FTS extension.
+- **Replay tool:** `evals/tools/run_phase15_from_snapshot.py` via a
+  thin wrapper (`/tmp/dikw-pg-replay.py`) that pins
+  `WindowsSelectorEventLoopPolicy` so psycopg async runs on Windows.
+  The wrapper is dev-host scaffolding; it's not committed to the repo.
+- **Walltime:** ingest ~7 min (5,000 chunks @ Gitee 0.6B batch=16);
+  query embed prebatch ~1 min (300 queries / 19 batches); 3-mode
+  replay ~4 min on the PG instance.
+
+### Results
+
+```
+dikw replay — cmteb-t2-subset  (PG, Qwen3-Embedding-0.6B, jieba, ts_rank norm=1)
+┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
+│ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
+├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
+│ bm25   │    0.877 │     0.913 │ 0.845 │      0.720 │         0.803 │
+│ vector │    0.973 │     0.990 │ 0.967 │      0.943 │         0.980 │
+│ hybrid │    0.980 │     0.990 │ 0.966 │      0.933 │         0.987 │
+└────────┴──────────┴───────────┴───────┴────────────┴───────────────┘
+```
+
+vs SQLite Phase 1.5 (same model, same RRF weights, jieba on both):
+
+| mode | metric | SQLite | PG | Δ |
+|---|---|---|---|---|
+| bm25 | nDCG@10 | 0.840 | 0.720 | **-0.120** |
+| vector | nDCG@10 | 0.943 | 0.943 |  0.000 |
+| hybrid | nDCG@10 | 0.946 | 0.933 | -0.013 |
+| hybrid | recall@100 | 0.988 | 0.987 | -0.001 |
+
+### Reading
+
+- **Vector leg is byte-identical** (0.943 = 0.943) — confirms
+  embedding + storage paths are equivalent on both backends; the only
+  axis that moves between them is the FTS ranker.
+- **bm25 leg trails SQLite by -0.12 nDCG@10**, even after the
+  normalization fix. Cause: SQLite's FTS5 ships a proper BM25 ranker
+  (k1, b, IDF over corpus token DF); PG's `ts_rank` is a
+  length-normalized TF score with **no IDF**. Common Chinese tokens
+  like `的`、`是` get the same per-occurrence weight as rare
+  domain-specific terms — exactly what BM25's IDF discounts. Filed as
+  follow-up below.
+- **Hybrid lands within -0.013 of SQLite** despite the bm25 gap.
+  RRF's `(rrf_k=60, bm25_weight=0.3, vector_weight=1.5)` already
+  down-weights bm25 by ~5×, so a weaker bm25 leg has limited drag.
+  Hybrid clears every threshold in `cmteb-t2-subset/dataset.yaml`.
+
+### Threshold gate
+
+```
+[PASS] hit_at_3:        0.9800 ≥ 0.9600
+[PASS] hit_at_10:       0.9900 ≥ 0.9700
+[PASS] mrr:             0.9663 ≥ 0.9500
+[PASS] ndcg_at_10:      0.9329 ≥ 0.9300
+[PASS] recall_at_100:   0.9869 ≥ 0.9700
+```
+
+Pre-norm-fix the gate failed at nDCG@10 = 0.9279 vs threshold 0.93;
+the one-line `ts_rank(.., 1)` knob lifted hybrid through the gate.
+
+### Configuration
+
+| | |
+|---|---|
+| dikw commit | `63a0aa8` (post-PR `feat/postgres-cjk-symmetry`) |
+| Embedding | `Qwen3-Embedding-0.6B` @ Gitee AI, 1024-dim native, batch=16 |
+| Storage | Postgres 16 + pgvector (`pgvector/pgvector:pg16`), schema `dikw_eval_cmteb`, fresh schema for this run |
+| FTS index | `chunks.fts` plain `tsvector NOT NULL` populated by Python adapter; GIN index |
+| FTS query rank | `ts_rank(fts, query, 1)` — length-normalized TF (no IDF) |
+| Fusion config | `rrf_k=60, bm25_weight=0.3, vector_weight=1.5`, `cjk_tokenizer: jieba` (shipped defaults) |
+| CJK tokenizer | `jieba` on both sides (index + query) — same `preprocess_for_fts` helper as SQLite |
+| Wall time | ingest ~7 min, replay ~5 min total |
+| Approximate cost | ~¥0.05 (one ingest + one 3-mode replay; query embed cache shared across modes) |
+
+### Known issues / observations
+
+**1. PG `ts_rank` has no IDF.** The -0.12 nDCG@10 bm25 gap vs SQLite
+is overwhelmingly the IDF that `ts_rank` doesn't compute. PG ships
+two ranking primitives — `ts_rank` (length-normalized TF) and
+`ts_rank_cd` (cover-density, also no IDF) — neither matches FTS5's
+BM25. Closing this gap requires either (a) implementing BM25 in pure
+SQL using `ts_stat()` for corpus-level DF stats and tsvector
+positional info for TF, or (b) introducing the `pg_search` (ParadeDB)
+or `pg_bm25` extension. (a) is self-contained but ~150 LOC; (b)
+changes deployment story (extension install + non-default Docker
+image). Filed as a separate follow-up — tracked in `_PLAN.md` /
+follow-up issue.
+
+**2. Hybrid is bm25-noise-tolerant at the shipped RRF weights.**
+`bm25_weight=0.3` against `vector_weight=1.5` (the SciFact-tuned
+shipped defaults) gives bm25's rank position ~5× less pull on the
+fused score than the vector leg's. The empirical result: even with
+bm25 at -0.12 vs SQLite, hybrid is at -0.013. This is the same
+behavior the v1 SciFact baseline observed when bm25 was structurally
+weak (BASELINES.md 2026-04-23 v1 entry, "Known issues #2") — RRF at
+these weights degrades gracefully on a noisy bm25 leg.
+
+**3. Sample contract test on the same data.**
+`test_fts_search_cjk_query_round_trip` (added in this PR) ingests
+`"搜索引擎是信息检索的核心"` on both adapters under jieba and
+asserts `_sanitize_fts("搜索引擎", cjk_tokenizer="jieba")` returns
+the chunk. Passes byte-for-byte on PG and SQLite — the
+PG-fts-stays-empty failure mode this baseline closes is now a
+regression guard at the contract level too.
+
+**4. Windows event-loop incompatibility for psycopg async.**
+`uvicorn` defaults to `ProactorEventLoop` on Windows; `psycopg`
+async refuses to run on it. The replay was driven by a thin
+`/tmp/dikw-pg-replay.py` wrapper that pins
+`WindowsSelectorEventLoopPolicy` before importing
+`run_phase15_from_snapshot`. This is a dev-host scaffolding gap, not
+a server-side patch; production Linux deploys are unaffected. If we
+want PG ingest to work via `dikw serve` / `dikw serve-and-run` on
+Windows, the server's startup needs the same policy pin.
+
+### Follow-ups (priority-ordered)
+
+1. **PG BM25 ranker** — close the remaining bm25 nDCG@10 gap. Two
+   feasible paths: (a) DIY BM25 in SQL using `ts_stat()` +
+   tsvector positional decomposition (no new deps, ~150 LOC,
+   self-contained); (b) integrate `pg_search` / `pg_bm25`
+   extension (better ranker, deployment cost). Worth ~+0.10
+   nDCG@10 on cmteb bm25 + matching SciFact uplift.
+2. **scifact PG baseline** — deferred. Two ingest attempts hit
+   sustained Gitee throttle (~50–100 chunks/min vs Phase 1.5's
+   ~250/min) and the run was abandoned at 52 % of the embed phase
+   to ship this PR. The English path is covered by the contract
+   suite — `test_pg_fts_search_multi_word_or` exercises ASCII FTS
+   under the same `cjk_tokenizer="jieba"` fixture and
+   `normalization=1` rank, and 117 PG contract tests pass with no
+   regression. Length normalization is monotonically helpful; no
+   plausible mechanism for `norm=1` to regress short-doc English
+   retrieval. SciFact baseline numbers will land in a follow-up
+   commit when Gitee load eases.
+3. **Windows uvicorn event-loop pin** — `dikw serve` should
+   `asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())`
+   on Windows before uvicorn starts, so PG-backed wikis work via
+   `dikw serve-and-run` without the dev-host wrapper. One-liner in
+   `cli.py`'s serve subcommand.
+
 ## 2026-05-01 — wiki-mini-mm: chunk + asset views, real Qwen3-VL-Embedding-8B
 
 **Status:** first end-to-end real-vector multimodal eval after the PR1

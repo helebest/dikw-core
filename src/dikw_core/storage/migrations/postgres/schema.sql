@@ -11,12 +11,19 @@
 -- tables are created lazily in Python so the engine can parameterise
 -- the embedding dimension at first insert. See storage/postgres.py.
 --
--- FTS surface: ``chunks.fts`` is a generated ``tsvector`` over
--- ``chunks.text`` indexed by GIN. ``Storage.fts_search`` consumes
--- ``info/search.py:_sanitize_fts``'s SQLite-flavored OR-form input via
--- ``to_tsquery`` (with a per-call format adapter
--- ``_fts_to_tsquery_string``); ``plainto_tsquery`` would re-tokenize
--- the sanitizer output and silently break multi-word queries.
+-- FTS surface: ``chunks.fts`` is a plain ``tsvector NOT NULL`` indexed
+-- by GIN. The Python adapter populates it on INSERT via
+-- ``to_tsvector('simple', preprocess_for_fts(text, tokenizer=cjk_tokenizer))``
+-- so the index side runs the *same* CJK tokenizer (jieba, when
+-- configured) as the query side's ``info/search.py:_sanitize_fts`` —
+-- guaranteeing byte-level symmetry with the SQLite backend's FTS5
+-- path. (A ``GENERATED ALWAYS AS to_tsvector('simple', text)`` column
+-- can't reach Python's jieba and would leave the index unsegmented for
+-- CJK input, dropping BM25 recall on Chinese queries.) ``fts_search``
+-- consumes the OR-form sanitizer output via ``to_tsquery`` with a
+-- per-call format adapter ``_fts_to_tsquery_string``;
+-- ``plainto_tsquery`` would re-tokenize the sanitizer output and
+-- silently break multi-word queries.
 
 CREATE TABLE IF NOT EXISTS meta_kv (
     key   TEXT PRIMARY KEY,
@@ -51,8 +58,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     start_off   INTEGER NOT NULL,
     end_off     INTEGER NOT NULL,
     text        TEXT NOT NULL,
-    fts         tsvector GENERATED ALWAYS AS
-                (to_tsvector('simple', coalesce(text,''))) STORED,
+    fts         tsvector NOT NULL,
     UNIQUE (doc_id, seq)
 );
 

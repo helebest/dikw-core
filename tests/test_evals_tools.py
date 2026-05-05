@@ -81,7 +81,7 @@ async def test_resolve_active_version_falls_back_to_cfg_when_none(
 
 
 class _NotSupportedStorage:
-    """Mirrors filesystem-style backends that don't implement versioning."""
+    """Stand-in for an adapter that raises NotSupported from versioning."""
 
     async def get_active_embed_version(
         self, *, modality: Literal["text", "multimodal"]

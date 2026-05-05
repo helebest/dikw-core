@@ -232,7 +232,7 @@ corpus so a misconfigured endpoint doesn't burn a full embedding run.
 
 ## Pluggable storage
 
-Three backends ship; switch by editing `storage.backend` in `dikw.yml`:
+Two backends ship; switch by editing `storage.backend` in `dikw.yml`:
 
 ```yaml
 storage:
@@ -251,14 +251,5 @@ storage:
   pool_size: 10
 ```
 
-DB-less, Obsidian-vault-native (zero extra deps, bounded to ≤ ~300 pages,
-FTS-only — switch to `sqlite` if you need dense retrieval):
-
-```yaml
-storage:
-  backend: filesystem
-  root: .dikw/fs
-```
-
-All three back ends implement the same `Storage` Protocol, so every
-`dikw` command behaves identically regardless of which one is active.
+Both backends implement the same `Storage` Protocol, so every `dikw`
+command behaves identically regardless of which one is active.

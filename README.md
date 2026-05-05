@@ -15,7 +15,7 @@ Inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6
   - **K**nowledge — LLM-authored wiki pages with `[[wikilinks]]`, `index.md`, and an append-only `log.md`.
   - **W**isdom — evidence-backed principles / lessons / patterns, human-approved, surfaced at query time.
 - Pluggable LLM providers (API-first): Anthropic + OpenAI-compatible (covers OpenAI, Azure, Ollama, DeepSeek, Gemini-compat).
-- Pluggable storage: SQLite+sqlite-vec (default), Postgres+pgvector (enterprise), Filesystem/Vault (Obsidian-native, DB-less) — swap by config.
+- Pluggable storage: SQLite+sqlite-vec (default), Postgres+pgvector (enterprise) — swap by config.
 - **Client / server architecture.** A long-lived `dikw serve` (FastAPI + NDJSON) hosts the engine; the `dikw client …` Typer CLI talks to it over HTTP, streams progress events for long ops, and supports cancel / resume.
 
 ## Install & quick start
@@ -181,11 +181,11 @@ for the reference impl.
 
 ## Storage
 
-Three backends ship, selected in `dikw.yml`:
+Two backends ship, selected in `dikw.yml`:
 
 ```yaml
 storage:
-  backend: sqlite          # sqlite | postgres | filesystem
+  backend: sqlite          # sqlite | postgres
 
   # --- sqlite (default): single-user local ---
   path: .dikw/index.sqlite
@@ -195,10 +195,6 @@ storage:
   # dsn: postgresql://user:pw@host:5432/dikw
   # schema: dikw
   # pool_size: 10
-
-  # --- filesystem: DB-less, Obsidian-vault native (≤ ~300 pages, FTS-only) ---
-  # backend: filesystem
-  # root: .dikw/fs
 ```
 
 - **SQLite + `sqlite-vec` + FTS5** — the default. No extras required.
@@ -207,11 +203,6 @@ storage:
   `pgvector/pgvector:pg16` Docker image). The adapter uses `tsvector`+GIN
   for FTS and `vector(N)` for embeddings; the vector dimension is set at
   first insert.
-- **Filesystem / vault** — zero extra deps. JSONL sidecars under
-  `.dikw/fs/`, in-process inverted-index FTS, no dense retrieval (use
-  the sqlite backend if you need vectors). Good for personal vaults;
-  not a multi-writer story. Emits a hint to switch backends once the
-  corpus outgrows the scale target.
 
 Engine code talks only to the `Storage` Protocol
 ([`storage/base.py`](./src/dikw_core/storage/base.py)); each adapter

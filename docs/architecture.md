@@ -67,7 +67,6 @@ src/dikw_core/
 │   ├── base.py              Storage Protocol (engine depends only on this)
 │   ├── sqlite.py            SQLite + sqlite-vec + FTS5 (default)
 │   ├── postgres.py          Postgres + pgvector + tsvector (optional extra)
-│   ├── filesystem.py        DB-less JSONL sidecars + in-proc FTS (zero deps)
 │   └── migrations/
 │       ├── sqlite/          schema SQL
 │       └── postgres/        schema SQL (vector extension)
@@ -84,9 +83,10 @@ engine depends only on their Protocol / abstract interface:
 
 1. **`SourceBackend`** — adding a format (PDF, Quarto, `.ipynb`) means
    writing one class and calling `register()`. No other change.
-2. **`Storage`** — every I/O crosses typed Pydantic DTOs. Postgres
-   (Phase 5) and the Obsidian-vault filesystem backend will slot in via
-   `storage/__init__.py`'s factory without touching engine code.
+2. **`Storage`** — every I/O crosses typed Pydantic DTOs. SQLite
+   (default) and Postgres (`[postgres]` extra) both slot in via
+   `storage/__init__.py`'s factory without touching engine code; new
+   adapters land the same way.
 3. **`LLMProvider` / `EmbeddingProvider`** — Anthropic and any
    OpenAI-compatible endpoint are wired today; llama-cpp-python for local
    inference is a drop-in.
@@ -143,9 +143,9 @@ index only chunk body text.
 remove_diacritics 0` (the `0` is explicit because the unicode61
 default is `1`, which still strips diacritics) so `café` and `cafe`
 are different tokens — same byte-level behavior as PG's
-`to_tsvector('simple', text)`. CJK input on the SQLite + filesystem
-adapters flows through `info.tokenize.preprocess_for_fts` (jieba
-when `cjk_tokenizer="jieba"`) on both ingest and query; PG does its
+`to_tsvector('simple', text)`. CJK input on the SQLite adapter flows
+through `info.tokenize.preprocess_for_fts` (jieba when
+`cjk_tokenizer="jieba"`) on both ingest and query; PG does its
 tokenization inside `to_tsvector` and is unaffected by the Python-
 side preprocessor.
 

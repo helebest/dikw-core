@@ -1,9 +1,9 @@
 """Storage contract tests.
 
-Parameterized over every backend so the MVP can't grow SQLite-only assumptions
-before Phase 5 lands the Postgres and Filesystem adapters. Phase 0 only
-exercises the SQLite adapter; Postgres/Filesystem parameterizations are
-declared but skip until their adapters exist.
+Parameterised over SQLite and Postgres so engine code can't grow
+backend-specific assumptions. Postgres requires
+``DIKW_TEST_POSTGRES_DSN`` and the contract job in CI provides one;
+locally the Postgres parametrisation skips when the env var is unset.
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ from dikw_core.schemas import (
 )
 from dikw_core.storage._schema import SCHEMA_VERSION, SCHEMA_VERSION_KEY
 from dikw_core.storage.base import NotSupported, Storage
-from dikw_core.storage.filesystem import FilesystemStorage
 from dikw_core.storage.sqlite import SQLiteStorage
 
 from .fakes import register_text_version
@@ -55,15 +54,12 @@ from .fakes import register_text_version
                 reason="Postgres adapter tests require DIKW_TEST_POSTGRES_DSN",
             ),
         ),
-        pytest.param("filesystem", id="filesystem"),
     ]
 )
 async def storage(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Storage]:
     backend = request.param
     if backend == "sqlite":
         s: Storage = SQLiteStorage(tmp_path / "index.sqlite")
-    elif backend == "filesystem":
-        s = FilesystemStorage(tmp_path / ".dikw" / "fs")
     elif backend == "postgres":
         from dikw_core.storage.postgres import PostgresStorage
 
@@ -106,24 +102,12 @@ def _make_doc(path: str, layer: Layer = Layer.SOURCE) -> DocumentRecord:
     )
 
 
-def _has_schema_constraints(storage: Storage) -> bool:
-    """True for SQL-backed adapters (sqlite/postgres) where SCHEMA
-    CHECK / UNIQUE constraints fire at write time. The filesystem
-    backend persists DTOs as JSONL with no DB-level invariants, so
-    schema-shape tests skip it.
-    """
-    cls_name = type(storage).__name__
-    return cls_name in {"SQLiteStorage", "PostgresStorage"}
-
-
 async def _column_info(storage: Storage, table: str) -> dict[str, dict[str, int]]:
     """Return ``{col_name: {'notnull': 0|1}}`` for a SQL adapter's table.
 
     Hides the SQLite (``PRAGMA table_info``) vs Postgres
     (``information_schema.columns``) split so schema-shape contract
-    tests don't repeat the introspection branch every time. Caller
-    must guard with ``_has_schema_constraints`` — filesystem has no
-    SQL columns and this helper raises if asked.
+    tests don't repeat the introspection branch every time.
     """
     cls_name = type(storage).__name__
     if cls_name == "SQLiteStorage":
@@ -171,11 +155,8 @@ async def test_migrate_is_idempotent(storage: Storage) -> None:
 
 async def test_meta_kv_value_is_not_null(storage: Storage) -> None:
     """``meta_kv.value`` must reject NULLs on both SQL adapters so the
-    schema_version writer can never silently drop the version. The
-    filesystem backend has no DB-level metadata table and is skipped.
+    schema_version writer can never silently drop the version.
     """
-    if not _has_schema_constraints(storage):
-        pytest.skip("backend has no meta_kv table")
     await storage.migrate()
 
     cols = await _column_info(storage, "meta_kv")
@@ -189,12 +170,8 @@ async def test_meta_kv_value_is_not_null(storage: Storage) -> None:
 async def test_migrate_records_schema_version(storage: Storage) -> None:
     """After ``migrate()`` the SQL adapters must record ``SCHEMA_VERSION``
     in ``meta_kv['schema_version']`` so a subsequent connect that sees a
-    matching fingerprint short-circuits to a no-op. The filesystem
-    adapter has no DB-level metadata table and is skipped.
+    matching fingerprint short-circuits to a no-op.
     """
-    if not _has_schema_constraints(storage):
-        pytest.skip("backend has no meta_kv table")
-
     await storage.migrate()
     assert await _read_schema_version(storage) == SCHEMA_VERSION
 
@@ -231,11 +208,7 @@ async def test_schema_version_mismatch_raises(storage: Storage) -> None:
     """A DB whose ``meta_kv['schema_version']`` doesn't match the code's
     ``SCHEMA_VERSION`` must be refused at ``migrate()`` time with
     rebuild instructions. Pre-alpha policy is rebuild-on-incompatibility.
-
-    The filesystem backend has no schema-version row and is skipped.
     """
-    if not _has_schema_constraints(storage):
-        pytest.skip("backend has no meta_kv table")
     from dikw_core.storage.base import StorageError
 
     await storage.migrate()
@@ -257,11 +230,7 @@ async def test_legacy_unfingerprinted_db_raises(storage: Storage) -> None:
     against legacy tables would stamp the DB as current and let later
     reads fail on missing columns. Loud-fail instead, consistent with
     the rebuild-on-incompatibility policy.
-
-    The filesystem backend has no schema-version row and is skipped.
     """
-    if not _has_schema_constraints(storage):
-        pytest.skip("backend has no meta_kv table")
     from dikw_core.storage.base import StorageError
 
     await storage.migrate()  # creates documents/etc + writes fingerprint
@@ -384,13 +353,7 @@ async def test_documents_hash_indexed(storage: Storage) -> None:
     """``documents.hash`` must be indexed so content-addressed lookups
     (``WHERE hash = ?``) don't fall back to a sequential scan once the
     legacy ``content`` table is gone.
-
-    Filesystem skips: no SQL indexes, the in-memory dicts already hash by
-    doc_id and the documents file is small enough to scan.
     """
-    if isinstance(storage, FilesystemStorage):
-        pytest.skip("filesystem adapter has no SQL indexes")
-
     # Schema-introspection assertion — by design the Storage Protocol exposes no
     # raw connection, so this contract test reaches into adapter internals to
     # verify the migration actually created the index. Adding a Protocol method
@@ -546,9 +509,8 @@ async def test_fts_preserves_diacritics(storage: Storage) -> None:
     diacritic-bearing chunk; searching ``"cafe"`` does not.
 
     Pre-PR SQLite stripped diacritics (``unicode61 remove_diacritics
-    2``); aligning to the PG/filesystem behavior (preserve as-is)
-    keeps cross-backend recall consistent without pulling in the
-    ``unaccent`` extension.
+    2``); aligning to PG behaviour (preserve as-is) keeps cross-backend
+    recall consistent without pulling in the ``unaccent`` extension.
     """
     doc = _make_doc("sources/diacritics.md")
     await storage.upsert_document(doc)
@@ -653,49 +615,6 @@ async def test_pg_fts_search_multi_word_or(storage: Storage) -> None:
     )
 
 
-async def test_filesystem_constructor_accepts_cjk_tokenizer(tmp_path: Path) -> None:
-    """``FilesystemStorage`` must accept ``cjk_tokenizer`` so the
-    ingest path can pre-segment CJK text the same way the SQLite
-    adapter does. Pre-PR the constructor only took ``root``, so the
-    factory ``build_storage`` couldn't thread the wiki-level
-    ``RetrievalConfig.cjk_tokenizer`` through.
-    """
-    s = FilesystemStorage(tmp_path / "fs", cjk_tokenizer="jieba")
-    await s.connect()
-    try:
-        # Sanity check: the value made it onto the instance and isn't
-        # lost behind a default.
-        assert s._cjk_tokenizer == "jieba"  # type: ignore[attr-defined]
-    finally:
-        await s.close()
-
-
-async def test_filesystem_fts_segments_cjk_via_jieba(tmp_path: Path) -> None:
-    """End-to-end: with ``cjk_tokenizer='jieba'`` the filesystem FTS
-    can find a CJK word inside a longer run, mirroring SQLite's
-    ``preprocess_for_fts`` ingest path. Pre-PR ``_tokenise`` was
-    ``r"[A-Za-z][A-Za-z0-9']+"`` — Chinese characters never matched
-    so a CJK wiki was effectively unsearchable on the filesystem
-    backend.
-    """
-    s = FilesystemStorage(tmp_path / "fs", cjk_tokenizer="jieba")
-    await s.connect()
-    await s.migrate()
-    try:
-        doc = _make_doc("sources/zh.md")
-        await s.upsert_document(doc)
-        await s.replace_chunks(
-            doc.doc_id,
-            [ChunkRecord(doc_id=doc.doc_id, seq=0, start=0, end=6, text="机器学习入门")],
-        )
-        hits = await s.fts_search("机器", limit=5)
-        assert any(h.doc_id == doc.doc_id for h in hits), (
-            "CJK token must be searchable when cjk_tokenizer='jieba'"
-        )
-    finally:
-        await s.close()
-
-
 async def test_pg_fts_search_empty_query_returns_empty(storage: Storage) -> None:
     """Sanitizer can produce an empty string when every token is
     a reserved word or punctuation. PG ``fts_search`` must short-circuit
@@ -775,9 +694,8 @@ async def test_vec_search_skips_zero_vector_embeddings(storage: Storage) -> None
 
 # ---- embed_cache (chunk-level content-hash cache) ------------------------
 #
-# Skip cleanly on backends that don't implement the cache (filesystem,
-# pre-alpha). The cache is keyed by (sha256(chunk.text), model) and
-# decouples embedding reuse from chunks.chunk_id, so re-ingest under
+# The cache is keyed by (sha256(chunk.text), model) and decouples
+# embedding reuse from chunks.chunk_id, so re-ingest under
 # replace_chunks's delete-and-reinsert semantics doesn't lose API spend
 # on byte-identical chunks.
 
@@ -930,103 +848,6 @@ async def test_list_chunks_missing_embedding(storage: Storage) -> None:
     by_id = {c.chunk_id: c for c in missing}
     assert by_id[chunk_ids[1]].text == "bbb"
     assert by_id[chunk_ids[2]].text == "ccc"
-
-
-def test_filesystem_init_rejects_embed_kwarg(tmp_path: Path) -> None:
-    """``embed`` was a stale knob from the cancelled PR-B plan.
-
-    The constructor must not silently accept it — Python's strict
-    keyword handling does the job once the parameter is dropped from
-    the signature.
-    """
-    with pytest.raises(TypeError):
-        FilesystemStorage(tmp_path / ".dikw" / "fs", embed=True)  # type: ignore[call-arg]
-
-
-async def test_filesystem_rejects_all_dense_methods(tmp_path: Path) -> None:
-    """Filesystem is FTS-only by design — every dense / version-registry
-    method must raise ``NotSupported`` with a message that names the
-    sqlite escape hatch, not "yet" (which would imply PR-B is still
-    coming).
-
-    Asset metadata methods (``upsert_asset`` / ``get_asset`` /
-    ``replace_chunk_asset_refs`` / ``chunk_asset_refs_for_chunks`` /
-    ``chunks_referencing_assets``) are deliberately excluded — they are
-    not embedding-only and keep their "not implemented yet" wording
-    (Phase 5).
-    """
-    fs = FilesystemStorage(tmp_path / ".dikw" / "fs")
-    await fs.connect()
-    await fs.migrate()
-    try:
-        cached_row = CachedEmbeddingRow(
-            content_hash="a" * 64,
-            version_id=1,
-            dim=4,
-            embedding=[1.0, 0.0, 0.0, 0.0],
-        )
-        text_version = EmbeddingVersion(
-            modality="text",
-            provider="dummy",
-            model="dummy",
-            revision="",
-            dim=4,
-            normalize=True,
-            distance="cosine",
-        )
-        # Lazy factories — eager coroutine construction would leak
-        # pending awaitables if the first assertion already failed.
-        cases: list[tuple[str, object]] = [
-            ("upsert_embeddings", lambda: fs.upsert_embeddings([])),
-            (
-                "get_cached_embeddings",
-                lambda: fs.get_cached_embeddings(["a" * 64], version_id=1),
-            ),
-            ("cache_embeddings", lambda: fs.cache_embeddings([cached_row])),
-            (
-                "list_chunks_missing_embedding",
-                lambda: fs.list_chunks_missing_embedding(version_id=1),
-            ),
-            ("vec_search", lambda: fs.vec_search([1.0, 0.0, 0.0, 0.0])),
-            (
-                "upsert_embed_version",
-                lambda: fs.upsert_embed_version(text_version),
-            ),
-            (
-                "get_active_embed_version",
-                lambda: fs.get_active_embed_version(modality="text"),
-            ),
-            ("list_embed_versions", lambda: fs.list_embed_versions()),
-            ("upsert_asset_embeddings", lambda: fs.upsert_asset_embeddings([])),
-            (
-                "vec_search_assets",
-                lambda: fs.vec_search_assets([1.0, 0.0, 0.0, 0.0], version_id=1),
-            ),
-            (
-                "list_assets_missing_embedding",
-                lambda: fs.list_assets_missing_embedding(version_id=1),
-            ),
-            (
-                "upsert_wisdom_embeddings",
-                lambda: fs.upsert_wisdom_embeddings([]),
-            ),
-            (
-                "vec_search_wisdom",
-                lambda: fs.vec_search_wisdom([1.0, 0.0, 0.0, 0.0], version_id=1),
-            ),
-            (
-                "list_wisdom_missing_embedding",
-                lambda: fs.list_wisdom_missing_embedding(version_id=1),
-            ),
-        ]
-        for label, factory in cases:
-            with pytest.raises(NotSupported) as excinfo:
-                await factory()  # type: ignore[operator]
-            msg = str(excinfo.value).lower()
-            assert "fts-only" in msg, f"{label}: missing 'FTS-only' in {msg!r}"
-            assert "sqlite" in msg, f"{label}: missing 'sqlite' in {msg!r}"
-    finally:
-        await fs.close()
 
 
 async def test_vec_search_returns_in_distance_order(storage: Storage) -> None:
@@ -1211,8 +1032,7 @@ async def test_wisdom_evidence_id_preserves_insertion_order(
 ) -> None:
     """``get_wisdom_evidence`` must return rows in insertion order across
     all backends. SQLite gained an explicit AUTOINCREMENT id (mirroring
-    PG's BIGSERIAL) so both adapters' ``ORDER BY id ASC`` is stable;
-    filesystem assigns positional ids on put_wisdom.
+    PG's BIGSERIAL) so both adapters' ``ORDER BY id ASC`` is stable.
     """
     doc = _make_doc("wiki/concept.md", layer=Layer.WIKI)
     await storage.upsert_document(doc)
@@ -1450,11 +1270,6 @@ async def test_chunk_asset_refs_constraint_zero_length_span(
     except NotSupported:
         pytest.skip("backend doesn't implement chunk_asset_refs yet")
 
-    # Filesystem backend has no schema-level CHECK; document the
-    # SQL-only contract by skipping it.
-    if not _has_schema_constraints(storage):
-        pytest.skip("backend has no schema-level CHECK")
-
     with pytest.raises(_integrity_error_types()):
         await storage.replace_chunk_asset_refs(
             cid,
@@ -1491,9 +1306,6 @@ async def test_chunk_asset_refs_constraint_duplicate_span(
         await storage.upsert_asset(b)
     except NotSupported:
         pytest.skip("backend doesn't implement chunk_asset_refs yet")
-
-    if not _has_schema_constraints(storage):
-        pytest.skip("backend has no schema-level UNIQUE")
 
     with pytest.raises(_integrity_error_types()):
         await storage.replace_chunk_asset_refs(

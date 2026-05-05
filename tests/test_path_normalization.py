@@ -2,8 +2,8 @@
 
 These tests exercise the data-boundary normalization (``data/path_norm.py``)
 and prove that re-ingesting a file under different macOS NFD / NTFS-case
-spellings collapses to a single ``documents`` row across the SQLite,
-Postgres, and filesystem adapters.
+spellings collapses to a single ``documents`` row across the SQLite and
+Postgres adapters.
 
 The tests construct strings directly with the relevant codepoints rather
 than depending on the host filesystem so the assertions hold on Linux

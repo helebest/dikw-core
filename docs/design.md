@@ -21,7 +21,7 @@ Design decisions already locked in (via clarifying Q&A):
 3. **Scoping deterministic, reasoning probabilistic** (Karpathy) — navigation uses deterministic structure (index.md, link graph, FTS); LLM calls are reserved for synthesis, distillation, and answering.
 4. **Server-as-the-engine, CLI-as-the-client** — the engine is a long-lived `dikw serve` (FastAPI + NDJSON streaming) process that owns storage and provider connections; humans drive it through `dikw client *`, agents through HTTP. There is no in-process import path for end-user operations.
 5. **Local-first data, pluggable compute** — the wiki lives on the user's filesystem; the default index is a local SQLite DB; only LLM calls leave the machine (and are provider-abstracted).
-6. **Pluggable storage** — the engine talks to an abstract **Storage** interface, not to SQL directly. Three backends are planned: **SQLite+sqlite-vec** (MVP, single-user local), **Postgres+pgvector** (enterprise, multi-user), and **Filesystem/Vault** (DB-less, Obsidian-native — matches Karpathy's small-scale philosophy). Swapping backends is a config change.
+6. **Pluggable storage** — the engine talks to an abstract **Storage** interface, not to SQL directly. Two backends ship: **SQLite+sqlite-vec** (default, single-user local) and **Postgres+pgvector** (enterprise, multi-user). Swapping backends is a config change.
 7. **Obsidian-compatible on-disk format** — the K & W layers are written as a plain markdown tree that Obsidian (or any MD editor) opens as a vault: `[[wikilinks]]`, YAML front-matter with tags, folder-based organization, daily-note conventions. The engine is a collaborator, not a walled garden; the user owns the files.
 8. **YAGNI + extension points** — ship a tight MVP, but put named seams (provider adapter, storage adapter, source-backend registry, prompt registry) where known growth vectors are.
 
@@ -67,13 +67,13 @@ The W layer is the novel bit and is spelled out in "Wisdom Layer Design" below.
           └───────────────────────▼────────────────────────┘
                 ┌─────────────────▼───────────────────────────┐
                 │  Storage adapter  (dikw_core.storage)       │
-                │  base · sqlite (MVP) · postgres · filesystem│
+                │  base · sqlite (default) · postgres         │
                 └─────────────────┬───────────────────────────┘
                                   │
-        ┌─────────────────────────┼───────────────────────────────┐
-        ▼                         ▼                               ▼
- SQLite+sqlite-vec+FTS5   Postgres+pgvector+tsvector     Filesystem/Vault
- (single-user, local)     (multi-user, enterprise)       (DB-less, Obsidian-native)
+        ┌─────────────────────────┴───────────────────────┐
+        ▼                                                 ▼
+ SQLite+sqlite-vec+FTS5                  Postgres+pgvector+tsvector
+ (single-user, local)                    (multi-user, enterprise)
                                   │
                  ┌────────────────▼─────────────────────────┐
                  │ Providers (LLM + Embedding)              │
@@ -87,9 +87,8 @@ Module boundaries are chosen so each subpackage fits in a single reading pass an
 
 - **Language**: Python 3.12+
 - **Packaging**: `uv` → `pyproject.toml` (PEP 621), `uv.lock` committed; single source layout under `src/dikw_core/`
-- **Storage (MVP, default)**: stdlib `sqlite3` + `sqlite-vec` (pip) for vectors; FTS5 built into SQLite. Behind a `Storage` Protocol.
-- **Storage (planned, enterprise)**: Postgres 15+ with `pgvector` ≥0.6 and `tsvector` + GIN for full-text, via `psycopg[binary,pool]`. Optional extra: `uv pip install dikw-core[postgres]`.
-- **Storage (planned, vault-native)**: Filesystem backend — the vault IS the index. No DB. Chunks/links/wisdom-items live in `.dikw/` JSON sidecars; retrieval is FTS + LLM-driven navigation over `index.md` + link graph (no dense retrieval — users who outgrow lexical-only flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest). Matches Karpathy's "scoping deterministic, reasoning probabilistic" claim at ≤~200 pages. No extra dep footprint.
+- **Storage (default)**: stdlib `sqlite3` + `sqlite-vec` (pip) for vectors; FTS5 built into SQLite. Behind a `Storage` Protocol.
+- **Storage (enterprise)**: Postgres 15+ with `pgvector` ≥0.6 and `tsvector` + GIN for full-text, via `psycopg[binary,pool]`. Optional extra: `uv pip install dikw-core[postgres]`.
 - **Schemas**: Pydantic v2 for config, records, tool I/O
 - **Markdown**: `markdown-it-py` + `python-frontmatter`; wiki-link parsing via a small in-repo module (not a heavy dep)
 - **LLM SDKs**: `anthropic`, `openai` (the `openai` SDK covers all OpenAI-compatible endpoints), behind a thin provider interface
@@ -125,12 +124,11 @@ dikw-core/
 │   ├── config.py             # Pydantic models + YAML loader
 │   ├── schemas.py            # cross-layer record types
 │   │
-│   ├── storage/              # Storage adapters — SQLite now; Postgres + Filesystem later
+│   ├── storage/              # Storage adapters — SQLite (default) + Postgres
 │   │   ├── __init__.py       # factory: resolves backend from config
 │   │   ├── base.py           # Storage Protocol + typed DTOs
-│   │   ├── sqlite.py         # SQLite + sqlite-vec + FTS5 implementation (MVP)
-│   │   ├── postgres.py       # Phase 5 — tsvector + pgvector (optional extra)
-│   │   ├── filesystem.py     # Phase 5 — DB-less, Obsidian-vault-native
+│   │   ├── sqlite.py         # SQLite + sqlite-vec + FTS5 implementation (default)
+│   │   ├── postgres.py       # tsvector + pgvector (optional [postgres] extra)
 │   │   └── migrations/       # per-backend schema (single schema.sql each)
 │   │       ├── sqlite/       #   schema.sql
 │   │       └── postgres/     #   schema.sql
@@ -208,7 +206,6 @@ my-wiki/
 │   └── _candidates/          # LLM proposals awaiting human review
 └── .dikw/                    # engine-managed, gitignored by default
     ├── index.sqlite          # I layer when storage.backend=sqlite
-    ├── fs/                   # I layer when storage.backend=filesystem (JSON sidecars)
     └── cache/                # model/artifact caches (backend-agnostic)
 ```
 
@@ -229,18 +226,13 @@ provider:
   embedding_model: text-embedding-3-small
   embedding_base_url: https://api.openai.com/v1
 storage:
-  backend: sqlite          # sqlite | postgres | filesystem
+  backend: sqlite          # sqlite | postgres
   # --- sqlite-specific (default) ---
   path: .dikw/index.sqlite
-  # --- postgres-specific (Phase 5) ---
+  # --- postgres-specific ---
   # dsn: postgresql://user:pass@host:5432/dikw
   # schema: dikw            # isolates multi-tenant deployments
   # pool_size: 10
-  # --- filesystem-specific (Phase 5, Obsidian-native, FTS-only) ---
-  # root: .dikw/fs          # JSON sidecar directory inside the vault
-  # max_pages_hint: 300     # warn + suggest switching to sqlite above this
-  # Dense retrieval is sqlite/postgres only — switch backends and
-  # re-ingest if you need vector search.
 schema:
   description: "Personal research wiki on AI safety"
   page_types: [entity, concept, note]
@@ -490,30 +482,14 @@ Design constraints:
 - **No leaky query objects.** All inputs and outputs are plain Pydantic DTOs. No `cursor`, no `Session`, no backend-specific types crossing the boundary.
 - **Hybrid search stays outside storage.** `info/search.py` owns RRF fusion / reranking; storage exposes only the two primitives (`fts_search`, `vec_search`) since the two backends express those very differently. This is the right abstraction seam — high enough to hide dialect, low enough to avoid re-implementing the fusion in each adapter.
 - **Migrations are backend-owned.** `storage/migrations/sqlite/` ships SQL files; `storage/migrations/postgres/` will ship equivalents. A shared `Migrator` drives `await storage.migrate()`.
-- **Contract tests.** `tests/test_storage_contract.py` defines a single pytest suite parameterized over `[sqlite, postgres]`; the Postgres variant skips unless `DIKW_TEST_POSTGRES_DSN` is set. This prevents the MVP from growing SQLite-only assumptions before Phase 5.
+- **Contract tests.** `tests/test_storage_contract.py` defines a single pytest suite parameterized over `[sqlite, postgres]`; the Postgres variant skips unless `DIKW_TEST_POSTGRES_DSN` is set. This keeps engine code from growing backend-specific assumptions.
 - **Transactional boundary.** One unit of work per engine operation (e.g., a single `ingest(path)` is one transaction on the adapter). Adapters are responsible for honoring that — SQLite via `BEGIN IMMEDIATE`, Postgres via `psycopg` transactions.
 
-The Postgres adapter (Phase 5) is installed as an **optional extra** so SQLite users never pay for the `psycopg`/`asyncpg` dependency footprint:
+The Postgres adapter is installed as an **optional extra** so SQLite users never pay for the `psycopg` dependency footprint:
 ```toml
 [project.optional-dependencies]
 postgres = ["psycopg[binary,pool] >=3.2", "pgvector >=0.3"]
 ```
-
-### Filesystem / Vault backend (Phase 5, Obsidian-native, FTS-only)
-
-Purpose: a DB-less mode where the Obsidian vault itself holds everything the engine needs, so the whole knowledge base is one portable, human-readable directory.
-
-How it maps to the Storage Protocol:
-- `upsert_document` — the files already exist on disk; this becomes a small JSON manifest in `.dikw/fs/documents.jsonl` keyed by content hash (path + title + mtime + layer).
-- `fts_search` — simple in-process scan (lunr-style inverted index built at startup from the manifest) or just substring + front-matter tag filtering. Good enough at ≤200 pages.
-- `vec_search` — **always raises `NotSupported`**. The filesystem backend is FTS-only by design (rationale: at ≤300-page scale, BM25 + LLM-nav adds enough signal that a third version-registry implementation isn't worth the maintenance surface). `info/search.py` catches this and degrades to a **navigation mode**: pass `index.md` + relevant folders' file list to the LLM, let it pick pages to read, then answer. Users who need dense retrieval flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest.
-- `upsert_link` / `links_from` / `links_to` — maintained in `.dikw/fs/links.jsonl`, regenerated from parsing wiki MD on `ingest` / `synth`.
-- `put_wisdom` / `list_wisdom` / `set_wisdom_status` — wisdom items are already individual markdown files; their status is just the `status:` front-matter field. The adapter reads/writes that field rather than a separate table.
-
-Constraints and honesty:
-- Not a scale story — `max_pages_hint` defaults to 300; above that the engine emits a one-shot suggestion to switch `storage.backend` to `sqlite` in `dikw.yml` and re-ingest.
-- No cross-session locking — the filesystem backend assumes a single writer at a time. Enterprise deployments should use Postgres.
-- The storage contract suite parametrizes against filesystem with vec / version-registry methods asserting `NotSupported` (see `tests/test_storage_contract.py::test_filesystem_rejects_all_dense_methods`); FTS, link, and wisdom paths share the cross-backend contract tests.
 
 ## Provider Abstraction
 
@@ -566,8 +542,7 @@ Prompt caching: when the provider is Anthropic, use the `cache_control` param on
 - **Phase 4 — Polish:** OpenAI-compat provider completeness (Ollama and Azure verified), prompt-caching on Anthropic paths, packaging for PyPI (`pip install dikw-core`), docs site, GitHub Actions release automation.
 - **Phase 5 — Alternate storage adapters:**
   - **Postgres (enterprise):** `storage/postgres.py` using `psycopg[binary,pool]` + `pgvector`, `migrations/postgres/schema.sql` with `tsvector`+GIN for FTS and `vector(N)` for embeddings. Contract test suite runs green against a `postgres:16`+`pgvector` container in CI. Packaged as `dikw-core[postgres]` optional extra.
-  - **Filesystem / vault (Obsidian-native):** `storage/filesystem.py` — JSON sidecars under `.dikw/fs/`, in-process FTS, and LLM-navigation fallback. No extra deps. **FTS-only by design** — no vector search; users who outgrow lexical-only flip `storage.backend` to `sqlite` in `dikw.yml` and re-ingest.
-  - Acceptance: the Phase 1–3 verification script runs end-to-end against each adapter with only `storage.backend` flipped in `dikw.yml`.
+  - Acceptance: the Phase 1–3 verification script runs end-to-end against the Postgres adapter with only `storage.backend` flipped in `dikw.yml`.
 
 Each phase is a landable slice: CI green, tests added, docs updated.
 
@@ -599,7 +574,6 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 8. `uv run dikw serve --wiki .` launches; a `POST /v1/query` round-trip from any HTTP client (e.g. `dikw client query`) returns the same answer as step 7.
 9. Swap provider in `dikw.yml` from Anthropic to OpenAI-compatible (pointed at Ollama locally or OpenAI) and repeat step 4 — works unchanged.
 10. (After Phase 5, Postgres) `docker compose up postgres` (with `pgvector` image), set `storage.backend: postgres` in `dikw.yml`, rerun steps 3–8 against the Postgres adapter — every assertion holds, no engine code changes. The storage contract test suite runs green under `DIKW_TEST_POSTGRES_DSN=...` in CI.
-11. (After Phase 5, Vault) Scaffold an Obsidian vault under `examples/obsidian-vault` with a hand-written `dikw.yml` (`storage.backend: filesystem`, `root: .dikw/fs`), open the folder in Obsidian, confirm wikilinks in `wiki/` render and files can be hand-edited; run `dikw synth` + `dikw distill` + `dikw query`; confirm the engine falls back to LLM-navigation mode (filesystem is FTS-only, `vec_search` raises `NotSupported`) and still returns cited answers from `index.md`-driven retrieval; verify `.dikw/` is present in Obsidian's ignore list.
 
 ## Open execution-time decisions (not blockers for plan approval)
 

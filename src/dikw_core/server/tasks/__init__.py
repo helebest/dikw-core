@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import assert_never
 
 from ...config import (
     DikwConfig,
-    FilesystemStorageConfig,
     PostgresStorageConfig,
     SQLiteStorageConfig,
 )
@@ -49,7 +49,7 @@ def build_task_store(
     """Pick a TaskStore matching the wiki's storage backend.
 
     Per the migration plan's Phase-0 decision:
-      * SQLite or Filesystem wiki backends → ``<root>/.dikw/server-tasks.db``
+      * SQLite wiki backend → ``<root>/.dikw/server-tasks.db``
         (a SQLite file regardless of which the wiki uses).
       * Postgres wiki backend → a separate Postgres database whose DSN
         comes from ``DIKW_SERVER_TASKS_DSN`` (intentionally distinct from
@@ -78,14 +78,12 @@ def build_task_store(
 
         return PostgresTaskStore(dsn=dsn, instance_id=instance_id)
 
-    if isinstance(storage_cfg, SQLiteStorageConfig | FilesystemStorageConfig):
+    if isinstance(storage_cfg, SQLiteStorageConfig):
         return SqliteTaskStore(
             path=root / _DEFAULT_TASKS_DB_PATH, instance_id=instance_id
         )
 
-    raise TaskStoreError(
-        f"unrecognised storage backend: {type(storage_cfg).__name__}"
-    )
+    assert_never(storage_cfg)
 
 
 __all__ = [

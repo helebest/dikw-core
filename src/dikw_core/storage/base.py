@@ -46,16 +46,18 @@ class StorageError(RuntimeError):
 
 
 class NotSupported(StorageError):
-    """Raised by an adapter when an operation isn't supported in its mode.
+    """Raised by an adapter when an operation isn't supported in its current state.
 
-    For example, the filesystem backend with ``embed=false`` raises this from
-    ``vec_search`` so ``info/search.py`` can fall back to LLM-navigation mode.
+    For example, ``vec_search`` raises this on a fresh wiki where no text
+    embeddings have been indexed yet (no ``embed_versions`` row, or the
+    per-version vec table hasn't been created), so ``info/search.py``
+    can fall back to FTS-only ranking.
     """
 
 
 @runtime_checkable
 class Storage(Protocol):
-    """Abstract storage backend. Implementations: SQLite (MVP), Postgres, Filesystem."""
+    """Abstract storage backend. Implementations: SQLite (default), Postgres."""
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -268,8 +270,7 @@ class Storage(Protocol):
         Returns at most ``limit`` ``WisdomVecHit`` rows ordered by
         ascending cosine distance (smaller = more similar). Empty index
         returns ``[]`` — same shape as ``vec_search`` /
-        ``vec_search_assets``. Backends without dense retrieval (e.g.
-        the filesystem adapter, FTS-only by design) raise
+        ``vec_search_assets``. Adapters with no wisdom vectors yet raise
         ``NotSupported``; the caller in ``wisdom/apply.py`` falls back
         to the Jaccard path.
         """

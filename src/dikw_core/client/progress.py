@@ -453,6 +453,73 @@ def render_lint_report(console: Console, report: Mapping[str, Any]) -> None:
     console.print(table)
 
 
+def render_health_report(console: Console, report: Mapping[str, Any]) -> None:
+    """Render a ``GET /v1/health`` response as stacked rich tables.
+
+    Used by ``dikw client health --format table``; the JSON-default path
+    is the agent contract and skips this renderer.
+    """
+    overview = Table(title="dikw health", show_header=True, header_style="bold")
+    overview.add_column("field", justify="left")
+    overview.add_column("value", justify="left")
+    overview.add_row("status", str(report.get("status") or ""))
+    overview.add_row("version", str(report.get("version") or ""))
+    overview.add_row("base_root", str(report.get("base_root") or ""))
+    overview.add_row("storage_engine", str(report.get("storage_engine") or ""))
+    console.print(overview)
+
+    counts = report.get("layer_counts") or {}
+    if isinstance(counts, dict):
+        counts_table = Table(
+            title="layer counts", show_header=True, header_style="bold"
+        )
+        counts_table.add_column("layer")
+        counts_table.add_column("count", justify="right")
+        for key in ("sources", "wiki_pages", "wisdom_items", "chunks"):
+            counts_table.add_row(key, str(int(counts.get(key) or 0)))
+        console.print(counts_table)
+
+    providers = report.get("providers") or {}
+    if isinstance(providers, dict):
+        providers_table = Table(
+            title="providers", show_header=True, header_style="bold"
+        )
+        providers_table.add_column("leg")
+        providers_table.add_column("provider")
+        providers_table.add_column("model")
+        providers_table.add_column("base_url")
+        providers_table.add_column("api_key", justify="center")
+        for leg in ("llm", "embedding"):
+            info = providers.get(leg)
+            if not isinstance(info, dict):
+                continue
+            providers_table.add_row(
+                leg,
+                str(info.get("provider") or ""),
+                str(info.get("model") or ""),
+                str(info.get("base_url") or "(default)"),
+                "✓" if info.get("api_key_present") else "✗",
+            )
+        console.print(providers_table)
+        embedding = providers.get("embedding")
+        if isinstance(embedding, dict):
+            mm = embedding.get("multimodal")
+            if isinstance(mm, dict):
+                mm_table = Table(
+                    title="multimodal embedding",
+                    show_header=True,
+                    header_style="bold",
+                )
+                mm_table.add_column("field")
+                mm_table.add_column("value")
+                for key in ("provider", "model", "dim", "distance", "base_url"):
+                    mm_table.add_row(
+                        key,
+                        str(mm.get(key) if mm.get(key) is not None else "(default)"),
+                    )
+                console.print(mm_table)
+
+
 def render_status(console: Console, counts: Mapping[str, Any]) -> None:
     table = Table(title="dikw status", show_header=True, header_style="bold")
     table.add_column("layer", justify="left")
@@ -558,6 +625,7 @@ __all__ = [
     "render_check_report",
     "render_distill_report",
     "render_eval_report",
+    "render_health_report",
     "render_ingest_report",
     "render_lint_report",
     "render_retrieve_table",

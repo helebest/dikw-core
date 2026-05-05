@@ -112,6 +112,16 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         rt: ServerRuntime = get_runtime(request.app)
         return await api.status(rt.root)
 
+    @router.get("/health", response_model=api.HealthReport)
+    async def health(request: Request) -> api.HealthReport:
+        # Structured server self-description (gbrain ``/health`` shape):
+        # base_root + storage_engine + flat layer counts + resolved
+        # provider config (model / dim / base_url / api_key_present).
+        # Distinct from the bare-bones ``/v1/healthz`` k8s liveness probe
+        # above — health here is the agent-bootstrap entry point.
+        rt: ServerRuntime = get_runtime(request.app)
+        return await api.health(rt.root)
+
     @router.post("/check", response_model=api.CheckReport)
     async def check(
         request: Request,

@@ -33,7 +33,7 @@ import zlib
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -123,9 +123,15 @@ __all__ = [
     "CheckReport",
     "Citation",
     "DistillReport",
+    "EmbeddingInfo",
+    "HealthReport",
     "IngestReport",
+    "LayerCounts",
+    "LlmInfo",
+    "MultimodalInfo",
     "PageRef",
     "ProbeResult",
+    "ProvidersInfo",
     "QueryResult",
     "RetrieveResult",
     "ReviewError",
@@ -135,6 +141,7 @@ __all__ = [
     "check_providers",
     "distill",
     "find_config",
+    "health",
     "ingest",
     "init_wiki",
     "lint",
@@ -390,6 +397,117 @@ class CheckReport(BaseModel):
         return bool(legs) and all(p.ok for p in legs)
 
 
+# ---- /v1/health DTOs ----------------------------------------------------
+#
+# Surface what an agent needs to drive dikw without leaking what it
+# doesn't: the health report exposes the *resolved* provider config
+# (provider type, model, base_url, dim/normalize/distance, batch, retry
+# budgets) so an agent inspects what server it just attached to without
+# re-reading dikw.yml; ``api_key_present`` is a bool — never the value.
+# Storage DSN / SQLite path / API keys are deliberately omitted.
+
+
+class LlmInfo(BaseModel):
+    """Resolved LLM config in use by the running server.
+
+    The ``provider`` literal is the protocol name (``anthropic_compat`` /
+    ``openai_compat``), not the vendor — vendor identity is implicit in
+    ``base_url``. ``api_key_present`` reflects the corresponding env var
+    for the chosen protocol (``ANTHROPIC_API_KEY`` or ``OPENAI_API_KEY``);
+    it never carries the key value.
+    """
+
+    provider: Literal["anthropic_compat", "openai_compat"]
+    model: str
+    base_url: str | None
+    max_retries: int
+    max_tokens_query: int
+    max_tokens_synth: int
+    max_tokens_distill: int
+    timeout_seconds: float
+    api_key_present: bool
+
+
+class MultimodalInfo(BaseModel):
+    """Resolved multimodal embedding config when ``cfg.assets.multimodal``
+    is set; absent (``embedding.multimodal is None``) on text-only setups.
+
+    No ``api_key_present`` field — the multimodal embedder shares
+    ``DIKW_EMBEDDING_API_KEY`` with the text embedder, surfaced once on
+    ``EmbeddingInfo``.
+    """
+
+    provider: str
+    model: str
+    revision: str
+    dim: int
+    normalize: bool
+    distance: Literal["cosine", "l2", "dot"]
+    batch: int
+    base_url: str | None
+
+
+class EmbeddingInfo(BaseModel):
+    """Resolved embedding config in use by the running server.
+
+    ``api_key_present`` reflects ``DIKW_EMBEDDING_API_KEY`` — dikw
+    deliberately never falls back to ``OPENAI_API_KEY`` here so LLM and
+    embedding keys can differ. ``multimodal`` is nested rather than
+    siblings on ``ProvidersInfo`` to match the engine's mental model
+    (multimodal is a sub-mode of the embedding leg).
+    """
+
+    provider: Literal["openai_compat"]
+    model: str
+    base_url: str | None
+    dim: int
+    revision: str
+    normalize: bool
+    distance: Literal["cosine", "l2", "dot"]
+    batch_size: int
+    max_retries: int
+    timeout_seconds: float
+    provider_label: str | None
+    api_key_present: bool
+    multimodal: MultimodalInfo | None = None
+
+
+class ProvidersInfo(BaseModel):
+    llm: LlmInfo
+    embedding: EmbeddingInfo
+
+
+class LayerCounts(BaseModel):
+    """Flat agent-facing counts derived from ``StorageCounts``.
+
+    Keep the shape stable across releases: agents probing health rely on
+    these names. The richer ``StorageCounts`` (per-status wisdom buckets,
+    embeddings, links, …) stays available via ``GET /v1/status``.
+    """
+
+    sources: int
+    wiki_pages: int
+    wisdom_items: int
+    chunks: int
+
+
+class HealthReport(BaseModel):
+    """``GET /v1/health`` payload — server self-description.
+
+    Intentionally narrow vs ``StorageCounts`` + ``CheckReport``: a probing
+    agent should be able to learn (a) is a server running here, (b) which
+    base it points at, (c) what providers are wired up, in one round-trip
+    that never blocks on outbound provider calls.
+    """
+
+    status: Literal["ok"] = "ok"
+    version: str
+    base_root: str
+    storage_engine: Literal["sqlite", "postgres"]
+    layer_counts: LayerCounts
+    providers: ProvidersInfo
+
+
 # ---- wiki scaffolding (Phase 0) -----------------------------------------
 
 
@@ -444,6 +562,90 @@ async def status(path: str | Path | None = None) -> StorageCounts:
         return await storage.counts()
     finally:
         await storage.close()
+
+
+def _llm_api_key_env(provider: Literal["anthropic_compat", "openai_compat"]) -> str:
+    # Mirror the env vars used by ``providers.{anthropic_compat,openai_compat}``;
+    # health must reflect the same lookup the runtime would do.
+    return "ANTHROPIC_API_KEY" if provider == "anthropic_compat" else "OPENAI_API_KEY"
+
+
+async def health(path: str | Path | None = None) -> HealthReport:
+    """Server self-description for agent bootstrap probes.
+
+    Opens storage briefly to read ``counts()``; never invokes the LLM /
+    embedding providers (so a misconfigured key does not 5xx the health
+    probe). Returned config is the *resolved* shape — what the server
+    actually uses — minus secrets (no API keys, no DSN, no SQLite path).
+    """
+    import os
+
+    from . import __version__ as _pkg_version
+
+    cfg, root, storage = await _with_storage(path)
+    try:
+        counts = await storage.counts()
+    finally:
+        await storage.close()
+
+    by_layer = counts.documents_by_layer
+    layer_counts = LayerCounts(
+        sources=int(by_layer.get("source", 0)),
+        wiki_pages=int(by_layer.get("wiki", 0)),
+        wisdom_items=int(by_layer.get("wisdom", 0)),
+        chunks=counts.chunks,
+    )
+
+    p = cfg.provider
+    llm_info = LlmInfo(
+        provider=p.llm,
+        model=p.llm_model,
+        base_url=p.llm_base_url,
+        max_retries=p.llm_max_retries,
+        max_tokens_query=p.llm_max_tokens_query,
+        max_tokens_synth=p.llm_max_tokens_synth,
+        max_tokens_distill=p.llm_max_tokens_distill,
+        timeout_seconds=p.llm_timeout_seconds,
+        api_key_present=bool(os.environ.get(_llm_api_key_env(p.llm))),
+    )
+
+    mm_info: MultimodalInfo | None = None
+    mm_cfg = cfg.assets.multimodal
+    if mm_cfg is not None:
+        mm_info = MultimodalInfo(
+            provider=mm_cfg.provider,
+            model=mm_cfg.model,
+            revision=mm_cfg.revision,
+            dim=mm_cfg.dim,
+            normalize=mm_cfg.normalize,
+            distance=mm_cfg.distance,
+            batch=mm_cfg.batch,
+            base_url=mm_cfg.base_url,
+        )
+
+    embedding_info = EmbeddingInfo(
+        provider=p.embedding,
+        model=p.embedding_model,
+        base_url=p.embedding_base_url,
+        dim=p.embedding_dim,
+        revision=p.embedding_revision,
+        normalize=p.embedding_normalize,
+        distance=p.embedding_distance,
+        batch_size=p.embedding_batch_size,
+        max_retries=p.embedding_max_retries,
+        timeout_seconds=p.embedding_timeout_seconds,
+        provider_label=p.embedding_provider_label,
+        api_key_present=bool(os.environ.get("DIKW_EMBEDDING_API_KEY")),
+        multimodal=mm_info,
+    )
+
+    return HealthReport(
+        version=_pkg_version,
+        base_root=str(Path(root).resolve()),
+        storage_engine=cfg.storage.backend,
+        layer_counts=layer_counts,
+        providers=ProvidersInfo(llm=llm_info, embedding=embedding_info),
+    )
 
 
 # ---- verifiable config tool ---------------------------------------------

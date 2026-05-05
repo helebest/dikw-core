@@ -195,8 +195,68 @@ class OpenAICodexLLM:
         temperature: float = 0.2,
         tools: list[ToolSpec] | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
-        # Streaming lands in the next commit.
-        _ = (system, user, model, max_tokens, temperature, tools)
-        raise NotImplementedError(
-            "OpenAICodexLLM.complete_stream is not yet implemented"
-        )
+        _ = tools
+
+        async def _gen() -> AsyncIterator[LLMStreamEvent]:
+            token = self._resolve_token()
+            client = _build_async_client(
+                base_url=self._base_url,
+                access_token=token,
+                max_retries=self._max_retries,
+                timeout_seconds=self._timeout_seconds,
+            )
+            parts: list[str] = []
+            try:
+                async with client.responses.stream(
+                    model=model,
+                    instructions=system,
+                    input=[
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": user}],
+                        }
+                    ],
+                    store=False,
+                    max_output_tokens=max_tokens,
+                    temperature=temperature,
+                ) as stream:
+                    async for event in stream:
+                        ev_type = getattr(event, "type", None)
+                        # Responses API marks text deltas with the literal
+                        # "response.output_text.delta" type. Reasoning summary
+                        # deltas use "response.reasoning_summary_text.delta".
+                        # Anything else (response.created, output_item.added,
+                        # response.completed, …) is intentionally dropped:
+                        # the LLMStreamEvent contract has no slot for them
+                        # and the engine only consumes token/done today.
+                        if ev_type == "response.output_text.delta":
+                            delta = getattr(event, "delta", None) or ""
+                            if delta:
+                                parts.append(delta)
+                                yield LLMStreamEvent(type="token", delta=delta)
+                        elif ev_type == "response.reasoning_summary_text.delta":
+                            delta = getattr(event, "delta", None) or ""
+                            if delta:
+                                yield LLMStreamEvent(type="reasoning", delta=delta)
+                    final = stream.get_final_response()
+            finally:
+                close = getattr(client, "close", None)
+                if close is not None:
+                    await close()
+
+            # Prefer the SDK's authoritative final text when present (it
+            # already concatenates message items the same way ``complete``
+            # does); the locally-collected ``parts`` is the fallback when
+            # the final payload is missing or empty.
+            final_text = _extract_text_from_response(final) or "".join(parts)
+            status = str(getattr(final, "status", "") or "")
+            finish_reason = _FINISH_REASON_MAP.get(status, "stop")
+            usage = _extract_usage(final)
+            yield LLMStreamEvent(
+                type="done",
+                text=final_text,
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+
+        return _gen()

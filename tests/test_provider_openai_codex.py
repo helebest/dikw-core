@@ -298,3 +298,211 @@ async def test_complete_handles_response_without_usage(
     )
     resp = await provider.complete(system="s", user="u", model="gpt-5.5")
     assert resp.usage == {}
+
+
+# --------------------------------------------------------------------------- #
+# Streaming
+# --------------------------------------------------------------------------- #
+
+
+class _StubStream:
+    """Mimics the async context manager openai SDK returns from
+    ``responses.stream(...)``: yields events, then exposes a
+    ``get_final_response()`` for the terminal payload."""
+
+    def __init__(
+        self, events: list[Any], *, final: SimpleNamespace
+    ) -> None:
+        self._events = events
+        self._final = final
+
+    async def __aenter__(self) -> _StubStream:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+    def __aiter__(self) -> _StubStream:
+        self._iter = iter(self._events)
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    def get_final_response(self) -> SimpleNamespace:
+        return self._final
+
+
+@pytest.fixture()
+def stream_captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    rec: dict[str, Any] = {
+        "init_kwargs": None,
+        "stream_kwargs": None,
+        "events": [],
+        "final": _make_response(text="full text", input_tokens=3, output_tokens=4),
+    }
+
+    class FakeResponses:
+        def stream(self, **kwargs: Any) -> _StubStream:
+            rec["stream_kwargs"] = kwargs
+            return _StubStream(rec["events"], final=rec["final"])
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            rec["init_kwargs"] = kwargs
+            self.responses = FakeResponses()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+    return rec
+
+
+async def _drain(provider: OpenAICodexLLM, **kwargs: Any) -> list[LLMStreamEvent]:
+    events: list[LLMStreamEvent] = []
+    async for ev in provider.complete_stream(**kwargs):
+        events.append(ev)
+    return events
+
+
+from dikw_core.providers.base import LLMStreamEvent  # noqa: E402
+
+
+async def test_complete_stream_yields_token_for_output_text_delta(
+    stream_captured: dict[str, Any],
+) -> None:
+    stream_captured["events"] = [
+        SimpleNamespace(type="response.output_text.delta", delta="hel"),
+        SimpleNamespace(type="response.output_text.delta", delta="lo"),
+    ]
+    stream_captured["final"] = _make_response(text="hello")
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, access_token_override="t"
+    )
+    events = await _drain(provider, system="s", user="u", model="gpt-5.5")
+    tokens = [e for e in events if e.type == "token"]
+    assert [e.delta for e in tokens] == ["hel", "lo"]
+
+
+async def test_complete_stream_yields_reasoning_for_summary_delta(
+    stream_captured: dict[str, Any],
+) -> None:
+    stream_captured["events"] = [
+        SimpleNamespace(
+            type="response.reasoning_summary_text.delta", delta="thinking…"
+        ),
+        SimpleNamespace(type="response.output_text.delta", delta="answer"),
+    ]
+    stream_captured["final"] = _make_response(text="answer")
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, access_token_override="t"
+    )
+    events = await _drain(provider, system="s", user="u", model="gpt-5.5")
+    reasoning = [e for e in events if e.type == "reasoning"]
+    tokens = [e for e in events if e.type == "token"]
+    assert [e.delta for e in reasoning] == ["thinking…"]
+    assert [e.delta for e in tokens] == ["answer"]
+
+
+async def test_complete_stream_yields_done_with_assembled_text(
+    stream_captured: dict[str, Any],
+) -> None:
+    stream_captured["events"] = [
+        SimpleNamespace(type="response.output_text.delta", delta="hel"),
+        SimpleNamespace(type="response.output_text.delta", delta="lo"),
+    ]
+    stream_captured["final"] = _make_response(
+        text="hello", status="completed", input_tokens=3, output_tokens=4
+    )
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, access_token_override="t"
+    )
+    events = await _drain(provider, system="s", user="u", model="gpt-5.5")
+    assert events[-1].type == "done"
+    assert events[-1].text == "hello"
+    assert events[-1].finish_reason == "stop"
+    assert events[-1].usage == {"input_tokens": 3, "output_tokens": 4}
+
+
+async def test_complete_stream_emits_exactly_one_done_event(
+    stream_captured: dict[str, Any],
+) -> None:
+    stream_captured["events"] = [
+        SimpleNamespace(type="response.output_text.delta", delta="x"),
+    ]
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, access_token_override="t"
+    )
+    events = await _drain(provider, system="s", user="u", model="gpt-5.5")
+    done_events = [e for e in events if e.type == "done"]
+    assert len(done_events) == 1
+
+
+async def test_complete_stream_skips_unknown_event_types(
+    stream_captured: dict[str, Any],
+) -> None:
+    stream_captured["events"] = [
+        SimpleNamespace(type="response.created"),
+        SimpleNamespace(type="response.output_item.added"),
+        SimpleNamespace(type="response.output_text.delta", delta="x"),
+        SimpleNamespace(type="response.completed"),
+    ]
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, access_token_override="t"
+    )
+    events = await _drain(provider, system="s", user="u", model="gpt-5.5")
+    # Two events emitted: token + done. Unknown types are silently dropped.
+    assert [e.type for e in events] == ["token", "done"]
+
+
+async def test_complete_stream_skips_empty_deltas(
+    stream_captured: dict[str, Any],
+) -> None:
+    stream_captured["events"] = [
+        SimpleNamespace(type="response.output_text.delta", delta=""),
+        SimpleNamespace(type="response.output_text.delta", delta=None),
+        SimpleNamespace(type="response.output_text.delta", delta="real"),
+    ]
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, access_token_override="t"
+    )
+    events = await _drain(provider, system="s", user="u", model="gpt-5.5")
+    tokens = [e for e in events if e.type == "token"]
+    assert [e.delta for e in tokens] == ["real"]
+
+
+async def test_complete_stream_passes_responses_api_shape(
+    stream_captured: dict[str, Any],
+) -> None:
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, access_token_override="t"
+    )
+    await _drain(
+        provider, system="be helpful", user="hello", model="gpt-5.5", max_tokens=128
+    )
+    kw = stream_captured["stream_kwargs"]
+    assert kw["model"] == "gpt-5.5"
+    assert kw["instructions"] == "be helpful"
+    assert kw["store"] is False
+    assert kw["max_output_tokens"] == 128
+    assert kw["input"] == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}],
+        }
+    ]
+
+
+async def test_complete_stream_injects_codex_headers(
+    stream_captured: dict[str, Any],
+) -> None:
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, access_token_override="t"
+    )
+    await _drain(provider, system="s", user="u", model="gpt-5.5")
+    headers = stream_captured["init_kwargs"]["default_headers"]
+    assert headers["originator"] == "codex_cli_rs"

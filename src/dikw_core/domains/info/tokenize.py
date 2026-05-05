@@ -98,11 +98,18 @@ def _jieba_segment(text: str) -> str:
     (``机器学习`` → ``机器 学习 机器学习``), which gives FTS5 more
     chances to match partial-phrase queries; BM25 IDF recovers precision.
 
-    Local ``import jieba`` so the default ``"none"`` path never pays
-    the dictionary-load penalty. After the first call Python caches
-    the module in ``sys.modules``.
+    Goes through ``_try_load_jieba`` so users on the default
+    ``dikw-core`` (or ``[postgres]``) install without the optional
+    ``[cjk]`` extra get a friendly install hint when they actually
+    feed CJK text in, instead of a bare ``ModuleNotFoundError``.
     """
-    import jieba
+    jieba = _try_load_jieba()
+    if jieba is None:
+        raise ImportError(
+            "CJK text requires the optional `[cjk]` extra. "
+            "Install via `uv pip install dikw-core[cjk]`, or set "
+            "`retrieval.cjk_tokenizer: \"none\"` in dikw.yml to opt out."
+        )
 
     parts: list[str] = []
     last = 0
@@ -163,7 +170,13 @@ def initialize_jieba() -> None:
     ~0.3s dictionary load happens during setup rather than the first
     ``replace_chunks`` call. Safe to call multiple times — jieba
     no-ops subsequent invocations via its internal lock.
-    """
-    import jieba
 
+    No-op when jieba isn't installed: warm-up is a perf hint, not a
+    correctness guarantee. The actual install-hint surfaces from
+    ``_jieba_segment`` when CJK text is encountered, so all-ASCII
+    wikis on a base install (no ``[cjk]`` extra) keep working.
+    """
+    jieba = _try_load_jieba()
+    if jieba is None:
+        return
     jieba.initialize()

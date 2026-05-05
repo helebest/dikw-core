@@ -455,7 +455,11 @@ class PostgresStorage:
             return []
         sql = (
             "SELECT c.doc_id, c.chunk_id, "
-            "ts_rank(c.fts, to_tsquery('simple', %s)) AS score, "
+            # normalization=1: divides rank by 1 + log(document length).
+            # Default 0 ignores doclength entirely, which gives long docs an
+            # unfair advantage on CJK where common tokens dominate IDF-less
+            # ts_rank. Closer to BM25's length normalization.
+            "ts_rank(c.fts, to_tsquery('simple', %s), 1) AS score, "
             "ts_headline('simple', c.text, to_tsquery('simple', %s), "
             "  'StartSel=<mark>,StopSel=</mark>,ShortWord=2,MaxWords=25,MinWords=5') AS snip "
             "FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "

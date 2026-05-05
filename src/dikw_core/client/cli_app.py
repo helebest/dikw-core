@@ -29,12 +29,14 @@ from . import serve_and_run as _sar
 from .config import ClientConfig, resolve
 from .progress import (
     QueryStreamRenderer,
+    RetrieveStreamRenderer,
     TaskProgressRenderer,
     render_check_report,
     render_distill_report,
     render_eval_report,
     render_ingest_report,
     render_lint_report,
+    render_retrieve_table,
     render_status,
     render_synth_report,
 )
@@ -241,6 +243,75 @@ def lint_cmd(
         issues = report.get("issues") or []
         if isinstance(issues, list) and issues:
             raise typer.Exit(code=1)
+
+    _run(_go())
+
+
+# ---- retrieve (NDJSON stream, retrieval-only) -------------------------
+
+
+@app.command("retrieve")
+def retrieve_cmd(
+    question: Annotated[str, typer.Argument(help="Natural-language query.")],
+    limit: Annotated[
+        int, typer.Option("--limit", "-k", help="Chunks to retrieve.")
+    ] = 5,
+    format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'json' (default, agent-friendly) or 'table' (human).",
+        ),
+    ] = "json",
+    plain: Annotated[
+        bool,
+        typer.Option(
+            "--plain",
+            help="Disable rich rendering of the retrieving status banner.",
+        ),
+    ] = False,
+    server: Annotated[str | None, _server_option()] = None,
+    token: Annotated[str | None, _token_option()] = None,
+) -> None:
+    """Retrieve chunks + page-level refs without invoking the LLM.
+
+    Companion to ``query`` for AI agents that want to assemble their
+    own answer: streams the same NDJSON event sequence as ``query`` but
+    skips ``llm_token`` events. ``--format json`` prints
+    ``final.result`` (chunks + page_refs) so the caller can pipe it into
+    ``jq`` or another tool.
+    """
+    if format not in ("json", "table"):
+        console.print(
+            f"[red]error[/red]: --format must be 'json' or 'table', got {format!r}"
+        )
+        raise typer.Exit(code=2)
+
+    async def _go() -> None:
+        renderer = RetrieveStreamRenderer(console, plain=plain)
+        async with (
+            Transport.from_config(_resolve(server, token)) as t,
+            t.stream_ndjson(
+                "POST",
+                "/v1/retrieve",
+                json_body={"q": question, "limit": limit},
+            ) as events,
+        ):
+            final = await renderer.run(events)
+        if final.status != "succeeded":
+            console.print(f"[red]retrieve {final.status}[/red]")
+            if final.error:
+                console.print(f"[dim]{final.error}[/dim]")
+            raise typer.Exit(code=1)
+        if final.result is None:
+            console.print("[red]retrieve returned empty result[/red]")
+            raise typer.Exit(code=1)
+        if format == "json":
+            # ``console.print_json`` re-pretty-prints; pass already-encoded
+            # JSON so non-ASCII (e.g. Chinese chunk text) survives intact.
+            console.print_json(json.dumps(final.result, ensure_ascii=False))
+        else:
+            render_retrieve_table(console, final.result)
 
     _run(_go())
 

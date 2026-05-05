@@ -23,7 +23,7 @@ fingerprint.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA_VERSION_KEY = "schema_fingerprint"
 
 

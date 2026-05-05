@@ -157,10 +157,17 @@ class FakeLLM:
     With ``stream_chunks=None`` the default Phase-1 behaviour holds and
     ``complete_stream`` raises ``NotImplementedError``, matching the
     real provider stubs.
+
+    ``reasoning_chunks`` (optional) emits ``LLMStreamEvent(type="reasoning")``
+    events ahead of the token stream — used by tests that want to verify
+    downstream consumers tolerate (or surface) reasoning fragments emitted
+    by reasoning-capable providers like ``OpenAICodexLLM``. Requires
+    ``stream_chunks`` to also be set.
     """
 
     response_text: str = "STUB: wired up."
     stream_chunks: list[str] | None = None
+    reasoning_chunks: list[str] | None = None
     last_system: str | None = field(default=None, init=False)
     last_user: str | None = field(default=None, init=False)
     last_max_tokens: int | None = field(default=None, init=False)
@@ -201,7 +208,12 @@ class FakeLLM:
                 "FakeLLM.complete_stream requires stream_chunks to be set"
             )
 
+        reasoning = self.reasoning_chunks
+
         async def _gen() -> AsyncIterator[LLMStreamEvent]:
+            if reasoning is not None:
+                for r_chunk in reasoning:
+                    yield LLMStreamEvent(type="reasoning", delta=r_chunk)
             for chunk in chunks:
                 yield LLMStreamEvent(type="token", delta=chunk)
             yield LLMStreamEvent(

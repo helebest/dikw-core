@@ -41,3 +41,35 @@ def test_llm_stream_event_done_type_still_valid() -> None:
 def test_llm_stream_event_rejects_unknown_type() -> None:
     with pytest.raises(ValidationError):
         LLMStreamEvent(type="bogus", delta="x")  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# FakeLLM streams reasoning before tokens
+# --------------------------------------------------------------------------- #
+
+
+from .fakes import FakeLLM  # noqa: E402
+
+
+async def test_fake_llm_stream_yields_reasoning_before_tokens() -> None:
+    fake = FakeLLM(
+        stream_chunks=["hel", "lo"],
+        reasoning_chunks=["thinking", "more thinking"],
+    )
+    events = []
+    async for ev in fake.complete_stream(system="s", user="u", model="m"):
+        events.append(ev)
+    types = [e.type for e in events]
+    assert types == ["reasoning", "reasoning", "token", "token", "done"]
+    reasoning = [e.delta for e in events if e.type == "reasoning"]
+    assert reasoning == ["thinking", "more thinking"]
+
+
+async def test_fake_llm_stream_without_reasoning_unchanged() -> None:
+    """Regression: existing tests that only set stream_chunks must keep
+    seeing the same event sequence (no surprise reasoning prefix)."""
+    fake = FakeLLM(stream_chunks=["x"])
+    events = []
+    async for ev in fake.complete_stream(system="s", user="u", model="m"):
+        events.append(ev)
+    assert [e.type for e in events] == ["token", "done"]

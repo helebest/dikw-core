@@ -19,7 +19,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -60,9 +59,6 @@ class CodexAuthError(ProviderError):
         super().__init__(message)
         self.code = code
         self.relogin_required = relogin_required
-
-
-_auth_lock_holder = threading.local()
 
 
 def codex_home() -> Path:
@@ -131,33 +127,28 @@ def account_id_from_jwt(token: str) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# Cross-process advisory file lock — fcntl on POSIX, msvcrt on Windows
-# (style ported from hermes_cli/auth.py:756-810). Reentrant within one
-# thread so resolve_access_token() can call save_codex_tokens() under its
-# own outer lock without deadlocking.
+# Cross-process advisory file lock — fcntl on POSIX, msvcrt on Windows.
+# Strictly OS-level: no in-process reentrancy. An earlier ``threading.local``
+# depth counter let nested ``with _auth_file_lock(): ...`` skip the OS lock,
+# which is correct on a sync stack but unsafe under asyncio: two coroutines
+# on the same event loop share the same thread, so the second one would see
+# the first's depth>0 and skip locking even though they're independent
+# tasks — leading to two concurrent OAuth refreshes that mutually invalidate
+# each other's refresh_token. Callers that need to do work under the lock
+# now hold it directly via this contextmanager and must not call into other
+# functions that re-acquire it.
 # --------------------------------------------------------------------------- #
 
 
 @contextmanager
 def _auth_file_lock(path: Path, *, timeout: float) -> Iterator[None]:
-    depth = getattr(_auth_lock_holder, "depth", 0)
-    if depth > 0:
-        _auth_lock_holder.depth = depth + 1
-        try:
-            yield
-        finally:
-            _auth_lock_holder.depth -= 1
-        return
-
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if _fcntl is None and _msvcrt is None:  # pragma: no cover — defensive
-        # No native lock primitives — degrade to thread-only mutual exclusion.
-        _auth_lock_holder.depth = 1
-        try:
-            yield
-        finally:
-            _auth_lock_holder.depth = 0
+        # No native lock primitives — degrade silently. Hit only on platforms
+        # that have neither fcntl nor msvcrt (e.g. WASI), which dikw doesn't
+        # support today.
+        yield
         return
 
     # Windows ``msvcrt.locking`` requires the file to have at least 1 byte
@@ -197,11 +188,9 @@ def _auth_file_lock(path: Path, *, timeout: float) -> Iterator[None]:
                     ) from None
                 time.sleep(0.05)
 
-        _auth_lock_holder.depth = 1
         try:
             yield
         finally:
-            _auth_lock_holder.depth = 0
             if _fcntl is not None:
                 _fcntl.flock(  # type: ignore[attr-defined]
                     lock_file.fileno(),
@@ -279,37 +268,50 @@ def read_codex_tokens() -> dict[str, str]:
     return {"access_token": access.strip(), "refresh_token": refresh.strip()}
 
 
-def save_codex_tokens(tokens: dict[str, str]) -> None:
-    """Write fresh tokens to ``<CODEX_HOME>/auth.json`` under lock.
+def _write_tokens_unlocked(home: Path, tokens: dict[str, str]) -> None:
+    """Atomic, in-place token write. Caller must hold ``_auth_file_lock``.
 
     Preserves any unrelated top-level keys codex CLI may have written
     (``OPENAI_API_KEY`` shim, custom config blocks). Bumps ``last_refresh``
-    so callers can audit when this writer last touched the file.
+    so callers can audit when this writer last touched the file. Writes to
+    ``auth.json.tmp`` then ``os.replace`` onto ``auth.json`` so cross-process
+    readers (which don't hold the advisory lock) never observe a partially
+    written file — ``os.replace`` is atomic on both POSIX and Windows.
     """
+    path = home / "auth.json"
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            # Corrupt file — overwrite. The lock the caller holds blocks
+            # racing writers, but cross-process readers may have seen the
+            # corruption from a previous crash mid-write; reset deliberately.
+            existing = {}
+
+    existing["tokens"] = {
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens["refresh_token"],
+    }
+    existing["last_refresh"] = (
+        datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    )
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def save_codex_tokens(tokens: dict[str, str]) -> None:
+    """Public ``save_codex_tokens`` — acquires the advisory lock, then
+    atomic-writes. ``resolve_access_token`` does the unlocked write
+    directly because it already holds the lock for double-checked
+    refresh."""
     home = codex_home()
     home.mkdir(parents=True, exist_ok=True)
-    path = home / "auth.json"
-
     with _auth_file_lock(_auth_lock_path(), timeout=CODEX_AUTH_LOCK_TIMEOUT_SECONDS):
-        existing: dict[str, Any] = {}
-        if path.is_file():
-            try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    existing = loaded
-            except Exception:
-                # Corrupt file — overwrite. The lock above already
-                # blocks any racing writer.
-                existing = {}
-
-        existing["tokens"] = {
-            "access_token": tokens["access_token"],
-            "refresh_token": tokens["refresh_token"],
-        }
-        existing["last_refresh"] = (
-            datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        )
-        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        _write_tokens_unlocked(home, tokens)
 
 
 # --------------------------------------------------------------------------- #
@@ -452,6 +454,8 @@ async def resolve_access_token(
     if not _is_expiring(tokens["access_token"], skew_seconds=refresh_skew_seconds):
         return tokens["access_token"]
 
+    home = codex_home()
+    home.mkdir(parents=True, exist_ok=True)
     with _auth_file_lock(_auth_lock_path(), timeout=CODEX_AUTH_LOCK_TIMEOUT_SECONDS):
         # Re-check under lock: the holder of this lock right before us may
         # have just refreshed.
@@ -464,5 +468,9 @@ async def resolve_access_token(
             refresh_token=tokens["refresh_token"],
             timeout_seconds=refresh_timeout_seconds,
         )
-        save_codex_tokens(refreshed)
+        # Direct unlocked write — we already hold the lock. Calling
+        # save_codex_tokens() here would re-acquire it, which used to be
+        # silently allowed by a threading.local depth counter but is unsafe
+        # on an asyncio event loop where two tasks share one thread.
+        _write_tokens_unlocked(home, refreshed)
         return refreshed["access_token"]

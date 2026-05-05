@@ -26,6 +26,16 @@ def test_openai_codex_requires_explicit_llm_base_url() -> None:
     assert "https://chatgpt.com/backend-api/codex" in msg
 
 
+def test_openai_codex_rejects_empty_string_base_url() -> None:
+    with pytest.raises(ValidationError):
+        make_provider_cfg(llm="openai_codex", llm_base_url="")
+
+
+def test_openai_codex_rejects_whitespace_base_url() -> None:
+    with pytest.raises(ValidationError):
+        make_provider_cfg(llm="openai_codex", llm_base_url="   ")
+
+
 def test_openai_codex_with_explicit_base_url_validates() -> None:
     cfg = make_provider_cfg(
         llm="openai_codex",

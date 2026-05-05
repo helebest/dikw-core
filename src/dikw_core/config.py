@@ -87,10 +87,16 @@ class ProviderConfig(BaseModel):
     def _require_codex_base_url(self) -> ProviderConfig:
         # ``openai_codex`` is the only protocol that has no SDK-default
         # endpoint — Codex models live on chatgpt.com/backend-api/codex
-        # exclusively. Surface a missing ``llm_base_url`` at config-load
-        # time rather than at first ``complete()`` call so ``dikw check``
-        # fails fast and the error message tells the user what to paste.
-        if self.llm == "openai_codex" and self.llm_base_url is None:
+        # exclusively. Surface a missing or blank ``llm_base_url`` at
+        # config-load time rather than at first ``complete()`` call so
+        # ``dikw check`` fails fast and the error message tells the user
+        # what to paste. ``None`` and empty/whitespace strings are both
+        # rejected — yaml ``llm_base_url: ""`` would otherwise reach the
+        # SDK as a malformed URL and surface as a low-level connection
+        # error instead.
+        if self.llm == "openai_codex" and (
+            self.llm_base_url is None or not self.llm_base_url.strip()
+        ):
             raise ValueError(
                 "openai_codex requires llm_base_url to be set explicitly. "
                 "Use https://chatgpt.com/backend-api/codex unless your "

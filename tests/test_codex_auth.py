@@ -295,11 +295,22 @@ def test_auth_file_lock_serializes_concurrent_writers(codex_dir: Path) -> None:
     assert not overlap_observed[0]
 
 
-def test_auth_file_lock_is_reentrant_on_same_thread(codex_dir: Path) -> None:
-    """A single thread can re-enter the lock without deadlocking — needed
-    so resolve_access_token() can call save_codex_tokens() under its own
-    outer lock without recursive blocking."""
+def test_auth_file_lock_is_strictly_os_level_no_reentry(codex_dir: Path) -> None:
+    """Reentrancy was removed because asyncio's ``threading.local``-based
+    depth counter would let two coroutines on the same event loop bypass
+    the OS lock and refresh the same OAuth refresh_token concurrently.
+    Nested acquisition on the same thread must time out instead of
+    silently re-entering."""
     lock_path = codex_dir / "auth.lock"
-    with _auth_file_lock(lock_path, timeout=2.0):
-        with _auth_file_lock(lock_path, timeout=2.0):
-            pass
+    with _auth_file_lock(lock_path, timeout=10.0):
+        with pytest.raises(TimeoutError):
+            with _auth_file_lock(lock_path, timeout=1.0):
+                pytest.fail("nested acquire should have timed out")
+
+
+def test_save_codex_tokens_writes_atomically(codex_dir: Path) -> None:
+    """Replace-via-rename leaves no observable partial state. After a
+    successful save the .tmp scratch file must be gone."""
+    save_codex_tokens({"access_token": "at-1", "refresh_token": "rt-1"})
+    assert (codex_dir / "auth.json").is_file()
+    assert not (codex_dir / "auth.json.tmp").exists()

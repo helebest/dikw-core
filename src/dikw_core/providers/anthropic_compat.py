@@ -21,11 +21,14 @@ if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
 
 
+API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+
 def _resolve_api_key(explicit: str | None) -> str:
-    key = explicit or os.environ.get("ANTHROPIC_API_KEY")
+    key = explicit or os.environ.get(API_KEY_ENV)
     if not key:
         raise ProviderError(
-            "ANTHROPIC_API_KEY is not set. Export it or pass `api_key` explicitly."
+            f"{API_KEY_ENV} is not set. Export it or pass `api_key` explicitly."
         )
     return key
 

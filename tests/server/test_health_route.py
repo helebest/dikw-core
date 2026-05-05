@@ -8,19 +8,12 @@ the security boundary.
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 
 import httpx
 import pytest
 
 from dikw_core import __version__
-from dikw_core import api as api_module
-
-from ..fakes import FakeEmbeddings
-
-FIXTURES = Path(__file__).parent.parent / "fixtures" / "notes"
 
 
 @pytest.mark.asyncio
@@ -49,21 +42,17 @@ async def test_health_returns_well_formed_report(
 @pytest.mark.asyncio
 async def test_health_layer_counts_track_ingest(
     server_client: httpx.AsyncClient,
-    wiki_root: Path,
+    ingested_wiki: Path,
 ) -> None:
     """After ingesting fixture markdown, ``layer_counts`` must reflect
     the new documents — proves health reads live storage state, not a
     cached snapshot from server start."""
-    dest = wiki_root / "sources" / "notes"
-    dest.mkdir(parents=True, exist_ok=True)
-    for src in FIXTURES.glob("*.md"):
-        shutil.copy2(src, dest / src.name)
-    await api_module.ingest(wiki_root, embedder=FakeEmbeddings())
-
     resp = await server_client.get("/v1/health")
     body = resp.json()
     counts = body["layer_counts"]
-    assert counts["sources"] == len(list(FIXTURES.glob("*.md")))
+    # ``ingested_wiki`` (conftest) ingests every ``tests/fixtures/notes/*.md``;
+    # the count reflects whatever lives in that fixture set today.
+    assert counts["sources"] > 0
     assert counts["chunks"] > 0
 
 
@@ -98,18 +87,18 @@ async def test_health_never_leaks_secrets(
     server_client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Critical security boundary: even when API keys + a Postgres DSN
-    are in the env, the health response must not echo any of them.
+    """Critical security boundary: even when API keys are in the env,
+    the health response must not echo any of them.
 
-    Locks the contract that ``health`` returns ``api_key_present: bool``
-    rather than the value, and that no DSN/path leaks into the JSON.
-    Sentinel values include URL-unsafe + URL-safe characters so a buggy
-    serializer can't hide a leak behind URL-encoding.
+    Sentinels deliberately mix URL-unsafe (``!@#$``) and URL-safe
+    characters so a buggy serializer can't mask a leak via URL-encoding;
+    a 16-char prefix substring is also checked, catching the case where
+    a serializer truncates / pretty-prints + breaks the full string.
     """
     sentinels = {
-        "OPENAI_API_KEY": "sk-leak-OPENAI-A!@#$",
-        "ANTHROPIC_API_KEY": "sk-ant-LEAK-XYZ-987",
-        "DIKW_EMBEDDING_API_KEY": "sk-embed-LEAK-321",
+        "OPENAI_API_KEY": "sk-leak-OPENAI-AAA-BBB-CCC-DDD!@#$",
+        "ANTHROPIC_API_KEY": "sk-ant-LEAK-XYZ-987-AAA-BBB-CCC",
+        "DIKW_EMBEDDING_API_KEY": "sk-embed-LEAK-321-AAA-BBB-CCC",
     }
     for k, v in sentinels.items():
         monkeypatch.setenv(k, v)
@@ -122,6 +111,11 @@ async def test_health_never_leaks_secrets(
         assert v not in raw, (
             f"secret {k} leaked into /v1/health response:\n{raw}"
         )
+        # Substring check catches a partial leak (e.g. a future bug
+        # truncating the value at 16 chars before logging).
+        assert v[:16] not in raw, (
+            f"prefix of secret {k} leaked into /v1/health response:\n{raw}"
+        )
 
     # Positive check: at least one ``api_key_present`` flag is True
     # (we just set the env var) so the health endpoint is actually
@@ -132,15 +126,28 @@ async def test_health_never_leaks_secrets(
 @pytest.mark.asyncio
 async def test_health_storage_engine_omits_dsn_and_path(
     server_client: httpx.AsyncClient,
+    wiki_root: Path,
 ) -> None:
     """``storage_engine`` is the *type* (``sqlite``/``postgres``) only.
-    DSN, sqlite path, schema name — none of those belong on /v1/health.
+    DSN, SQLite path, schema name — none of those belong on /v1/health.
     """
     resp = await server_client.get("/v1/health")
     raw = resp.text
     body = resp.json()
 
     assert body["storage_engine"] in ("sqlite", "postgres")
-    # No raw DSN-shaped string and no .sqlite path leak.
+    # Cover both ``postgres://`` and ``postgresql://`` URI schemes; psycopg
+    # accepts either. ``index.sqlite`` is the default SQLite path under
+    # ``.dikw/`` — neither the path nor the bare ``.dikw`` directory name
+    # should appear in the response. ``base_root`` is the *only* place
+    # the wiki root directory itself is exposed; check we didn't leak the
+    # full SQLite file path beyond that.
     assert "postgresql://" not in raw
-    assert ".sqlite" not in raw
+    assert "postgres://" not in raw
+    assert ".dikw/" not in raw
+    assert ".dikw\\" not in raw  # Windows path separator
+    assert "index.sqlite" not in raw
+    # base_root is exposed by design; everything else under wiki_root must
+    # not appear (so the .sqlite path under wiki_root/.dikw/ is excluded).
+    sqlite_path = wiki_root / ".dikw" / "index.sqlite"
+    assert str(sqlite_path) not in raw

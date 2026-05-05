@@ -16,7 +16,6 @@ Asserts:
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import httpx
@@ -26,28 +25,6 @@ from dikw_core import api as api_module
 from dikw_core.providers import build_embedder
 
 from ..fakes import FakeEmbeddings, FakeLLM
-
-FIXTURES = Path(__file__).parent.parent / "fixtures" / "notes"
-
-
-@pytest.fixture()
-async def ingested_wiki(
-    server_client: httpx.AsyncClient,
-    wiki_root: Path,
-) -> Path:
-    """Wiki with three fixture markdown files ingested + dense vectors.
-
-    Uses the engine directly (not the HTTP ingest task) so the fixture
-    stays cheap and isolated from task-pipeline noise — this fixture is
-    about query, not about ingest plumbing.
-    """
-    dest = wiki_root / "sources" / "notes"
-    dest.mkdir(parents=True, exist_ok=True)
-    for src in FIXTURES.glob("*.md"):
-        shutil.copy2(src, dest / src.name)
-    await api_module.ingest(wiki_root, embedder=FakeEmbeddings())
-    _ = server_client  # ensure runtime lifespan is up before we ingest
-    return wiki_root
 
 
 def _patch_providers(

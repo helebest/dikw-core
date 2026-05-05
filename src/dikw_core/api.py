@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import struct
 import time
 import zlib
@@ -36,7 +37,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -46,10 +47,12 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from . import __version__ as _pkg_version
 from . import prompts
 from .config import (
     CONFIG_FILENAME,
     DikwConfig,
+    MultimodalEmbedConfig,
     ProviderConfig,
     default_config,
     dump_config_yaml,
@@ -408,65 +411,52 @@ class CheckReport(BaseModel):
 
 
 class LlmInfo(BaseModel):
-    """Resolved LLM config in use by the running server.
-
-    The ``provider`` literal is the protocol name (``anthropic_compat`` /
-    ``openai_compat``), not the vendor — vendor identity is implicit in
-    ``base_url``. ``api_key_present`` reflects the corresponding env var
-    for the chosen protocol (``ANTHROPIC_API_KEY`` or ``OPENAI_API_KEY``);
-    it never carries the key value.
+    """Resolved LLM config in /v1/health response. ``api_key_present``
+    is a bool — never the key value; the env var (``ANTHROPIC_API_KEY``
+    or ``OPENAI_API_KEY``) is selected by ``provider``.
     """
 
     provider: Literal["anthropic_compat", "openai_compat"]
     model: str
     base_url: str | None
     max_retries: int
-    max_tokens_query: int
-    max_tokens_synth: int
-    max_tokens_distill: int
-    timeout_seconds: float
+    max_tokens_query: int = Field(gt=0)
+    max_tokens_synth: int = Field(gt=0)
+    max_tokens_distill: int = Field(gt=0)
+    timeout_seconds: float = Field(gt=0)
     api_key_present: bool
 
 
-class MultimodalInfo(BaseModel):
-    """Resolved multimodal embedding config when ``cfg.assets.multimodal``
-    is set; absent (``embedding.multimodal is None``) on text-only setups.
+class MultimodalInfo(MultimodalEmbedConfig):
+    """Resolved multimodal embedding config in /v1/health response.
 
-    No ``api_key_present`` field — the multimodal embedder shares
-    ``DIKW_EMBEDDING_API_KEY`` with the text embedder, surfaced once on
-    ``EmbeddingInfo``.
+    Inherits all fields from ``MultimodalEmbedConfig`` (provider, model,
+    revision, dim, normalize, distance, batch, base_url) so the two
+    schemas can never drift. No ``api_key_present`` here — the
+    multimodal embedder shares ``DIKW_EMBEDDING_API_KEY`` with the text
+    embedder, surfaced once on ``EmbeddingInfo``.
     """
-
-    provider: str
-    model: str
-    revision: str
-    dim: int
-    normalize: bool
-    distance: Literal["cosine", "l2", "dot"]
-    batch: int
-    base_url: str | None
 
 
 class EmbeddingInfo(BaseModel):
-    """Resolved embedding config in use by the running server.
+    """Resolved embedding config in /v1/health response.
 
     ``api_key_present`` reflects ``DIKW_EMBEDDING_API_KEY`` — dikw
-    deliberately never falls back to ``OPENAI_API_KEY`` here so LLM and
-    embedding keys can differ. ``multimodal`` is nested rather than
-    siblings on ``ProvidersInfo`` to match the engine's mental model
-    (multimodal is a sub-mode of the embedding leg).
+    never falls back to ``OPENAI_API_KEY`` here so LLM and embedding
+    keys can differ. ``multimodal`` nests under embedding because
+    multimodal is a sub-mode of the embedding leg, not a sibling.
     """
 
     provider: Literal["openai_compat"]
     model: str
     base_url: str | None
-    dim: int
+    dim: int = Field(gt=0)
     revision: str
     normalize: bool
     distance: Literal["cosine", "l2", "dot"]
-    batch_size: int
+    batch_size: int = Field(gt=0)
     max_retries: int
-    timeout_seconds: float
+    timeout_seconds: float = Field(gt=0)
     provider_label: str | None
     api_key_present: bool
     multimodal: MultimodalInfo | None = None
@@ -565,9 +555,15 @@ async def status(path: str | Path | None = None) -> StorageCounts:
 
 
 def _llm_api_key_env(provider: Literal["anthropic_compat", "openai_compat"]) -> str:
-    # Mirror the env vars used by ``providers.{anthropic_compat,openai_compat}``;
-    # health must reflect the same lookup the runtime would do.
-    return "ANTHROPIC_API_KEY" if provider == "anthropic_compat" else "OPENAI_API_KEY"
+    """Env-var lookup for the LLM leg's API key, sourced from the
+    provider modules so health and the runtime read the same constant."""
+    if provider == "anthropic_compat":
+        from .providers.anthropic_compat import API_KEY_ENV
+
+        return API_KEY_ENV
+    from .providers.openai_compat import API_KEY_ENV
+
+    return API_KEY_ENV
 
 
 async def health(path: str | Path | None = None) -> HealthReport:
@@ -578,9 +574,7 @@ async def health(path: str | Path | None = None) -> HealthReport:
     probe). Returned config is the *resolved* shape — what the server
     actually uses — minus secrets (no API keys, no DSN, no SQLite path).
     """
-    import os
-
-    from . import __version__ as _pkg_version
+    from .providers.openai_compat import EMBEDDING_API_KEY_ENV
 
     cfg, root, storage = await _with_storage(path)
     try:
@@ -590,9 +584,9 @@ async def health(path: str | Path | None = None) -> HealthReport:
 
     by_layer = counts.documents_by_layer
     layer_counts = LayerCounts(
-        sources=int(by_layer.get("source", 0)),
-        wiki_pages=int(by_layer.get("wiki", 0)),
-        wisdom_items=int(by_layer.get("wisdom", 0)),
+        sources=int(by_layer.get(Layer.SOURCE.value, 0)),
+        wiki_pages=int(by_layer.get(Layer.WIKI.value, 0)),
+        wisdom_items=int(by_layer.get(Layer.WISDOM.value, 0)),
         chunks=counts.chunks,
     )
 
@@ -612,16 +606,7 @@ async def health(path: str | Path | None = None) -> HealthReport:
     mm_info: MultimodalInfo | None = None
     mm_cfg = cfg.assets.multimodal
     if mm_cfg is not None:
-        mm_info = MultimodalInfo(
-            provider=mm_cfg.provider,
-            model=mm_cfg.model,
-            revision=mm_cfg.revision,
-            dim=mm_cfg.dim,
-            normalize=mm_cfg.normalize,
-            distance=mm_cfg.distance,
-            batch=mm_cfg.batch,
-            base_url=mm_cfg.base_url,
-        )
+        mm_info = MultimodalInfo.model_validate(mm_cfg.model_dump())
 
     embedding_info = EmbeddingInfo(
         provider=p.embedding,
@@ -635,7 +620,7 @@ async def health(path: str | Path | None = None) -> HealthReport:
         max_retries=p.embedding_max_retries,
         timeout_seconds=p.embedding_timeout_seconds,
         provider_label=p.embedding_provider_label,
-        api_key_present=bool(os.environ.get("DIKW_EMBEDDING_API_KEY")),
+        api_key_present=bool(os.environ.get(EMBEDDING_API_KEY_ENV)),
         multimodal=mm_info,
     )
 

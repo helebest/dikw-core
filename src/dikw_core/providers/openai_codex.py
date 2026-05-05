@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
+from ._http import build_no_keepalive_async_client
 from .base import LLMResponse, LLMStreamEvent, ToolSpec
 from .codex_auth import account_id_from_jwt, resolve_access_token
 
@@ -29,8 +30,6 @@ _CODEX_BASE_HEADERS: dict[str, str] = {
     "originator": "codex_cli_rs",
     "User-Agent": "codex_cli_rs/0.1 (dikw-core)",
 }
-
-_DEFAULT_TIMEOUT_SECONDS = 60.0
 
 _FINISH_REASON_MAP: dict[str, str] = {
     "completed": "stop",
@@ -55,7 +54,6 @@ def _build_async_client(
     rebuild costs are dominated by httpx connection setup, comparable to
     the SDK's own behaviour on cache miss.
     """
-    import httpx
     from openai import AsyncOpenAI
 
     headers: dict[str, str] = dict(_CODEX_BASE_HEADERS)
@@ -63,23 +61,13 @@ def _build_async_client(
     if account_id is not None:
         headers["ChatGPT-Account-ID"] = account_id
 
-    seconds = (
-        timeout_seconds if timeout_seconds is not None else _DEFAULT_TIMEOUT_SECONDS
-    )
-    timeout = httpx.Timeout(connect=10.0, read=seconds, write=seconds, pool=5.0)
-
+    timeout, http_client = build_no_keepalive_async_client(timeout_seconds)
     kwargs: dict[str, Any] = {
         "api_key": access_token,
         "base_url": base_url,
         "default_headers": headers,
         "timeout": timeout,
-        # Disable connection keepalive for the same reason openai_compat
-        # does: idle keepalives behind aggressive proxies (Cloudflare in
-        # this case) can drop silently and turn the SDK's retry path into
-        # a multi-minute hang on the same dead socket.
-        "http_client": httpx.AsyncClient(
-            timeout=timeout, limits=httpx.Limits(max_keepalive_connections=0)
-        ),
+        "http_client": http_client,
     }
     if max_retries is not None:
         kwargs["max_retries"] = max_retries

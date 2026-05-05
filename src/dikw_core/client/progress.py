@@ -477,9 +477,13 @@ def render_health_report(console: Console, report: Mapping[str, Any]) -> None:
     if isinstance(counts, dict):
         for key in ("sources", "wiki_pages", "wisdom_items", "chunks"):
             raw = counts.get(key)
-            counts_table.add_row(
-                key, str(int(raw)) if isinstance(raw, int | float) else "?"
-            )
+            # ``isinstance(_, int | float)`` admits ``bool`` (subtype of
+            # int); exclude it so a future schema slip-up that puts True
+            # into a count field renders as ``?`` instead of ``1``.
+            if isinstance(raw, int | float) and not isinstance(raw, bool):
+                counts_table.add_row(key, str(int(raw)))
+            else:
+                counts_table.add_row(key, "?")
     else:
         # Surface schema drift instead of silently skipping the section.
         counts_table.add_row("(unavailable)", "?")

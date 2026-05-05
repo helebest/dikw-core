@@ -26,6 +26,7 @@ from typing import Any
 
 from fastapi.responses import StreamingResponse
 
+from ..progress import CancelToken
 from .tasks import TERMINAL_STATUSES, ProgressBus, TaskStore
 
 # Tuned to undercut typical proxy idle timeouts (60s on most CDNs / nginx
@@ -38,7 +39,9 @@ HEARTBEAT_INTERVAL = 15.0
 _STORE_POLL_INTERVAL = 0.5
 
 
-def _isoformat() -> str:
+def isoformat_now() -> str:
+    """Millisecond-precision UTC timestamp with the trailing ``Z`` suffix
+    used by every NDJSON event the server emits."""
     return (
         datetime.fromtimestamp(time.time(), tz=UTC)
         .isoformat(timespec="milliseconds")
@@ -76,7 +79,7 @@ async def ndjson_lines(
     # Step 1 — historical replay.
     historical = await store.list_events(task_id, from_seq=from_seq)
     for event in historical:
-        yield _serialise(event)
+        yield serialise_event(event)
         seen_seq = max(seen_seq, int(event.get("seq", 0)))
 
     # Step 2 — short-circuit if the task is already terminal.
@@ -87,7 +90,7 @@ async def ndjson_lines(
     sub = await bus.subscribe(task_id)
     catchup = await store.list_events(task_id, from_seq=seen_seq + 1)
     for event in catchup:
-        yield _serialise(event)
+        yield serialise_event(event)
         seen_seq = max(seen_seq, int(event.get("seq", 0)))
 
     # Step 4 — bus tail + store-poll fallback + heartbeats.
@@ -104,7 +107,7 @@ async def ndjson_lines(
         nonlocal seen_seq
         polled = await store.list_events(task_id, from_seq=seen_seq + 1)
         for e in polled:
-            yield_buf.append(_serialise(e))
+            yield_buf.append(serialise_event(e))
             seen_seq = max(seen_seq, int(e.get("seq", 0)))
         row = await store.get(task_id)
         return row is not None and row.status in TERMINAL_STATUSES
@@ -131,7 +134,7 @@ async def ndjson_lines(
                         continue
                     seq = int(event.get("seq", 0))
                     if seq > seen_seq:
-                        yield _serialise(event)
+                        yield serialise_event(event)
                         seen_seq = seq
                     next_event_task = asyncio.ensure_future(
                         sub_iter.__anext__()
@@ -151,8 +154,8 @@ async def ndjson_lines(
 
             now = time.monotonic()
             if not terminal and now - last_heartbeat >= heartbeat_interval:
-                yield _serialise(
-                    {"type": "heartbeat", "seq": 0, "ts": _isoformat()}
+                yield serialise_event(
+                    {"type": "heartbeat", "seq": 0, "ts": isoformat_now()}
                 )
                 last_heartbeat = now
 
@@ -181,9 +184,75 @@ def stream_response(stream: AsyncIterator[bytes]) -> StreamingResponse:
     )
 
 
-def _serialise(event: dict[str, Any]) -> bytes:
+def serialise_event(event: dict[str, Any]) -> bytes:
     """Encode a single event as one NDJSON line (trailing ``\\n``)."""
     return (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-__all__ = ["HEARTBEAT_INTERVAL", "ndjson_lines", "stream_response"]
+class StreamReporterBase:
+    """Common ``ProgressReporter`` plumbing for short-lived streaming routes.
+
+    Subclasses override ``partial`` to translate engine-specific
+    ``partial(kind, payload)`` calls into the route's wire-event vocabulary;
+    progress / log / cancel handling is shared because every streaming
+    route handles them identically.
+    """
+
+    def __init__(self, queue: asyncio.Queue[dict[str, Any] | None]) -> None:
+        self._queue = queue
+        self._token = CancelToken()
+
+    async def progress(
+        self,
+        *,
+        phase: str,
+        current: int = 0,
+        total: int = 0,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        event: dict[str, Any] = {
+            "type": "progress",
+            "ts": isoformat_now(),
+            "phase": phase,
+            "current": current,
+            "total": total,
+        }
+        if detail is not None:
+            event["detail"] = detail
+        await self._queue.put(event)
+
+    async def log(self, level: str, message: str) -> None:
+        await self._queue.put(
+            {
+                "type": "log",
+                "ts": isoformat_now(),
+                "level": level,
+                "message": message,
+            }
+        )
+
+    async def partial(self, kind: str, payload: dict[str, Any]) -> None:
+        # Default fallthrough — generic envelope so future engine events
+        # surface without route plumbing. Subclasses override for
+        # op-specific wire shapes.
+        await self._queue.put(
+            {
+                "type": "partial",
+                "ts": isoformat_now(),
+                "kind": kind,
+                "payload": payload,
+            }
+        )
+
+    def cancel_token(self) -> CancelToken:
+        return self._token
+
+
+__all__ = [
+    "HEARTBEAT_INTERVAL",
+    "StreamReporterBase",
+    "isoformat_now",
+    "ndjson_lines",
+    "serialise_event",
+    "stream_response",
+]

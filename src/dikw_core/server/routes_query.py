@@ -21,20 +21,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
-import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Request
 from pydantic import BaseModel
 
 from .. import api
-from ..progress import CancelToken
 from .errors import ApiError
-from .ndjson import HEARTBEAT_INTERVAL, stream_response
+from .ndjson import (
+    HEARTBEAT_INTERVAL,
+    StreamReporterBase,
+    isoformat_now,
+    serialise_event,
+    stream_response,
+)
 from .runtime import ServerRuntime, get_runtime
 
 logger = logging.getLogger(__name__)
@@ -45,68 +47,18 @@ class QueryRequest(BaseModel):
     limit: int = 5
 
 
-def _isoformat() -> str:
-    return (
-        datetime.fromtimestamp(time.time(), tz=UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
-
-
-def _serialise(event: dict[str, Any]) -> bytes:
-    return (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
-
-
-class _QueryStreamReporter:
-    """Adapter from ``ProgressReporter`` to an NDJSON event queue.
-
-    ``api.query`` emits two ``partial`` kinds: ``retrieval_done`` and
-    ``llm_token`` (Phase 4 streaming) plus a final ``llm_done`` we drop —
-    the route reconstructs the full ``QueryResult`` from the engine's
-    return value, so ``llm_done`` would be redundant on the wire. Other
-    ``partial`` kinds pass through under a generic ``partial`` envelope
-    so future engine events surface without route plumbing.
-    """
-
-    def __init__(self, queue: asyncio.Queue[dict[str, Any] | None]) -> None:
-        self._queue = queue
-        self._token = CancelToken()
-
-    async def progress(
-        self,
-        *,
-        phase: str,
-        current: int = 0,
-        total: int = 0,
-        detail: dict[str, Any] | None = None,
-    ) -> None:
-        event: dict[str, Any] = {
-            "type": "progress",
-            "ts": _isoformat(),
-            "phase": phase,
-            "current": current,
-            "total": total,
-        }
-        if detail is not None:
-            event["detail"] = detail
-        await self._queue.put(event)
-
-    async def log(self, level: str, message: str) -> None:
-        await self._queue.put(
-            {
-                "type": "log",
-                "ts": _isoformat(),
-                "level": level,
-                "message": message,
-            }
-        )
+class _QueryStreamReporter(StreamReporterBase):
+    """``api.query`` emits ``retrieval_done`` + ``llm_token`` partials and
+    a final ``llm_done`` we drop — the route reconstructs the full
+    ``QueryResult`` from the engine's return value, so ``llm_done`` would
+    be redundant on the wire."""
 
     async def partial(self, kind: str, payload: dict[str, Any]) -> None:
         if kind == "retrieval_done":
             await self._queue.put(
                 {
                     "type": "retrieval_done",
-                    "ts": _isoformat(),
+                    "ts": isoformat_now(),
                     "hits": payload.get("hits", []),
                 }
             )
@@ -114,25 +66,14 @@ class _QueryStreamReporter:
             await self._queue.put(
                 {
                     "type": "llm_token",
-                    "ts": _isoformat(),
+                    "ts": isoformat_now(),
                     "delta": payload.get("delta", ""),
                 }
             )
         elif kind == "llm_done":
-            # Skipped — the engine's return value drives ``final``.
             return
         else:
-            await self._queue.put(
-                {
-                    "type": "partial",
-                    "ts": _isoformat(),
-                    "kind": kind,
-                    "payload": payload,
-                }
-            )
-
-    def cancel_token(self) -> CancelToken:
-        return self._token
+            await super().partial(kind, payload)
 
 
 def make_router(*, auth_dep: Any) -> APIRouter:
@@ -171,7 +112,7 @@ def make_router(*, auth_dep: Any) -> APIRouter:
                 await queue.put(
                     {
                         "type": "final",
-                        "ts": _isoformat(),
+                        "ts": isoformat_now(),
                         "status": "succeeded",
                         "result": result.model_dump(mode="json"),
                     }
@@ -180,7 +121,7 @@ def make_router(*, auth_dep: Any) -> APIRouter:
                 await queue.put(
                     {
                         "type": "final",
-                        "ts": _isoformat(),
+                        "ts": isoformat_now(),
                         "status": "cancelled",
                     }
                 )
@@ -189,7 +130,7 @@ def make_router(*, auth_dep: Any) -> APIRouter:
                 await queue.put(
                     {
                         "type": "final",
-                        "ts": _isoformat(),
+                        "ts": isoformat_now(),
                         "status": "failed",
                         "error": {
                             "code": e.code,
@@ -203,7 +144,7 @@ def make_router(*, auth_dep: Any) -> APIRouter:
                 await queue.put(
                     {
                         "type": "final",
-                        "ts": _isoformat(),
+                        "ts": isoformat_now(),
                         "status": "failed",
                         "error": {
                             "code": "engine_error",
@@ -218,10 +159,10 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         worker = asyncio.create_task(_run())
 
         async def _gen() -> AsyncIterator[bytes]:
-            yield _serialise(
+            yield serialise_event(
                 {
                     "type": "query_started",
-                    "ts": _isoformat(),
+                    "ts": isoformat_now(),
                     "q": body.q,
                     "limit": body.limit,
                 }
@@ -239,13 +180,13 @@ def make_router(*, auth_dep: Any) -> APIRouter:
                             queue.get(), timeout=HEARTBEAT_INTERVAL
                         )
                     except TimeoutError:
-                        yield _serialise(
-                            {"type": "heartbeat", "ts": _isoformat()}
+                        yield serialise_event(
+                            {"type": "heartbeat", "ts": isoformat_now()}
                         )
                         continue
                     if event is None:
                         break
-                    yield _serialise(event)
+                    yield serialise_event(event)
             finally:
                 # Client disconnect: ask the engine to bail and wait.
                 if not worker.done():

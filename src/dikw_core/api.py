@@ -33,6 +33,7 @@ import zlib
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -1156,9 +1157,14 @@ async def _retrieve_inner(
         multimodal=mm_search,
     )
     hits = await searcher.search(q, limit=limit)
+    # Strip ``text`` from the partial event — clients consuming
+    # ``retrieval_done`` for live citation rendering only need
+    # snippet/path/score; the full chunk body lives on
+    # ``final.result.chunks`` for retrieve callers that actually need
+    # it. Halves the wire payload at limit=100 with ~1 KB chunks.
     await _reporter.partial(
         "retrieval_done",
-        {"hits": [h.model_dump(mode="json") for h in hits]},
+        {"hits": [h.model_dump(mode="json", exclude={"text"}) for h in hits]},
     )
     return hits, owned_mm
 
@@ -1172,24 +1178,24 @@ def _build_page_refs(hits: list[Hit]) -> list[PageRef]:
     cross-reference back to ``chunks[]`` deterministically. Hits with
     ``path=None`` are dropped — they cannot be cited as a page.
     """
-    groups: dict[str, PageRef] = {}
+    accum: dict[str, dict[str, Any]] = {}
     for h in hits:
         if h.path is None:
             continue
-        existing = groups.get(h.path)
-        if existing is None:
-            groups[h.path] = PageRef(
-                path=h.path,
-                layer=h.layer,
-                title=h.title,
-                score=h.score,
-                hit_chunk_ids=[h.chunk_id],
-            )
+        bucket = accum.get(h.path)
+        if bucket is None:
+            accum[h.path] = {
+                "path": h.path,
+                "layer": h.layer,
+                "title": h.title,
+                "score": h.score,
+                "hit_chunk_ids": [h.chunk_id],
+            }
         else:
-            existing.hit_chunk_ids.append(h.chunk_id)
-            if h.score > existing.score:
-                existing.score = h.score
-    refs = list(groups.values())
+            bucket["hit_chunk_ids"].append(h.chunk_id)
+            if h.score > bucket["score"]:
+                bucket["score"] = h.score
+    refs = [PageRef(**bucket) for bucket in accum.values()]
     refs.sort(key=lambda r: r.score, reverse=True)
     return refs
 

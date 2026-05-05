@@ -544,12 +544,14 @@ def _as_dict(value: Any) -> dict[str, Any] | None:
 __all__ = [
     "FinalEvent",
     "QueryStreamRenderer",
+    "RetrieveStreamRenderer",
     "TaskProgressRenderer",
     "render_check_report",
     "render_distill_report",
     "render_eval_report",
     "render_ingest_report",
     "render_lint_report",
+    "render_retrieve_table",
     "render_status",
     "render_synth_report",
 ]

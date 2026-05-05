@@ -256,7 +256,7 @@ def retrieve_cmd(
     limit: Annotated[
         int, typer.Option("--limit", "-k", help="Chunks to retrieve.")
     ] = 5,
-    format: Annotated[
+    fmt: Annotated[
         str,
         typer.Option(
             "--format",
@@ -281,9 +281,9 @@ def retrieve_cmd(
     ``final.result`` (chunks + page_refs) so the caller can pipe it into
     ``jq`` or another tool.
     """
-    if format not in ("json", "table"):
+    if fmt not in ("json", "table"):
         console.print(
-            f"[red]error[/red]: --format must be 'json' or 'table', got {format!r}"
+            f"[red]error[/red]: --format must be 'json' or 'table', got {fmt!r}"
         )
         raise typer.Exit(code=2)
 
@@ -306,7 +306,7 @@ def retrieve_cmd(
         if final.result is None:
             console.print("[red]retrieve returned empty result[/red]")
             raise typer.Exit(code=1)
-        if format == "json":
+        if fmt == "json":
             # ``console.print_json`` re-pretty-prints; pass already-encoded
             # JSON so non-ASCII (e.g. Chinese chunk text) survives intact.
             console.print_json(json.dumps(final.result, ensure_ascii=False))

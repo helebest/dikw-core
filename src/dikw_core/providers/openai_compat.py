@@ -19,11 +19,15 @@ if TYPE_CHECKING:  # avoid importing openai at module load for envs without it
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
+API_KEY_ENV = "OPENAI_API_KEY"
+EMBEDDING_API_KEY_ENV = "DIKW_EMBEDDING_API_KEY"
+
+
 def _resolve_api_key(explicit: str | None) -> str:
-    key = explicit or os.environ.get("OPENAI_API_KEY")
+    key = explicit or os.environ.get(API_KEY_ENV)
     if not key:
         raise ProviderError(
-            "OPENAI_API_KEY is not set. Export it or pass `api_key` explicitly."
+            f"{API_KEY_ENV} is not set. Export it or pass `api_key` explicitly."
         )
     return key
 
@@ -37,10 +41,11 @@ def _resolve_embedding_api_key(explicit: str | None) -> str:
     Gitee AI embeddings), each with its own key. Conflating them via
     ``OPENAI_API_KEY`` silently cross-wires credentials and masks misconfig.
     """
-    key = explicit or os.environ.get("DIKW_EMBEDDING_API_KEY")
+    key = explicit or os.environ.get(EMBEDDING_API_KEY_ENV)
     if not key:
         raise ProviderError(
-            "DIKW_EMBEDDING_API_KEY is not set. Export it or pass `api_key` explicitly."
+            f"{EMBEDDING_API_KEY_ENV} is not set. "
+            "Export it or pass `api_key` explicitly."
         )
     return key
 

@@ -10,7 +10,6 @@ checks the four new agent-facing fields (``layer``/``start``/``end``/
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import httpx
@@ -19,28 +18,6 @@ import pytest
 from dikw_core import api as api_module
 
 from ..fakes import FakeEmbeddings
-
-FIXTURES = Path(__file__).parent.parent / "fixtures" / "notes"
-
-
-@pytest.fixture()
-async def ingested_wiki(
-    server_client: httpx.AsyncClient,
-    wiki_root: Path,
-) -> Path:
-    """Three fixture markdown files ingested + dense vectors.
-
-    Reuses the test_query_stream fixture pattern so retrieve and query
-    exercise an identical corpus: any divergence between the two routes
-    must come from route logic, not test setup.
-    """
-    dest = wiki_root / "sources" / "notes"
-    dest.mkdir(parents=True, exist_ok=True)
-    for src in FIXTURES.glob("*.md"):
-        shutil.copy2(src, dest / src.name)
-    await api_module.ingest(wiki_root, embedder=FakeEmbeddings())
-    _ = server_client  # ensure runtime lifespan is up before we ingest
-    return wiki_root
 
 
 def _patch_embedder(monkeypatch: pytest.MonkeyPatch) -> None:

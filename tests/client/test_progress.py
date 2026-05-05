@@ -20,6 +20,7 @@ from dikw_core.client.progress import (
     TaskProgressRenderer,
     render_distill_report,
     render_eval_report,
+    render_health_report,
     render_ingest_report,
     render_status,
 )
@@ -147,6 +148,58 @@ def test_render_distill_report_renders_zeroes() -> None:
     )
     out = console.export_text()
     assert "K pages read" in out
+
+
+def test_render_health_report_renders_all_blocks() -> None:
+    """Drive ``render_health_report`` with a fully-populated payload so
+    the table-mode CLI path stays covered (the JSON-default path is the
+    agent contract; this is the human-debug surface).
+    """
+    console = Console(record=True, width=120, force_terminal=False)
+    render_health_report(
+        console,
+        {
+            "status": "ok",
+            "version": "0.0.0+test",
+            "base_root": "/tmp/test-base",
+            "storage_engine": "sqlite",
+            "layer_counts": {
+                "sources": 3,
+                "wiki_pages": 2,
+                "wisdom_items": 0,
+                "chunks": 11,
+            },
+            "providers": {
+                "llm": {
+                    "provider": "openai_compat",
+                    "model": "gpt-5-mini",
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key_present": True,
+                },
+                "embedding": {
+                    "provider": "openai_compat",
+                    "model": "text-embed-3-large",
+                    "base_url": None,
+                    "api_key_present": False,
+                    "multimodal": {
+                        "provider": "openai_compat",
+                        "model": "mm-embed-1",
+                        "dim": 1024,
+                        "distance": "cosine",
+                        "base_url": "https://mm.example.com/v1",
+                    },
+                },
+            },
+        },
+    )
+    out = console.export_text()
+    # Every block should land at least its title in the captured output.
+    assert "dikw health" in out
+    assert "layer counts" in out
+    assert "providers" in out
+    assert "multimodal embedding" in out
+    # api_key flag rendering: present → ✓, absent → ✗.
+    assert "✓" in out and "✗" in out
 
 
 def test_render_eval_report_marks_failures() -> None:

@@ -10,10 +10,18 @@ Two flavours of test infrastructure:
   * ``manager_only`` — naked ``TaskManager`` + ``ProgressBus`` +
     ``SqliteTaskStore`` triplet for tests that only care about the
     task subsystem semantics. Cheap, no FastAPI overhead.
+
+  * ``ingested_wiki`` — extends ``server_client`` by copying a small
+    fixture corpus into the wiki's ``sources/`` and running ``ingest``
+    via the engine API (skips the HTTP upload path so test setup stays
+    cheap). Several route tests need a wiki with both documents and
+    embeddings populated; reuse this fixture instead of cloning the
+    setup per file.
 """
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -21,12 +29,15 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from dikw_core import api as api_module
 from dikw_core.server.app import build_app
 from dikw_core.server.auth import AuthConfig
 from dikw_core.server.runtime import ServerRuntime, build_runtime, teardown_runtime
 from dikw_core.server.tasks import ProgressBus, SqliteTaskStore, TaskManager
 
-from ..fakes import init_test_wiki
+from ..fakes import FakeEmbeddings, init_test_wiki
+
+FIXTURES_NOTES = Path(__file__).parent.parent / "fixtures" / "notes"
 
 
 @pytest.fixture()
@@ -94,6 +105,24 @@ async def server_client_with_token(
                 yield client, "s3cret"
     finally:
         await teardown_runtime(rt)
+
+
+@pytest.fixture()
+async def ingested_wiki(
+    server_client: httpx.AsyncClient,
+    wiki_root: Path,
+) -> Path:
+    """Wiki with the standard ``tests/fixtures/notes`` corpus ingested
+    via ``api.ingest`` + ``FakeEmbeddings``. Used by query / retrieve /
+    health route tests that need both documents and embeddings.
+    """
+    dest = wiki_root / "sources" / "notes"
+    dest.mkdir(parents=True, exist_ok=True)
+    for src in FIXTURES_NOTES.glob("*.md"):
+        shutil.copy2(src, dest / src.name)
+    await api_module.ingest(wiki_root, embedder=FakeEmbeddings())
+    _ = server_client  # ensure runtime lifespan is up before we ingest
+    return wiki_root
 
 
 @pytest.fixture()

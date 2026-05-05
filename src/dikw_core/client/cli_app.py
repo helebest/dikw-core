@@ -34,6 +34,7 @@ from .progress import (
     render_check_report,
     render_distill_report,
     render_eval_report,
+    render_health_report,
     render_ingest_report,
     render_lint_report,
     render_retrieve_table,
@@ -135,6 +136,42 @@ def status_cmd(
         async with Transport.from_config(_resolve(server, token)) as t:
             counts = await t.get_json("/v1/status")
         render_status(console, counts)
+
+    _run(_go())
+
+
+@app.command("health")
+def health_cmd(
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'json' (default, agent-friendly) or 'table' (human).",
+        ),
+    ] = "json",
+    server: Annotated[str | None, _server_option()] = None,
+    token: Annotated[str | None, _token_option()] = None,
+) -> None:
+    """Probe the server's self-description (base_root, layer counts, providers).
+
+    Designed as the first call an AI agent makes after attaching to a
+    running ``dikw serve`` — confirms the server is up, shows which base
+    it points at, and exposes the resolved provider config (model /
+    base_url / dim / ``api_key_present``) without leaking secrets.
+    """
+    if fmt not in ("json", "table"):
+        console.print(
+            f"[red]error[/red]: --format must be 'json' or 'table', got {fmt!r}"
+        )
+        raise typer.Exit(code=2)
+
+    async def _go() -> None:
+        async with Transport.from_config(_resolve(server, token)) as t:
+            report = await t.get_json("/v1/health")
+        if fmt == "json":
+            console.print_json(json.dumps(report, ensure_ascii=False))
+        else:
+            render_health_report(console, report)
 
     _run(_go())
 

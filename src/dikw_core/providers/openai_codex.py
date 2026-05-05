@@ -12,6 +12,7 @@ and the rest of the codex model family live exclusively on
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from .base import LLMResponse, LLMStreamEvent, ToolSpec
@@ -116,6 +117,25 @@ def _extract_usage(response: Any) -> dict[str, int]:
     }
 
 
+def _request_kwargs(
+    *, system: str, user: str, model: str, max_tokens: int, temperature: float
+) -> dict[str, Any]:
+    """Shared payload shape for ``responses.create`` and ``responses.stream``."""
+    return {
+        "model": model,
+        "instructions": system,
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": user}],
+            }
+        ],
+        "store": False,
+        "max_output_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+
 class OpenAICodexLLM:
     def __init__(
         self,
@@ -127,6 +147,24 @@ class OpenAICodexLLM:
         self._base_url = base_url
         self._max_retries = max_retries
         self._timeout_seconds = timeout_seconds
+
+    @asynccontextmanager
+    async def _client(self) -> AsyncIterator[AsyncOpenAI]:
+        """Resolve a fresh access_token, build a per-request AsyncOpenAI,
+        guarantee close() runs even if the body raises."""
+        token = await resolve_access_token()
+        client = _build_async_client(
+            base_url=self._base_url,
+            access_token=token,
+            max_retries=self._max_retries,
+            timeout_seconds=self._timeout_seconds,
+        )
+        try:
+            yield client
+        finally:
+            close = getattr(client, "close", None)
+            if close is not None:
+                await close()
 
     async def complete(
         self,
@@ -142,32 +180,16 @@ class OpenAICodexLLM:
         # yet — synth/distill/query are plain-text completions today, same
         # as the other two providers.
         _ = tools
-        token = await resolve_access_token()
-        client = _build_async_client(
-            base_url=self._base_url,
-            access_token=token,
-            max_retries=self._max_retries,
-            timeout_seconds=self._timeout_seconds,
-        )
-        try:
+        async with self._client() as client:
             response = await client.responses.create(
-                model=model,
-                instructions=system,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": user}],
-                    }
-                ],
-                store=False,
-                max_output_tokens=max_tokens,
-                temperature=temperature,
+                **_request_kwargs(
+                    system=system,
+                    user=user,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
             )
-        finally:
-            close = getattr(client, "close", None)
-            if close is not None:
-                await close()
-
         text = _extract_text_from_response(response)
         status = str(getattr(response, "status", "") or "")
         finish_reason = _FINISH_REASON_MAP.get(status, "stop")
@@ -185,53 +207,39 @@ class OpenAICodexLLM:
         tools: list[ToolSpec] | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         _ = tools
+        kwargs = _request_kwargs(
+            system=system,
+            user=user,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
 
         async def _gen() -> AsyncIterator[LLMStreamEvent]:
-            token = await resolve_access_token()
-            client = _build_async_client(
-                base_url=self._base_url,
-                access_token=token,
-                max_retries=self._max_retries,
-                timeout_seconds=self._timeout_seconds,
-            )
             parts: list[str] = []
-            try:
-                async with client.responses.stream(
-                    model=model,
-                    instructions=system,
-                    input=[
-                        {
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": user}],
-                        }
-                    ],
-                    store=False,
-                    max_output_tokens=max_tokens,
-                    temperature=temperature,
-                ) as stream:
-                    async for event in stream:
-                        ev_type = getattr(event, "type", None)
-                        # Responses API marks text deltas with the literal
-                        # "response.output_text.delta" type. Reasoning summary
-                        # deltas use "response.reasoning_summary_text.delta".
-                        # Anything else (response.created, output_item.added,
-                        # response.completed, …) is intentionally dropped:
-                        # the LLMStreamEvent contract has no slot for them
-                        # and the engine only consumes token/done today.
-                        if ev_type == "response.output_text.delta":
-                            delta = getattr(event, "delta", None) or ""
-                            if delta:
-                                parts.append(delta)
-                                yield LLMStreamEvent(type="token", delta=delta)
-                        elif ev_type == "response.reasoning_summary_text.delta":
-                            delta = getattr(event, "delta", None) or ""
-                            if delta:
-                                yield LLMStreamEvent(type="reasoning", delta=delta)
-                    final = stream.get_final_response()
-            finally:
-                close = getattr(client, "close", None)
-                if close is not None:
-                    await close()
+            async with (
+                self._client() as client,
+                client.responses.stream(**kwargs) as stream,
+            ):
+                async for event in stream:
+                    ev_type = getattr(event, "type", None)
+                    # Responses API marks text deltas with the literal
+                    # "response.output_text.delta" type. Reasoning summary
+                    # deltas use "response.reasoning_summary_text.delta".
+                    # Anything else (response.created, output_item.added,
+                    # response.completed, …) is intentionally dropped:
+                    # the LLMStreamEvent contract has no slot for them
+                    # and the engine only consumes token/done today.
+                    if ev_type == "response.output_text.delta":
+                        delta = getattr(event, "delta", None) or ""
+                        if delta:
+                            parts.append(delta)
+                            yield LLMStreamEvent(type="token", delta=delta)
+                    elif ev_type == "response.reasoning_summary_text.delta":
+                        delta = getattr(event, "delta", None) or ""
+                        if delta:
+                            yield LLMStreamEvent(type="reasoning", delta=delta)
+                final = stream.get_final_response()
 
             # Prefer the SDK's authoritative final text when present (it
             # already concatenates message items the same way ``complete``

@@ -1512,16 +1512,20 @@ async def read_page(
     chunk via ``/v1/retrieve`` fetch the full page body and align hit
     chunks back onto it via ``Hit.chunk_id`` / ``Hit.seq``.
     """
-    from .domains.data.path_norm import normalize_path
-
     cfg, base_root, storage = await _with_storage(root)
     del cfg
     try:
-        wanted = normalize_path(path)
+        # ``_doc_id_for`` is deterministic over ``(layer, normalize_path(path))``,
+        # and ``doc_id`` is the PK on ``documents``. Probing the three
+        # layers turns the lookup into 3 indexed point queries — versus
+        # a full-table scan if we went via ``list_documents`` + Python
+        # filter. Inactive docs are excluded so the read-by-path policy
+        # matches the list endpoint's ``active=True`` default.
         match: DocumentRecord | None = None
-        for doc in await storage.list_documents(active=None):
-            if doc.path_key == wanted or doc.path == path:
-                match = doc
+        for layer in (Layer.SOURCE, Layer.WIKI, Layer.WISDOM):
+            candidate = await storage.get_document(_doc_id_for(layer, path))
+            if candidate is not None and candidate.active:
+                match = candidate
                 break
         if match is None:
             raise PageNotFound(path)

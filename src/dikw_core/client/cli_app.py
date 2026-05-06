@@ -25,6 +25,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from ..schemas import Layer
 from . import serve_and_run as _sar
 from .config import ClientConfig, resolve
 from .progress import (
@@ -76,6 +77,19 @@ def _token_option() -> Any:
 
 def _resolve(server: str | None, token: str | None) -> ClientConfig:
     return resolve(server_url=server, token=token)
+
+
+def _validate_format(fmt: str) -> None:
+    """Reject a ``--format`` value outside the json/table contract.
+
+    Three commands (``health``, ``retrieve``, ``pages list``) share the
+    exact same json-or-table contract — keep the validation in one
+    place so the error message and exit code stay consistent."""
+    if fmt not in ("json", "table"):
+        console.print(
+            f"[red]error[/red]: --format must be 'json' or 'table', got {fmt!r}"
+        )
+        raise typer.Exit(code=2)
 
 
 def _on_error(err: ClientError) -> None:
@@ -159,11 +173,7 @@ def health_cmd(
     it points at, and exposes the resolved provider config (model /
     base_url / dim / ``api_key_present``) without leaking secrets.
     """
-    if fmt not in ("json", "table"):
-        console.print(
-            f"[red]error[/red]: --format must be 'json' or 'table', got {fmt!r}"
-        )
-        raise typer.Exit(code=2)
+    _validate_format(fmt)
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
@@ -318,11 +328,7 @@ def retrieve_cmd(
     ``final.result`` (chunks + page_refs) so the caller can pipe it into
     ``jq`` or another tool.
     """
-    if fmt not in ("json", "table"):
-        console.print(
-            f"[red]error[/red]: --format must be 'json' or 'table', got {fmt!r}"
-        )
-        raise typer.Exit(code=2)
+    _validate_format(fmt)
 
     async def _go() -> None:
         renderer = RetrieveStreamRenderer(console, plain=plain)
@@ -740,10 +746,10 @@ app.add_typer(pages_app, name="pages")
 @pages_app.command("list")
 def pages_list_cmd(
     layer: Annotated[
-        str | None,
+        Layer | None,
         typer.Option(
             "--layer",
-            help="Filter by layer (source|wiki|wisdom). Default: all layers.",
+            help="Filter by layer. Default: all layers.",
         ),
     ] = None,
     fmt: Annotated[
@@ -757,14 +763,12 @@ def pages_list_cmd(
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
     """List pages registered under the server's base."""
-    if fmt not in ("json", "table"):
-        console.print(
-            f"[red]error[/red]: --format must be 'json' or 'table', got {fmt!r}"
-        )
-        raise typer.Exit(code=2)
+    _validate_format(fmt)
 
     async def _go() -> None:
-        params: dict[str, Any] | None = {"layer": layer} if layer else None
+        params: dict[str, str] | None = (
+            {"layer": layer.value} if layer is not None else None
+        )
         async with Transport.from_config(_resolve(server, token)) as t:
             rows = await t.get_json("/v1/base/pages", params=params)
         if fmt == "json":

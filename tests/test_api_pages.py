@@ -72,6 +72,32 @@ async def test_read_page_path_escape_attempt_raises(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_page_skips_deactivated_doc(tmp_path: Path) -> None:
+    """A doc whose ``active=False`` was set after ingest must NOT be
+    readable through ``/v1/base/pages/{path}`` — the policy needs to
+    match the list endpoint, which defaults to ``active=True`` and
+    silently drops deactivated rows."""
+    root, rel = _bootstrap_wiki_with_fixture(tmp_path)
+    await api.ingest(root, embedder=FakeEmbeddings())
+
+    # Sanity: it reads fine while active.
+    page = await api.read_page(root, rel)
+    doc_id = page.doc_id
+
+    # Flip the ``active`` flag through a direct storage handle, mirroring
+    # what ``deactivate_document`` does in the real ingest cleanup path.
+    cfg, _root, storage = await api._with_storage(root)
+    del cfg
+    try:
+        await storage.deactivate_document(doc_id)
+    finally:
+        await storage.close()
+
+    with pytest.raises(api.PageNotFound):
+        await api.read_page(root, rel)
+
+
+@pytest.mark.asyncio
 async def test_read_page_unindexed_file_raises(tmp_path: Path) -> None:
     """A file that exists on disk under the base root but isn't a
     registered document (``dikw.yml``, raw ``sources/`` files dropped in

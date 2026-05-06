@@ -86,9 +86,13 @@ dikw client query "your question"           # streams NDJSON
   `DocumentRecord` rows resolve. If a markdown file exists on disk but
   hasn't been ingested, the route returns 404. Use `GET /v1/base/pages`
   to enumerate what's actually queryable.
-- **NDJSON, not SSE.** Long ops (`/v1/ingest`, `/v1/synth`, `/v1/query`,
-  `/v1/retrieve`) stream newline-delimited JSON over the response body.
-  Final event has `type=final`; everything before is `progress` /
+- **NDJSON, not SSE — but only on streaming routes.** `POST /v1/query`
+  and `POST /v1/retrieve` stream NDJSON directly on their response body.
+  The async-task ops (`POST /v1/ingest`, `POST /v1/synth`,
+  `POST /v1/distill`, `POST /v1/eval`) instead return a JSON
+  `TaskHandle` (`{"task_id": "..."}`); follow the task by **opening
+  `GET /v1/tasks/{task_id}/events`** as the NDJSON stream. Either way
+  the final event has `type=final` and earlier events are `progress` /
   `partial` / `task_started`. There is no `data:` SSE prefix.
 - **Per-file ingest errors are non-fatal.** A bad markdown file produces
   one `partial` event with `kind=file_error` and lands on

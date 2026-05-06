@@ -149,7 +149,12 @@ uv run dikw client health --format json
   "version": "0.x.y",
   "base_root": "/abs/path/to/my-base",
   "storage_engine": "sqlite",
-  "layer_counts": { "source": 0, "knowledge": 0, "wisdom": 0 },
+  "layer_counts": {
+    "sources": 0,
+    "wiki_pages": 0,
+    "wisdom_items": 0,
+    "chunks": 0
+  },
   "providers": { "llm": { ... }, "embedding": { ... } }
 }
 ```

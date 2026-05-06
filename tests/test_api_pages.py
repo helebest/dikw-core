@@ -77,6 +77,98 @@ async def test_read_page_path_escape_attempt_raises(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_page_k_layer_anchors_survive_frontmatter_roundtrip(
+    tmp_path: Path,
+) -> None:
+    """K-layer (synthesised wiki) pages go through ``write_page`` →
+    ``frontmatter.dumps`` on write, then ``parse_any`` on read. The
+    library's serialise→parse cycle isn't always byte-stable on the
+    body, so hashing the in-memory ``page.body`` at synthesise time
+    while comparing against the on-disk parsed body at read time would
+    falsely flag every K-layer page as stale (anchors=[]).
+
+    This test directly drives ``_persist_wiki_page`` (no real LLM
+    needed) and verifies anchors survive the serialise→parse cycle.
+    """
+    from dikw_core.api import _persist_wiki_page
+    from dikw_core.domains.knowledge.wiki import build_page, write_page
+
+    init_test_wiki(tmp_path)
+    page = build_page(
+        title="Rountrip Test",
+        body=(
+            "# Rountrip Test\n\n"
+            "Body paragraph one — the chunker will see this after\n"
+            "frontmatter.dumps + frontmatter.loads roundtrip.\n\n"
+            "## Subsection\n\nBody paragraph two — also chunkable.\n"
+        ),
+        tags=["test"],
+        sources=["sources/whatever.md"],
+    )
+    write_page(tmp_path, page)
+
+    cfg, _root, storage = await api._with_storage(tmp_path)
+    try:
+        await _persist_wiki_page(
+            storage=storage,
+            root=tmp_path,
+            page=page,
+            embedder=None,  # no embed leg needed for the anchor check
+            embedding_model="fake",
+            text_version_id=None,
+            cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
+        )
+    finally:
+        await storage.close()
+
+    result = await api.read_page(tmp_path, page.path)
+    assert result.layer == Layer.WIKI
+    assert result.anchors, (
+        "K-layer anchors got dropped — hash mismatch between "
+        "synthesise-time and read-time body coordinate space"
+    )
+    # Slice-correctness: the same anchor↔chunk text alignment we lock
+    # for source pages must hold for K-layer pages too.
+    cfg, _root, storage = await api._with_storage(tmp_path)
+    del cfg
+    try:
+        chunks = await storage.list_chunks(result.doc_id)
+    finally:
+        await storage.close()
+    by_seq = {c.seq: c for c in chunks}
+    for anchor in result.anchors:
+        chunk = by_seq[anchor.seq]
+        assert result.body[anchor.start : anchor.end] == chunk.text
+
+
+@pytest.mark.asyncio
+async def test_read_page_returns_raw_body_on_parse_failure(
+    tmp_path: Path,
+) -> None:
+    """If the on-disk file is corrupt (e.g. user broke the YAML
+    front-matter externally), ``read_page`` must still serve the raw
+    text and return empty anchors instead of 500-ing. The user gets
+    "I can read it but anchors are gone" — same UX as the modified-
+    since-ingest case."""
+    root, rel = _bootstrap_wiki_with_fixture(tmp_path)
+    await api.ingest(root, embedder=FakeEmbeddings())
+
+    # Externally corrupt the front-matter.
+    (root / rel).write_text(
+        "---\n"
+        "title: : :  # invalid YAML — bare colons\n"
+        " - bad: indent\n"
+        "---\n\n"
+        "Body still readable.\n",
+        encoding="utf-8",
+    )
+
+    page = await api.read_page(root, rel)
+    assert "Body still readable" in page.body
+    assert page.anchors == []
+
+
+@pytest.mark.asyncio
 async def test_read_page_anchors_align_with_parsed_body(tmp_path: Path) -> None:
     """The chunker runs on the front-matter-stripped body, so chunk
     ``start`` / ``end`` are offsets into that stripped body — not the

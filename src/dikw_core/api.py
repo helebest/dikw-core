@@ -62,7 +62,6 @@ from .config import (
 from .domains.data.assets import materialize_asset
 from .domains.data.backends import UnsupportedFormat, parse_any
 from .domains.data.backends.base import ParsedDocument
-from .domains.data.backends.markdown import content_hash
 from .domains.data.sources import iter_source_files
 from .domains.info.chunk import chunk_markdown
 from .domains.info.embed import (
@@ -1598,25 +1597,29 @@ async def read_page(
 
     # File I/O + parsing is sync; offload so a slow disk / large file
     # doesn't stall the event loop alongside other in-flight requests
-    # (retrieve, query stream).
-    def _read_and_parse() -> tuple[str, str]:
+    # (retrieve, query stream). ``body_hash=None`` signals a parse
+    # failure (e.g. user broke the YAML front-matter externally) — the
+    # natural hash-mismatch path then drops anchors instead of 500-ing
+    # the route.
+    def _read_and_parse() -> tuple[str, str | None]:
         if not abs_path.is_file():
             # Document row exists but the file is gone (mid-flight
             # delete, or an inactive doc whose file was removed).
             raise PageNotFound(path)
-        from .domains.data.backends.markdown import parse_text
-
-        raw = abs_path.read_text(encoding="utf-8")
-        parsed = parse_text(path=match.path, text=raw, mtime=match.mtime)
-        return parsed.body, parsed.hash
+        try:
+            parsed = parse_any(abs_path, rel_path=match.path)
+            return parsed.body, parsed.hash
+        except Exception:
+            return abs_path.read_text(encoding="utf-8"), None
 
     body, body_hash = await asyncio.to_thread(_read_and_parse)
 
-    # If the file was edited since ingest, the indexed chunk offsets
-    # no longer line up with the current parsed body — silently
-    # serving stale anchors would produce off-by-N slicing in agent
-    # callers. Drop them and let the caller re-ingest.
-    anchors_valid = body_hash == match.hash
+    # If the file was edited (or its front-matter broken) since ingest,
+    # the indexed chunk offsets no longer line up with the current
+    # parsed body — silently serving stale anchors would produce
+    # off-by-N slicing in agent callers. Drop them and let the caller
+    # re-ingest.
+    anchors_valid = body_hash is not None and body_hash == match.hash
     anchors = (
         [
             PageAnchor(chunk_id=c.chunk_id, seq=c.seq, start=c.start, end=c.end)
@@ -2014,25 +2017,34 @@ async def _persist_wiki_page(
     text_version_id: int | None,
     cjk_tokenizer: CjkTokenizer = "none",
 ) -> None:
-    """Index ``page`` into the K layer: document, chunks, embeddings, links."""
+    """Index ``page`` into the K layer: document, chunks, embeddings, links.
+
+    The caller writes ``page`` to disk via ``write_page`` *before*
+    invoking this function — we then re-parse the file so the stored
+    hash and chunk offsets match what ``read_page`` will compute on
+    read. ``frontmatter.dumps`` + ``frontmatter.loads`` is not always
+    byte-stable on the body portion, so hashing ``page.body`` directly
+    and chunking ``page.body`` would silently diverge from the
+    read-back parsed body, causing ``read_page`` to falsely flag every
+    K-layer page as stale (empty anchors).
+    """
     doc_id = _doc_id_for(Layer.WIKI, page.path)
-    body_hash = content_hash(page.body)
     abs_path = (root / page.path).resolve()
-    mtime = abs_path.stat().st_mtime if abs_path.is_file() else time.time()
+    parsed = parse_any(abs_path, rel_path=page.path)
 
     await storage.upsert_document(
         DocumentRecord(
             doc_id=doc_id,
             path=page.path,
             title=page.title,
-            hash=body_hash,
-            mtime=mtime,
+            hash=parsed.hash,
+            mtime=parsed.mtime,
             layer=Layer.WIKI,
             active=True,
         )
     )
 
-    chunks = chunk_markdown(page.body, cjk_tokenizer=cjk_tokenizer)
+    chunks = chunk_markdown(parsed.body, cjk_tokenizer=cjk_tokenizer)
     records = [
         ChunkRecord(doc_id=doc_id, seq=c.seq, start=c.start, end=c.end, text=c.text)
         for c in chunks
@@ -2061,7 +2073,7 @@ async def _persist_wiki_page(
     for d in k_docs:
         if d.title and d.title not in title_to_path:
             title_to_path[d.title] = d.path
-    parsed_links = parse_links(page.body)
+    parsed_links = parse_links(parsed.body)
     resolved, _unresolved = resolve_links(doc_id, parsed_links, title_to_path=title_to_path)
     for link in resolved:
         await storage.upsert_link(link)

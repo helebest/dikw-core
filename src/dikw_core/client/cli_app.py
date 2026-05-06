@@ -84,9 +84,9 @@ def _resolve(server: str | None, token: str | None) -> ClientConfig:
 def _validate_format(fmt: str) -> None:
     """Reject a ``--format`` value outside the json/table contract.
 
-    Three commands (``health``, ``retrieve``, ``pages list``) share the
-    exact same json-or-table contract — keep the validation in one
-    place so the error message and exit code stay consistent."""
+    Every command that ships ``--format`` shares the same json-or-table
+    contract — keep the validation in one place so the error message
+    and exit code stay consistent."""
     if fmt not in ("json", "table"):
         console.print(
             f"[red]error[/red]: --format must be 'json' or 'table', got {fmt!r}"
@@ -143,20 +143,38 @@ def info_cmd(
 
 @app.command("status")
 def status_cmd(
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'table' (default, human) or 'json' (agent-friendly).",
+        ),
+    ] = "table",
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
     """Show storage-backend counts."""
+    _validate_format(fmt)
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
             counts = await t.get_json("/v1/status")
-        render_status(console, counts)
+        if fmt == "json":
+            console.print_json(json.dumps(counts, ensure_ascii=False))
+        else:
+            render_status(console, counts)
 
     _run(_go())
 
 
-@app.command("health")
+@app.command(
+    "health",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw client health\n\n"
+        "  dikw client health --format table"
+    ),
+)
 def health_cmd(
     fmt: Annotated[
         str,
@@ -188,7 +206,15 @@ def health_cmd(
     _run(_go())
 
 
-@app.command("check")
+@app.command(
+    "check",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw client check\n\n"
+        "  dikw client check --llm-only\n\n"
+        "  dikw client check --embed-only"
+    ),
+)
 def check_cmd(
     llm_only: Annotated[
         bool, typer.Option("--llm-only", help="Probe only the LLM leg.")
@@ -241,9 +267,9 @@ def init_cmd(
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
-    """Ask the server to scaffold its bound wiki (no-op when already scaffolded).
+    """Ask the server to scaffold its bound base (no-op when already scaffolded).
 
-    For starting a fresh wiki *locally*, use the top-level ``dikw init``
+    For starting a fresh base *locally*, use the top-level ``dikw init``
     command — it works without a running server.
     """
 
@@ -264,26 +290,37 @@ def init_cmd(
                 # docstring instead of exiting non-zero.
                 if e.code == "wiki_already_initialised":
                     console.print(
-                        "[yellow]wiki already initialized[/yellow] — no-op"
+                        "[yellow]base already initialized[/yellow] — no-op"
                     )
                     return
                 raise
-        console.print(f"[green]initialized[/green] wiki at {payload.get('root')}")
+        console.print(f"[green]initialized[/green] base at {payload.get('root')}")
 
     _run(_go())
 
 
 @app.command("lint")
 def lint_cmd(
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'table' (default, human) or 'json' (agent-friendly).",
+        ),
+    ] = "table",
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
-    """Run lint against the server's wiki."""
+    """Run lint against the server's base."""
+    _validate_format(fmt)
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
             report = await t.post_json("/v1/lint")
-        render_lint_report(console, report)
+        if fmt == "json":
+            console.print_json(json.dumps(report, ensure_ascii=False))
+        else:
+            render_lint_report(console, report)
         # ``LintReport`` is a dataclass with ``ok`` defined as a
         # ``@property``; pydantic's response serializer drops properties
         # so the wire shape is just ``{"issues": [...]}``. Compute
@@ -299,7 +336,15 @@ def lint_cmd(
 # ---- retrieve (NDJSON stream, retrieval-only) -------------------------
 
 
-@app.command("retrieve")
+@app.command(
+    "retrieve",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw client retrieve \"deterministic scoping\"\n\n"
+        "  dikw client retrieve \"...\" --limit 10 --format table\n\n"
+        "  dikw client retrieve \"...\" | jq '.chunks[].text'"
+    ),
+)
 def retrieve_cmd(
     question: Annotated[str, typer.Argument(help="Natural-language query.")],
     limit: Annotated[
@@ -364,7 +409,15 @@ def retrieve_cmd(
 # ---- query (NDJSON stream) --------------------------------------------
 
 
-@app.command("query")
+@app.command(
+    "query",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw client query \"What is X?\"\n\n"
+        "  dikw client query \"...\" --limit 10 --show-hits\n\n"
+        "  dikw client query \"...\" --plain"
+    ),
+)
 def query_cmd(
     question: Annotated[str, typer.Argument(help="Natural-language question.")],
     limit: Annotated[
@@ -443,7 +496,16 @@ def _exit_on_failure(
     raise typer.Exit(code=1)
 
 
-@app.command("ingest")
+@app.command(
+    "ingest",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw client ingest\n\n"
+        "  dikw client ingest --from ./docs\n\n"
+        "  dikw client ingest --from ./docs --no-embed\n\n"
+        "  dikw client ingest --strict"
+    ),
+)
 def ingest_cmd(
     from_dir: Annotated[
         Path | None,
@@ -451,7 +513,7 @@ def ingest_cmd(
             "--from",
             "-f",
             help=(
-                "Local directory to upload as the wiki's sources before "
+                "Local directory to upload as the base's sources before "
                 "ingest. If omitted, the server ingests whatever is "
                 "already on its disk."
             ),
@@ -676,16 +738,27 @@ app.add_typer(review_app, name="review")
 
 @review_app.command("list")
 def review_list_cmd(
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'table' (default, human) or 'json' (agent-friendly).",
+        ),
+    ] = "table",
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
     """List candidate W-layer items awaiting review."""
+    _validate_format(fmt)
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
             items = await t.get_json(
                 "/v1/wisdom", params={"status": "candidate"}
             )
+        if fmt == "json":
+            console.print_json(json.dumps(items, ensure_ascii=False))
+            return
         if not items:
             console.print("[green]no candidates[/green]")
             return
@@ -761,7 +834,15 @@ pages_app = typer.Typer(
 app.add_typer(pages_app, name="pages")
 
 
-@pages_app.command("list")
+@pages_app.command(
+    "list",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw client pages list\n\n"
+        "  dikw client pages list --layer source\n\n"
+        "  dikw client pages list --format table"
+    ),
+)
 def pages_list_cmd(
     layer: Annotated[
         Layer | None,
@@ -809,7 +890,15 @@ def pages_list_cmd(
     _run(_go())
 
 
-@pages_app.command("get")
+@pages_app.command(
+    "get",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw client pages get sources/notes/alpha.md\n\n"
+        "  dikw client pages get wiki/Some-Page.md\n\n"
+        "  dikw client pages get \"sources/has space.md\""
+    ),
+)
 def pages_get_cmd(
     path: Annotated[
         str,
@@ -862,10 +951,18 @@ def tasks_list_cmd(
     limit: Annotated[
         int, typer.Option("--limit", help="Max rows to return.")
     ] = 100,
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'table' (default, human) or 'json' (agent-friendly).",
+        ),
+    ] = "table",
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
     """List server-side tasks."""
+    _validate_format(fmt)
 
     async def _go() -> None:
         params: dict[str, Any] = {"limit": limit}
@@ -875,6 +972,9 @@ def tasks_list_cmd(
             params["status"] = status_filter
         async with Transport.from_config(_resolve(server, token)) as t:
             rows = await t.get_json("/v1/tasks", params=params)
+        if fmt == "json":
+            console.print_json(json.dumps(rows, ensure_ascii=False))
+            return
         if not rows:
             console.print("[dim]no tasks[/dim]")
             return
@@ -985,12 +1085,12 @@ def tasks_cancel_cmd(
 )
 def serve_and_run_cmd(
     ctx: typer.Context,
-    wiki: Annotated[
+    base: Annotated[
         Path,
         typer.Option(
-            "--wiki",
-            "-w",
-            help="Path to the wiki root (must contain dikw.yml). Defaults to cwd.",
+            "--base",
+            "-b",
+            help="Path to the dikw base (must contain dikw.yml). Defaults to cwd.",
         ),
     ] = Path("."),
     host: Annotated[
@@ -1050,12 +1150,12 @@ def serve_and_run_cmd(
     Examples:
 
         dikw client serve-and-run -- status
-        dikw client serve-and-run --wiki ./my-wiki -- ingest --no-embed
+        dikw client serve-and-run --base ./my-base -- ingest --no-embed
         dikw client serve-and-run --keep-alive -- query "..."
     """
     inner_cmd = list(ctx.args)
     opts = _sar.ServeAndRunOptions(
-        wiki=wiki,
+        base=base,
         host=host,
         port=port,
         token=token,

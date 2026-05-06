@@ -42,39 +42,56 @@ def version_cmd() -> None:
     console.print(__version__)
 
 
-@app.command("init")
+@app.command(
+    "init",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw init\n\n"
+        "  dikw init my-base -d \"my notes\""
+    ),
+)
 def init_cmd(
     path: Annotated[
         Path,
-        typer.Argument(help="Directory to scaffold the wiki into. Created if it doesn't exist."),
+        typer.Argument(
+            help="Directory to scaffold the dikw base into. Created if it doesn't exist."
+        ),
     ] = Path("."),
     description: Annotated[
         str,
         typer.Option("--description", "-d", help="One-line description for dikw.yml."),
     ] = "",
 ) -> None:
-    """Scaffold a new dikw wiki at PATH (no server required)."""
+    """Scaffold a new dikw base at PATH (no server required)."""
     try:
         root = api.init_wiki(path, description=description or None)
     except FileExistsError as e:
         console.print(f"[red]error:[/red] {e}")
         raise typer.Exit(code=1) from e
-    console.print(f"[green]initialized[/green] wiki at [bold]{root}[/bold]")
+    console.print(f"[green]initialized[/green] dikw base at [bold]{root}[/bold]")
     console.print(
         "Next: add markdown under [cyan]sources/[/cyan], "
-        "run [cyan]dikw serve --wiki .[/cyan] in another terminal, "
+        "run [cyan]dikw serve --base .[/cyan] in another terminal, "
         "then [cyan]dikw status[/cyan]."
     )
 
 
-@app.command("serve")
+@app.command(
+    "serve",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw serve\n\n"
+        "  dikw serve --base ./my-base\n\n"
+        "  dikw serve --host 0.0.0.0 --token $DIKW_SERVER_TOKEN"
+    ),
+)
 def serve_cmd(
-    wiki: Annotated[
+    base: Annotated[
         Path,
         typer.Option(
-            "--wiki",
-            "-w",
-            help="Path to the wiki root (must contain dikw.yml). Defaults to cwd.",
+            "--base",
+            "-b",
+            help="Path to the dikw base (must contain dikw.yml). Defaults to cwd.",
         ),
     ] = Path("."),
     host: Annotated[
@@ -113,7 +130,7 @@ def serve_cmd(
         load_auth_config,
     )
 
-    wiki_root = wiki.resolve()
+    base_root = base.resolve()
     auth_cfg = load_auth_config(host=host, token_override=token)
     try:
         ensure_auth_invariant(auth_cfg)
@@ -122,13 +139,13 @@ def serve_cmd(
         raise typer.Exit(code=2) from e
 
     fastapi_app = build_app_from_disk(
-        wiki_root=wiki_root,
+        wiki_root=base_root,
         host=host,
         token_override=token,
     )
     posture = "token" if auth_cfg.required else "open (localhost only, no token)"
     console.print(
-        f"[green]dikw serve[/green]  wiki=[cyan]{wiki_root}[/cyan]  "
+        f"[green]dikw serve[/green]  base=[cyan]{base_root}[/cyan]  "
         f"bind=[cyan]http://{host}:{port}[/cyan]  auth=[cyan]{posture}[/cyan]",
         highlight=False,
     )

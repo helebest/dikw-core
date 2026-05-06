@@ -9,7 +9,7 @@ on-disk format the engine produces, see [`docs/design.md`](./design.md).
 
 ```bash
 # Bind to loopback, no auth — the typical single-user laptop workflow.
-uv run dikw serve --wiki ./my-wiki
+uv run dikw serve --base ./my-base
 
 # In another terminal:
 uv run dikw client status
@@ -20,7 +20,7 @@ For one-shot commands without keeping a server running, use
 `serve-and-run`:
 
 ```bash
-uv run dikw serve-and-run --wiki ./my-wiki -- ingest --no-embed
+uv run dikw serve-and-run --base ./my-base -- ingest --no-embed
 ```
 
 ## Wire shape
@@ -47,17 +47,17 @@ free-form `message`.
 
 `dikw serve` binds to `127.0.0.1:8765` by default. There is **no
 authentication on loopback** — the implicit threat model is "the user
-running the CLI also owns the wiki on disk." If you need to expose the
+running the CLI also owns the base on disk." If you need to expose the
 server to other hosts:
 
 ```bash
 export DIKW_SERVER_TOKEN=$(openssl rand -hex 32)
-uv run dikw serve --wiki ./my-wiki --host 0.0.0.0 --token $DIKW_SERVER_TOKEN
+uv run dikw serve --base ./my-base --host 0.0.0.0 --token $DIKW_SERVER_TOKEN
 ```
 
 Hard rule, enforced at startup: **`--host 0.0.0.0` (or any non-loopback
 address) refuses to start without a token.** The runtime would rather
-fail loudly than silently expose an unauthenticated wiki to the
+fail loudly than silently expose an unauthenticated base to the
 network.
 
 Clients pick the token up via:
@@ -75,13 +75,13 @@ Clients pick the token up via:
 `dikw serve` is a long-lived process. Run it under a supervisor in
 production:
 
-* **systemd** — `ExecStart=/usr/bin/dikw serve --wiki /var/lib/dikw/...`,
+* **systemd** — `ExecStart=/usr/bin/dikw serve --base /var/lib/dikw/...`,
   `Restart=on-failure`. Set `Environment=DIKW_SERVER_TOKEN=...` (or
   `EnvironmentFile=` to a 600-perm file) so the token doesn't end up in
   the unit listing.
 * **Docker** — base image with `uv pip install dikw-core[postgres]`,
-  mount the wiki tree at `/wiki`, expose 8765. The server expects to
-  own its bound wiki — don't share the same `.dikw/` directory across
+  mount the base tree at `/base`, expose 8765. The server expects to
+  own its bound base — don't share the same `.dikw/` directory across
   multiple containers.
 * **Foreground / dev** — `uv run dikw serve` is fine for laptop work;
   `serve-and-run` is the right tool for one-shot commands.
@@ -104,17 +104,17 @@ in-memory state is gone.
 ### Storage concurrency
 
 * **SQLite** — single writer at any time. `dikw serve` is the only
-  intended writer; running `dikw serve` against a wiki that's also
+  intended writer; running `dikw serve` against a base that's also
   being mutated by a hand-edited script will trigger `database is
   locked` errors.
-* **Postgres** — multiple `dikw serve` instances against one wiki are
+* **Postgres** — multiple `dikw serve` instances against one base are
   supported by the storage layer (each task is one transaction), but
   there's no orchestration logic. If you need multi-server topologies,
   put a load balancer in front and accept that ingest/synth/distill
   tasks racing on the same source will produce one winner per `(path,
   content_hash)` pair via storage-level upsert.
 * **Filesystem backend** — single-writer only by design. Don't run two
-  servers against the same vault.
+  servers against the same base.
 
 ### Observability
 
@@ -129,7 +129,7 @@ in-memory state is gone.
   schema-drift checks.
 * `GET /v1/tasks?limit=...` — list of past tasks for debugging long
   ingests / failed synth runs. Persists across server restart (backed
-  by the same storage adapter as the wiki itself).
+  by the same storage adapter as the base itself).
 
 ### Client config
 
@@ -163,15 +163,15 @@ token comes from the file, and so on.
 
 ## Disabling lifecycle endpoints
 
-For production wikis whose tree should never be re-scaffolded by a
+For production bases whose tree should never be re-scaffolded by a
 client:
 
 ```bash
 export DIKW_SERVER_DISABLE_INIT=1
-uv run dikw serve --wiki /var/lib/dikw/prod
+uv run dikw serve --base /var/lib/dikw/prod
 ```
 
 `POST /v1/init` then returns `409 Conflict {"code":"init_disabled"}`
-regardless of whether the wiki tree exists. The CLI's `dikw client init`
+regardless of whether the base tree exists. The CLI's `dikw client init`
 falls through cleanly; the local-only `dikw init` (which writes files
 directly) is unaffected.

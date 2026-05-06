@@ -7,6 +7,26 @@ on each entry call out exactly what shape changes break.
 
 ## Unreleased
 
+### Agent ergonomics + `--wiki` → `--base` rename
+
+* **BREAKING**: `dikw serve --wiki <path>` is now `dikw serve --base <path>`
+  (and `dikw client serve-and-run --wiki` → `--base`). The old flag is
+  removed; pre-alpha rebuild policy applies. The on-disk `wiki/`
+  subdirectory keeps its name — only the CLI flag pointing at the
+  bound directory changed, since "base" is the consistent term for the
+  whole tree (containing `sources/`, `wiki/`, `wisdom/`, `.dikw/`,
+  `dikw.yml`).
+* **Added**: `--format json|table` on `status`, `lint`, `tasks list`,
+  `review list` — same contract as `health`, `retrieve`, `pages list`.
+  JSON output is unbuffered, suitable for piping into `jq` or feeding
+  back into an agent loop.
+* **Added**: `--help` epilogs with example invocations on `serve`,
+  `init`, `health`, `check`, `retrieve`, `query`, `ingest`, `pages
+  list`, `pages get`.
+* **Added**: top-level `AGENTS.md` and `INSTALL_FOR_AGENTS.md` for AI
+  agents that *use* dikw-core as a knowledge backend (vs. CLAUDE.md
+  which targets coding assistants contributing to the engine).
+
 ### **BREAKING**: client/server architecture replaces in-process CLI
 
 Phases 0–6 of the `dikw-core-client-server-eventual-clarke` plan
@@ -25,7 +45,7 @@ client that talks to it over `/v1/`.
   commands are now thin HTTP clients; running any of them requires a
   reachable `dikw serve` instance (or `dikw serve-and-run` for one-shot
   use).
-* **Added**: `dikw serve --wiki <path>` — FastAPI + Uvicorn server.
+* **Added**: `dikw serve --base <path>` — FastAPI + Uvicorn server.
   Defaults to `127.0.0.1:8765` with no auth on loopback; non-loopback
   hosts require `DIKW_SERVER_TOKEN`. Routes documented in
   [`docs/server.md`](./docs/server.md).

@@ -11,15 +11,15 @@ git clone https://github.com/helebest/dikw-core
 cd dikw-core
 uv sync
 
-# Pick any directory — `my-wiki/` below — it will also be a valid Obsidian vault.
-uv run dikw init ../my-wiki --description "my research wiki"
-cd ../my-wiki
+# Pick any directory — `my-base/` below — it will also be a valid Obsidian vault.
+uv run dikw init ../my-base --description "my research base"
+cd ../my-base
 ```
 
 The init command creates this tree:
 
 ```text
-my-wiki/
+my-base/
 ├── dikw.yml              # the config the engine reads on every command
 ├── sources/              # your raw documents go here (Data layer)
 ├── wiki/                 # LLM-authored knowledge pages, regenerated on synth
@@ -35,18 +35,19 @@ my-wiki/
     └── index.sqlite
 ```
 
-Open the folder in Obsidian and you'll see the wiki + wisdom pages render
-natively thanks to the `[[wikilink]]` syntax and YAML front-matter the engine
-emits.
+The whole tree is the **dikw base**; the `wiki/` subdirectory is just
+the K-layer slice. Open the folder in Obsidian and you'll see the wiki +
+wisdom pages render natively thanks to the `[[wikilink]]` syntax and
+YAML front-matter the engine emits.
 
 ## 2. Start the server
 
 `dikw-core` runs as a long-lived process; the CLI is a thin client that
-talks HTTP + NDJSON to it. Start the server bound to your wiki in a
+talks HTTP + NDJSON to it. Start the server bound to your base in a
 spare terminal (or under a process supervisor):
 
 ```bash
-uv run dikw serve --wiki .
+uv run dikw serve --base .
 # bound to http://127.0.0.1:8765 — no auth on loopback
 ```
 
@@ -129,12 +130,12 @@ queries, how to convert public benchmarks) lives in [`evals/README.md`](../evals
 ## 8. Bind the server to a non-loopback interface
 
 `dikw serve --host 0.0.0.0` is rejected unless `DIKW_SERVER_TOKEN` is set
-— the runtime refuses to expose an unauthenticated wiki to the network.
+— the runtime refuses to expose an unauthenticated base to the network.
 Run with the token:
 
 ```bash
 export DIKW_SERVER_TOKEN=$(openssl rand -hex 32)
-uv run dikw serve --wiki . --host 0.0.0.0
+uv run dikw serve --base . --host 0.0.0.0
 ```
 
 Clients pick the same token up via `DIKW_SERVER_TOKEN` (or `--token` /
@@ -196,7 +197,7 @@ provider:
 
 A working reference copy lives at
 [`tests/fixtures/live-minimax-gitee.dikw.yml`](../tests/fixtures/live-minimax-gitee.dikw.yml)
-— drop it into a fresh wiki and fill in your two keys.
+— drop it into a fresh base and fill in your two keys.
 
 The two legs use **distinct keys**. The embedding leg reads
 `DIKW_EMBEDDING_API_KEY` exclusively — no fallback to `OPENAI_API_KEY` — so

@@ -50,7 +50,7 @@ def test_find_free_port_returns_a_usable_port() -> None:
 
 def test_build_server_command_includes_token_only_when_set() -> None:
     base = sar.ServeAndRunOptions(
-        wiki=Path("/tmp/w"),
+        base=Path("/tmp/w"),
         host="127.0.0.1",
         port=8765,
         token=None,
@@ -185,7 +185,7 @@ def test_run_refuses_empty_inner_cmd(tmp_path: Path) -> None:
     init_test_wiki(tmp_path / "wiki", description="empty inner cmd")
     rc = sar.run(
         sar.ServeAndRunOptions(
-            wiki=tmp_path / "wiki",
+            base=tmp_path / "wiki",
             host="127.0.0.1",
             port=0,
             token=None,
@@ -223,7 +223,7 @@ def test_serve_and_run_round_trips_info_command(
     port = sar.find_free_port()
     rc = sar.run(
         sar.ServeAndRunOptions(
-            wiki=wiki_for_serve,
+            base=wiki_for_serve,
             host="127.0.0.1",
             port=port,
             token=None,
@@ -265,7 +265,7 @@ def test_serve_and_run_propagates_inner_failure(
     port = sar.find_free_port()
     rc = sar.run(
         sar.ServeAndRunOptions(
-            wiki=wiki_for_serve,
+            base=wiki_for_serve,
             host="127.0.0.1",
             port=port,
             token=None,

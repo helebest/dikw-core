@@ -342,7 +342,7 @@ def lint_cmd(
         "Examples:\n\n"
         "  dikw client retrieve \"deterministic scoping\"\n\n"
         "  dikw client retrieve \"...\" --limit 10 --format table\n\n"
-        "  dikw client retrieve \"...\" | jq '.chunks[].text'"
+        "  dikw client retrieve \"...\" --plain | jq '.chunks[].text'"
     ),
 )
 def retrieve_cmd(

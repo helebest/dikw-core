@@ -108,8 +108,15 @@ dim. Exit code 0 = both legs OK, 1 = any failure, 2 = flag misuse. Pass
 `--llm-only` or `--embed-only` to probe one leg in isolation.
 
 > Note: `check` requires a running server. If you haven't started one
-> yet, use `uv run dikw client serve-and-run -- check` instead — that
-> spins one up, runs the inner command, and tears it down.
+> yet, point `serve-and-run` at the base you just initialised:
+>
+> ```bash
+> uv run dikw client serve-and-run --base ./my-base -- check
+> ```
+>
+> That spins one up, runs the inner command, and tears it down. Without
+> `--base ./my-base` it falls back to the cwd, which won't contain a
+> `dikw.yml` until step 6 has been run.
 
 ## 6. Start the server
 

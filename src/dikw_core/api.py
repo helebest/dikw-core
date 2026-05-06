@@ -108,6 +108,8 @@ from .schemas import (
     ImageContent,
     Layer,
     MultimodalInput,
+    PageAnchor,
+    PageReadResult,
     PageRef,
     RetrieveResult,
     StorageCounts,
@@ -132,6 +134,9 @@ __all__ = [
     "LayerCounts",
     "LlmInfo",
     "MultimodalInfo",
+    "PageAnchor",
+    "PageNotFound",
+    "PageReadResult",
     "PageRef",
     "ProbeResult",
     "ProvidersInfo",
@@ -151,11 +156,20 @@ __all__ = [
     "list_candidates",
     "load_wiki",
     "query",
+    "read_page",
     "reject_wisdom",
     "retrieve",
     "status",
     "synthesize",
 ]
+
+
+class PageNotFound(LookupError):
+    """Raised by :func:`read_page` when the given path is not a registered
+    document in the base. Path-escape attempts (``..``, files outside the
+    base root) and unindexed files (``dikw.yml``) all surface here so the
+    server route can map a single exception type to a uniform 404.
+    """
 
 WIKI_INIT_FILES: dict[str, str] = {
     "sources/.gitkeep": "",
@@ -1480,6 +1494,68 @@ def _build_page_refs(hits: list[Hit]) -> list[PageRef]:
     refs = [PageRef(**bucket) for bucket in accum.values()]
     refs.sort(key=lambda r: r.score, reverse=True)
     return refs
+
+
+async def read_page(
+    root: str | Path | None, path: str
+) -> PageReadResult:
+    """Read a registered page (D / K / W layer) + its chunk anchors.
+
+    Path safety is index-driven: only paths present in the ``documents``
+    table are reachable, so unindexed files (``dikw.yml``, files outside
+    the base root, ``..`` traversal attempts) all get a uniform
+    :class:`PageNotFound`. ``anchors`` is empty when the doc has never
+    been chunked (e.g. an active document whose chunker produced zero
+    spans).
+
+    Used by ``GET /v1/base/pages/{path}`` to let an agent that hit a
+    chunk via ``/v1/retrieve`` fetch the full page body and align hit
+    chunks back onto it via ``Hit.chunk_id`` / ``Hit.seq``.
+    """
+    from .domains.data.path_norm import normalize_path
+
+    cfg, base_root, storage = await _with_storage(root)
+    del cfg
+    try:
+        wanted = normalize_path(path)
+        match: DocumentRecord | None = None
+        for doc in await storage.list_documents(active=None):
+            if doc.path_key == wanted or doc.path == path:
+                match = doc
+                break
+        if match is None:
+            raise PageNotFound(path)
+        chunks = await storage.list_chunks(match.doc_id)
+    finally:
+        await storage.close()
+
+    base_resolved = base_root.resolve()
+    abs_path = (base_resolved / match.path).resolve()
+    try:
+        abs_path.relative_to(base_resolved)
+    except ValueError as e:
+        # Defence in depth: a doc registered with a path that escapes
+        # the base root is corruption — refuse to read.
+        raise PageNotFound(path) from e
+    if not abs_path.is_file():
+        # Document row exists but the file is gone (mid-flight delete,
+        # or an inactive doc whose file was removed). Same uniform 404.
+        raise PageNotFound(path)
+    body = abs_path.read_text(encoding="utf-8")
+
+    anchors = [
+        PageAnchor(chunk_id=c.chunk_id, seq=c.seq, start=c.start, end=c.end)
+        for c in chunks
+        if c.chunk_id is not None
+    ]
+    return PageReadResult(
+        doc_id=match.doc_id,
+        path=match.path,
+        layer=match.layer,
+        title=match.title,
+        body=body,
+        anchors=anchors,
+    )
 
 
 async def retrieve(

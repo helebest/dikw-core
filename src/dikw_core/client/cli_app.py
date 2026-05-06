@@ -728,6 +728,88 @@ def review_reject_cmd(
     _run(_go())
 
 
+# ---- pages subcommands ------------------------------------------------
+
+pages_app = typer.Typer(
+    help="Read pages (D / K / W) directly from the server's base.",
+    no_args_is_help=True,
+)
+app.add_typer(pages_app, name="pages")
+
+
+@pages_app.command("list")
+def pages_list_cmd(
+    layer: Annotated[
+        str | None,
+        typer.Option(
+            "--layer",
+            help="Filter by layer (source|wiki|wisdom). Default: all layers.",
+        ),
+    ] = None,
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'json' (default, agent-friendly) or 'table' (human).",
+        ),
+    ] = "json",
+    server: Annotated[str | None, _server_option()] = None,
+    token: Annotated[str | None, _token_option()] = None,
+) -> None:
+    """List pages registered under the server's base."""
+    if fmt not in ("json", "table"):
+        console.print(
+            f"[red]error[/red]: --format must be 'json' or 'table', got {fmt!r}"
+        )
+        raise typer.Exit(code=2)
+
+    async def _go() -> None:
+        params: dict[str, Any] | None = {"layer": layer} if layer else None
+        async with Transport.from_config(_resolve(server, token)) as t:
+            rows = await t.get_json("/v1/base/pages", params=params)
+        if fmt == "json":
+            console.print_json(json.dumps(rows, ensure_ascii=False))
+            return
+        table = Table(title="pages", show_header=True, header_style="bold")
+        table.add_column("layer")
+        table.add_column("path")
+        table.add_column("title")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            table.add_row(
+                str(row.get("layer") or ""),
+                str(row.get("path") or ""),
+                str(row.get("title") or ""),
+            )
+        console.print(table)
+
+    _run(_go())
+
+
+@pages_app.command("get")
+def pages_get_cmd(
+    path: Annotated[
+        str,
+        typer.Argument(help="Page path under the base (e.g. sources/foo.md)."),
+    ],
+    server: Annotated[str | None, _server_option()] = None,
+    token: Annotated[str | None, _token_option()] = None,
+) -> None:
+    """Read a page (body + chunk anchors) by its registered path.
+
+    The path must already exist as a ``DocumentRecord`` in the server's
+    base — paths that aren't indexed return 404 (use ``dikw client pages
+    list`` to discover registered paths)."""
+
+    async def _go() -> None:
+        async with Transport.from_config(_resolve(server, token)) as t:
+            payload = await t.get_json(f"/v1/base/pages/{path}")
+        console.print_json(json.dumps(payload, ensure_ascii=False))
+
+    _run(_go())
+
+
 # ---- tasks subcommands ------------------------------------------------
 
 tasks_app = typer.Typer(

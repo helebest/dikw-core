@@ -1,0 +1,84 @@
+"""Engine-side unit tests for ``api.read_page``.
+
+The HTTP-layer surface lives in ``tests/server/test_routes_pages.py``;
+this file exercises the pure helper that produces a ``PageReadResult``
+from ``(root, path)`` so the seam (path-not-registered → ``PageNotFound``,
+anchors land in seq order, body matches the on-disk file) stays guarded
+without booting a server.
+"""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import pytest
+
+from dikw_core import api
+from dikw_core.schemas import Layer
+
+from .fakes import FakeEmbeddings, init_test_wiki
+
+FIXTURES = Path(__file__).parent / "fixtures" / "notes"
+
+
+def _bootstrap_wiki_with_fixture(tmp_path: Path) -> tuple[Path, str]:
+    """Init a wiki, drop one fixture markdown into ``sources/demo/``,
+    return ``(root, sources_relative_path)``. Caller still has to ingest."""
+    init_test_wiki(tmp_path)
+    src_dir = tmp_path / "sources" / "demo"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    fixture = next(FIXTURES.glob("*.md"))
+    shutil.copy2(fixture, src_dir / fixture.name)
+    return tmp_path, f"sources/demo/{fixture.name}"
+
+
+@pytest.mark.asyncio
+async def test_read_page_returns_body_and_anchors(tmp_path: Path) -> None:
+    root, rel = _bootstrap_wiki_with_fixture(tmp_path)
+    await api.ingest(root, embedder=FakeEmbeddings())
+
+    page = await api.read_page(root, rel)
+    assert page.path == rel
+    assert page.layer == Layer.SOURCE
+    assert page.body == (root / rel).read_text(encoding="utf-8")
+    assert page.doc_id  # non-empty
+    # Ingest produced ≥ 1 chunk for any reasonable fixture.
+    assert page.anchors, "expected at least one chunk anchor"
+    # Anchors arrive in seq order.
+    seqs = [a.seq for a in page.anchors]
+    assert seqs == sorted(seqs)
+    # Each anchor's [start, end) is a valid slice of body.
+    for anchor in page.anchors:
+        assert 0 <= anchor.start <= anchor.end <= len(page.body)
+        assert anchor.chunk_id > 0  # adapter assigned a real id
+
+
+@pytest.mark.asyncio
+async def test_read_page_unknown_path_raises(tmp_path: Path) -> None:
+    init_test_wiki(tmp_path)
+    with pytest.raises(api.PageNotFound):
+        await api.read_page(tmp_path, "sources/does-not-exist.md")
+
+
+@pytest.mark.asyncio
+async def test_read_page_path_escape_attempt_raises(tmp_path: Path) -> None:
+    """``../etc/passwd``-style paths are not in the documents table, so
+    they get the same ``PageNotFound`` — no special-case sandbox check
+    needed because the lookup is index-driven."""
+    init_test_wiki(tmp_path)
+    with pytest.raises(api.PageNotFound):
+        await api.read_page(tmp_path, "../etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_read_page_unindexed_file_raises(tmp_path: Path) -> None:
+    """A file that exists on disk under the base root but isn't a
+    registered document (``dikw.yml``, raw ``sources/`` files dropped in
+    after ingest, etc.) must NOT be readable through this endpoint —
+    only indexed pages are addressable."""
+    init_test_wiki(tmp_path)
+    # ``dikw.yml`` exists after init but is not a DocumentRecord.
+    assert (tmp_path / "dikw.yml").is_file()
+    with pytest.raises(api.PageNotFound):
+        await api.read_page(tmp_path, "dikw.yml")

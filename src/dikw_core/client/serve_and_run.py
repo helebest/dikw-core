@@ -56,7 +56,7 @@ _PYTHON_M_DIKW: list[str] = [sys.executable, "-m", "dikw_core.cli"]
 
 @dataclass(frozen=True)
 class ServeAndRunOptions:
-    wiki: Path
+    base: Path
     host: str
     port: int  # 0 means "pick free"
     token: str | None
@@ -154,8 +154,8 @@ def build_server_command(opts: ServeAndRunOptions) -> list[str]:
     args = [
         *_PYTHON_M_DIKW,
         "serve",
-        "--wiki",
-        str(opts.wiki),
+        "--base",
+        str(opts.base),
         "--host",
         opts.host,
         "--port",

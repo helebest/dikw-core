@@ -113,8 +113,8 @@ async def build_runtime(
     cfg_path = root / CONFIG_FILENAME
     if not cfg_path.is_file():
         raise FileNotFoundError(
-            f"no {CONFIG_FILENAME} at {root} — initialise the wiki first "
-            "or point `dikw serve --wiki` at an existing dikw directory"
+            f"no {CONFIG_FILENAME} at {root} — initialise the base first "
+            "or point `dikw serve --base` at an existing dikw base"
         )
     cfg = load_config(cfg_path)
 
@@ -192,7 +192,7 @@ async def lifespan(
     rt: ServerRuntime = await factory()
     app.state.runtime = rt
     logger.info(
-        "dikw server ready  wiki=%s storage=%s auth=%s",
+        "dikw server ready  base=%s storage=%s auth=%s",
         rt.root,
         rt.cfg.storage.backend,
         "token" if rt.auth.required else "off",

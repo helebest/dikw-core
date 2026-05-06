@@ -8,7 +8,7 @@ Inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6
 
 ## What you get
 
-- A local-first knowledge base where the wiki is a **plain markdown tree** your editor (Obsidian, VS Code, …) can open directly.
+- A local-first knowledge base — the **dikw base** — where the on-disk layout is a **plain markdown tree** your editor (Obsidian, VS Code, …) can open directly.
 - Four explicit DIKW layers with their own operations:
   - **D**ata — raw sources you curate.
   - **I**nformation — parsed, chunked, embedded, indexed (FTS5 + vectors).
@@ -27,8 +27,8 @@ git clone https://github.com/helebest/dikw-core
 cd dikw-core
 uv sync
 
-uv run dikw init my-wiki --description "my research wiki"
-cd my-wiki
+uv run dikw init my-base --description "my research base"
+cd my-base
 # Drop some markdown into sources/, then run any single command via
 # `serve-and-run` — it spawns a local server, runs the inner command,
 # and tears it down.
@@ -40,7 +40,7 @@ For interactive sessions or long iterations, run `dikw serve` once and
 keep using `dikw client *` against it:
 
 ```bash
-uv run dikw serve --wiki .   # in one terminal
+uv run dikw serve --base .   # in one terminal
 # in another:
 uv run dikw client status
 uv run dikw client synth               # K layer (needs ANTHROPIC_API_KEY or OpenAI-compat)
@@ -67,8 +67,8 @@ Local-only commands run in this process:
 | command                     | does                                                                          |
 | --------------------------- | ----------------------------------------------------------------------------- |
 | `dikw version`              | print the package version                                                     |
-| `dikw init <path>`          | scaffold a wiki directory (sources / wiki / wisdom / `.dikw/` + `dikw.yml`)   |
-| `dikw serve --wiki <path>`  | start the FastAPI + NDJSON server bound to one wiki                           |
+| `dikw init <path>`          | scaffold a dikw base (sources / wiki / wisdom / `.dikw/` + `dikw.yml`)        |
+| `dikw serve --base <path>`  | start the FastAPI + NDJSON server bound to one base                           |
 | `dikw serve-and-run -- <cmd>` | spawn a local server, run an inner client command against it, tear it down |
 
 Everything else lives under `dikw client *` and talks to a running server
@@ -147,7 +147,7 @@ provider:
 
 A working reference copy lives at
 [`tests/fixtures/live-minimax-gitee.dikw.yml`](./tests/fixtures/live-minimax-gitee.dikw.yml)
-— drop it into a fresh wiki and fill in your two keys.
+— drop it into a fresh base and fill in your two keys.
 
 Two keys for two vendors — the embedding leg reads `DIKW_EMBEDDING_API_KEY`
 exclusively (no `OPENAI_API_KEY` fallback), so misconfigurations fail loudly

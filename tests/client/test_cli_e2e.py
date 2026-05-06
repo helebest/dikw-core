@@ -345,6 +345,37 @@ def test_tasks_list_empty_on_fresh_server(
     assert "no tasks" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["status", "--format", "json"],
+        ["lint", "--format", "json"],
+        ["tasks", "list", "--format", "json"],
+        ["review", "list", "--format", "json"],
+    ],
+    ids=["status", "lint", "tasks-list", "review-list"],
+)
+def test_format_json_emits_parseable_json(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+    argv: list[str],
+) -> None:
+    """``--format json`` is the agent-friendly half of the four
+    table-default commands extended in PR 5. Smoke-test that each one
+    actually prints valid JSON instead of the rich-rendered table —
+    otherwise an agent piping ``| jq`` would silently get a banner
+    string that never parses."""
+    import json as _json
+
+    patch_transport_factory()
+    result = _run(argv)
+    assert result.exit_code == 0, result.stdout
+    # ``console.print_json`` adds two-space indent + trailing newline; the
+    # body must be a parseable JSON document either way.
+    parsed = _json.loads(result.stdout)
+    assert isinstance(parsed, list | dict)
+
+
 def test_check_unavailable_provider_exits_one(
     asgi_client: tuple[Any, ServerRuntime],
     patch_transport_factory: Callable[[], None],

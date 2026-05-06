@@ -513,7 +513,7 @@ Prompt caching: when the provider is Anthropic, use the `cache_control` param on
 **Local CLI** (run in this process; no server required):
 - `dikw version` — print package version
 - `dikw init [path]` — scaffold `dikw.yml`, `sources/`, `wiki/`, `wisdom/`, `.dikw/`
-- `dikw serve --wiki <path>` — start the FastAPI + NDJSON server bound to one wiki
+- `dikw serve --base <path>` — start the FastAPI + NDJSON server bound to one base
 
 **Remote CLI** (`dikw client *`, also reachable via top-level aliases):
 - `dikw client status` — counts per layer
@@ -571,7 +571,7 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 5. `uv run dikw synth`; check `wiki/index.md` and `wiki/log.md` updated, at least one `entities/`/`concepts/` page created, all wikilinks resolve in `lint`.
 6. `uv run dikw distill --recent` creates ≥1 candidate in `wisdom/_candidates/`; `uv run dikw review` accepts one; the corresponding `wisdom_items.status` flips to `approved` and a rendered page exists in `wisdom/principles.md` (or kind-appropriate file).
 7. `uv run dikw query "what principles apply when choosing retrieval over a wiki?"` now cites the approved wisdom item.
-8. `uv run dikw serve --wiki .` launches; a `POST /v1/query` round-trip from any HTTP client (e.g. `dikw client query`) returns the same answer as step 7.
+8. `uv run dikw serve --base .` launches; a `POST /v1/query` round-trip from any HTTP client (e.g. `dikw client query`) returns the same answer as step 7.
 9. Swap provider in `dikw.yml` from Anthropic to OpenAI-compatible (pointed at Ollama locally or OpenAI) and repeat step 4 — works unchanged.
 10. (After Phase 5, Postgres) `docker compose up postgres` (with `pgvector` image), set `storage.backend: postgres` in `dikw.yml`, rerun steps 3–8 against the Postgres adapter — every assertion holds, no engine code changes. The storage contract test suite runs green under `DIKW_TEST_POSTGRES_DSN=...` in CI.
 

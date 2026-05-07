@@ -34,6 +34,7 @@ from dikw_core.providers.openai_compat import OpenAICompatLLM
 
 from .fakes import (
     CodexResponsesStreamStub,
+    assert_codex_request_kwargs_clean,
     codex_create_sentinel,
     make_codex_response,
 )
@@ -287,7 +288,8 @@ class _CodexHarness:
             )
 
         class _FakeResponses:
-            def stream(self, **_kwargs: Any) -> CodexResponsesStreamStub:
+            def stream(self, **kwargs: Any) -> CodexResponsesStreamStub:
+                assert_codex_request_kwargs_clean(kwargs)
                 if harness._stream is not None:
                     s = harness._stream
                     events: list[Any] = [

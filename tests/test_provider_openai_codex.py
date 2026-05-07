@@ -28,6 +28,7 @@ from dikw_core.providers.openai_codex import OpenAICodexLLM
 
 from .fakes import (
     CodexResponsesStreamStub,
+    assert_codex_request_kwargs_clean,
     codex_create_sentinel,
     make_codex_response,
 )
@@ -53,6 +54,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     class FakeResponses:
         def stream(self, **kwargs: Any) -> CodexResponsesStreamStub:
+            assert_codex_request_kwargs_clean(kwargs)
             rec["stream_kwargs"] = kwargs
             return CodexResponsesStreamStub([], final=rec["next_response"])
 
@@ -152,7 +154,6 @@ async def test_complete_calls_responses_stream_with_responses_api_shape(
     assert kwargs["model"] == "gpt-5.5"
     assert kwargs["instructions"] == "be helpful"
     assert kwargs["store"] is False
-    assert kwargs["max_output_tokens"] == 512
     assert kwargs["temperature"] == 0.4
     # Input is the Responses API shape — list of items with content parts.
     assert kwargs["input"] == [
@@ -172,6 +173,24 @@ async def test_complete_does_not_pass_messages_kwarg(
     )
     await provider.complete(system="s", user="u", model="gpt-5.5")
     assert "messages" not in captured["stream_kwargs"]
+
+
+async def test_complete_does_not_pass_max_output_tokens_kwarg(
+    captured: dict[str, Any],
+) -> None:
+    """Regression: ChatGPT codex backend rejects ``max_output_tokens``
+    with a 400 ``Unsupported parameter``. ``max_tokens`` stays in the
+    LLMProvider signature (other providers honor it) but never reaches
+    the codex wire payload. The fixture's
+    ``assert_codex_request_kwargs_clean`` makes every test in this
+    module a passive regression for the same invariant."""
+    provider = OpenAICodexLLM(
+        base_url=DEFAULT_CODEX_BASE_URL, wiki_base=_DUMMY_BASE
+    )
+    await provider.complete(
+        system="s", user="u", model="gpt-5.5", max_tokens=512
+    )
+    assert "max_output_tokens" not in captured["stream_kwargs"]
 
 
 async def test_complete_uses_streaming_responses_endpoint_only(
@@ -321,6 +340,7 @@ def stream_captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     class FakeResponses:
         def stream(self, **kwargs: Any) -> CodexResponsesStreamStub:
+            assert_codex_request_kwargs_clean(kwargs)
             rec["stream_kwargs"] = kwargs
             return CodexResponsesStreamStub(rec["events"], final=rec["final"])
 
@@ -467,7 +487,7 @@ async def test_complete_stream_passes_responses_api_shape(
     assert kw["model"] == "gpt-5.5"
     assert kw["instructions"] == "be helpful"
     assert kw["store"] is False
-    assert kw["max_output_tokens"] == 128
+    assert "max_output_tokens" not in kw
     assert kw["input"] == [
         {
             "role": "user",

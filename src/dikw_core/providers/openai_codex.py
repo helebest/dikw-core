@@ -109,7 +109,15 @@ def _extract_usage(response: Any) -> dict[str, int]:
 def _request_kwargs(
     *, system: str, user: str, model: str, max_tokens: int, temperature: float
 ) -> dict[str, Any]:
-    """Shared payload shape for ``responses.create`` and ``responses.stream``."""
+    """Wire payload for ``client.responses.stream(...)``.
+
+    ChatGPT's codex backend exposes a stricter parameter set than the
+    public Responses API: ``max_output_tokens`` is rejected with
+    ``400 Unsupported parameter`` (generation length is managed
+    server-side by the user's plan/model). ``max_tokens`` stays in the
+    signature for ``LLMProvider`` parity but is dropped on the wire.
+    """
+    _ = max_tokens
     return {
         "model": model,
         "instructions": system,
@@ -120,7 +128,6 @@ def _request_kwargs(
             }
         ],
         "store": False,
-        "max_output_tokens": max_tokens,
         "temperature": temperature,
     }
 

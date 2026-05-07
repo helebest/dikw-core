@@ -31,6 +31,7 @@ __all__ = [
     "FakeEmbeddings",
     "FakeLLM",
     "FakeMultimodalEmbedding",
+    "assert_codex_request_kwargs_clean",
     "codex_create_sentinel",
     "init_test_wiki",
     "make_codex_response",
@@ -62,6 +63,27 @@ async def codex_create_sentinel(*_args: Any, **_kwargs: Any) -> Any:
     invokes it. Assign as a method on a FakeResponses class to enforce
     the codex streaming-only contract at the SDK boundary."""
     pytest.fail(CODEX_NO_CREATE_MSG)
+
+
+# Parameters the chatgpt.com/backend-api/codex endpoint rejects with
+# ``400 Unsupported parameter``. The endpoint is a stricter subset of
+# the public Responses API; extend this tuple as new rejections are
+# discovered against the real backend.
+_CODEX_REJECTED_PARAMS: tuple[str, ...] = ("max_output_tokens",)
+
+
+def assert_codex_request_kwargs_clean(kwargs: dict[str, Any]) -> None:
+    """Fail the test if ``kwargs`` contains a parameter the ChatGPT
+    codex backend rejects. Call from every fake ``responses.stream``
+    so the next backend-rejected param surfaces at the SDK boundary
+    instead of in production."""
+    rejected = sorted(set(kwargs).intersection(_CODEX_REJECTED_PARAMS))
+    if rejected:
+        pytest.fail(
+            f"_request_kwargs must not include codex-rejected params "
+            f"{rejected!r}. The chatgpt.com/backend-api/codex endpoint "
+            "returns 400 'Unsupported parameter' for these."
+        )
 
 
 def make_codex_response(

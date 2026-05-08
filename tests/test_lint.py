@@ -150,6 +150,44 @@ async def test_repeated_wikilink_target_does_not_trigger(empty_wiki: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_scalar_tags_value_does_not_crash(empty_wiki: Path) -> None:
+    """Wiki pages are user-editable; a hand-written ``tags: 2024``
+    parses as a scalar int, not a list. Lint must tolerate the drift
+    instead of raising TypeError on iteration."""
+    page_path = empty_wiki / "wiki" / "concepts" / "scalar-tag.md"
+    page_path.parent.mkdir(parents=True, exist_ok=True)
+    page_path.write_text(
+        "---\n"
+        "id: K-scalar-tag\n"
+        "type: concept\n"
+        "title: Scalar Tag\n"
+        "tags: 2024\n"
+        "---\n\n"
+        "# Scalar Tag\n\nA page with a scalar tags field.\n",
+        encoding="utf-8",
+    )
+    rel_path = "wiki/concepts/scalar-tag.md"
+    _cfg, _root, storage = await api._with_storage(empty_wiki)
+    try:
+        await storage.upsert_document(
+            DocumentRecord(
+                doc_id=f"K:{rel_path}",
+                path=rel_path,
+                title="Scalar Tag",
+                hash=f"hash-{rel_path}",
+                mtime=0.0,
+                layer=Layer.WIKI,
+                active=True,
+            )
+        )
+    finally:
+        await storage.close()
+    report = await _run_lint(empty_wiki)
+    issues = [i for i in report.issues if i.kind == "non_atomic_page"]
+    assert issues == []
+
+
+@pytest.mark.asyncio
 async def test_fenced_code_headings_do_not_trigger(empty_wiki: Path) -> None:
     """Comments inside ```` ``` ```` fences (``# install`` /
     ``## setup``) must not be counted toward H1/H2 totals — otherwise

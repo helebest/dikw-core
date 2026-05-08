@@ -150,7 +150,11 @@ async def run_lint(storage: Storage, *, root: Path) -> LintReport:
             violations.append(
                 f"{distinct_wikilinks} distinct wikilinks > {_ATOMIC_WIKILINK_COUNT}"
             )
-        raw_tags = post.metadata.get("tags") or []
+        # Wiki pages are user-editable: a hand-written ``tags: 2024``
+        # parses as a scalar, not a list. Guard against the type drift.
+        raw_tags = post.metadata.get("tags")
+        if not isinstance(raw_tags, list):
+            raw_tags = []
         tag_list = [t for t in raw_tags if isinstance(t, str) and t.strip()]
         namespaced = [t for t in tag_list if "/" in t]
         domains = sorted({t.split("/", 1)[0].strip() for t in namespaced})

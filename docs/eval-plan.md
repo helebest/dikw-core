@@ -78,6 +78,36 @@ below fires. Rationale:
    generation-side metric is "does `[W#]` get cited correctly?" — which
    a bespoke check catches more cleanly than faithfulness does.
 
+## Acceptance gates for K-layer and Retrieval changes
+
+Independent of "do we have evals?" — once a change touches K-layer
+synth/lint/wiki schema or retrieval config, **the PR description must
+cite an `evals/BASELINES.md` entry** that demonstrates either signal
+or non-destructiveness. Two gates:
+
+1. **K-layer changes** (`src/dikw_core/domains/knowledge/`,
+   `src/dikw_core/prompts/synthesize.md`,
+   wiki page schema in `schemas.py`): run a real-data baseline against
+   `~/Project/opendikw/dikw-data/datasets/markdown-books/elon-musk.md`
+   (1500-line subset is the working size — the full text exposes a
+   codex SSE keepalive timeout bug, see 2026-05-08 entry). Use the
+   `openai_codex` provider so the LLM cost is zero. Add a BASELINES.md
+   section with: source size, group/page/chunk counts, lint outcomes
+   broken down by issue kind, and (for atomicity tweaks) a 5+5 sample
+   judgement of TP/FP rates.
+
+2. **Retrieval config changes** (any field on `RetrievalConfig`,
+   anything under `src/dikw_core/domains/info/search.py`): run an
+   ablation on at least one packaged dataset (mvp / scifact / cmteb)
+   showing nDCG@10 doesn't regress. Note that **graph-leg-style K-layer
+   features can't be measured on standard retrieval benchmarks** —
+   those datasets ingest as D-layer only and never produce wikilinks
+   in the storage `links` table. For those, the gate is "non-destructive
+   when off; non-destructive when on with empty links".
+
+The Stage A K-layer fan-out + atomicity-lint baseline (2026-05-08) and
+the wikilink graph leg ablation (2026-05-08) are the worked examples.
+
 ## Triggers for revisiting
 
 Adopt an LLM-as-judge framework (default: RAGAS) when **any** of:

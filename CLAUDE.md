@@ -100,3 +100,4 @@ src/dikw_core/
 - Don't implement search fusion inside a storage adapter — it belongs in `info/search.py`.
 - Don't add a new source format without registering a `SourceBackend`.
 - Don't change on-disk wiki/wisdom layout without updating `docs/design.md` first — users open these trees in Obsidian.
+- Don't ship K-layer (`domains/knowledge/`) or Retrieval (`domains/info/`, `RetrievalConfig`) changes without an entry in `evals/BASELINES.md` showing real-data outcome. K-layer changes get an `elon-musk.md` baseline; retrieval gets an ablation across packaged datasets. See `docs/eval-plan.md` "Acceptance gates for K-layer and Retrieval changes".

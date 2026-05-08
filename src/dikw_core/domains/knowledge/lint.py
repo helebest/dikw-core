@@ -47,6 +47,10 @@ _ATOMIC_TAG_DOMAIN_COUNT = 1
 
 _H1_LINE = re.compile(r"^\s{0,3}#\s+\S", flags=re.MULTILINE)
 _H2_LINE = re.compile(r"^\s{0,3}##\s+\S", flags=re.MULTILINE)
+# Strip ``` fenced blocks before counting headings — a code example
+# like ``# install deps`` / ``## setup`` would otherwise inflate the
+# H1/H2 counts and false-flag an atomic technical note.
+_FENCED_CODE = re.compile(r"```[\s\S]*?```", flags=re.MULTILINE)
 
 
 LintKind = Literal[
@@ -130,12 +134,13 @@ async def run_lint(storage: Storage, *, root: Path) -> LintReport:
         violations: list[str] = []
         if len(body) > _ATOMIC_BODY_CHARS:
             violations.append(f"body {len(body)} chars > {_ATOMIC_BODY_CHARS}")
-        h1_count = len(_H1_LINE.findall(body))
+        prose = _FENCED_CODE.sub("", body)
+        h1_count = len(_H1_LINE.findall(prose))
         if h1_count > 1:
             violations.append(
                 f"{h1_count} H1 sections — atomic page should have exactly one"
             )
-        h2_count = len(_H2_LINE.findall(body))
+        h2_count = len(_H2_LINE.findall(prose))
         if h2_count > _ATOMIC_H2_COUNT:
             violations.append(f"{h2_count} H2 sections > {_ATOMIC_H2_COUNT}")
         # Count distinct targets so a single-topic page that repeats one

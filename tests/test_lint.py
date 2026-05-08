@@ -150,6 +150,33 @@ async def test_repeated_wikilink_target_does_not_trigger(empty_wiki: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_fenced_code_headings_do_not_trigger(empty_wiki: Path) -> None:
+    """Comments inside ```` ``` ```` fences (``# install`` /
+    ``## setup``) must not be counted toward H1/H2 totals — otherwise
+    a single-topic technical note with a shell snippet false-flags."""
+    body = (
+        "# Setup Instructions\n\n"
+        "```bash\n"
+        "# install deps\n"
+        "uv sync\n"
+        "## setup db\n"
+        "createdb foo\n"
+        "## seed data\n"
+        "psql -f seed.sql\n"
+        "## run tests\n"
+        "uv run pytest\n"
+        "## bonus\n"
+        "echo done\n"
+        "```\n\n"
+        "Single coherent topic.\n"
+    )
+    await _seed_page(wiki_root=empty_wiki, title="Setup Instructions", body=body)
+    report = await _run_lint(empty_wiki)
+    issues = [i for i in report.issues if i.kind == "non_atomic_page"]
+    assert issues == []
+
+
+@pytest.mark.asyncio
 async def test_multiple_h1_triggers_non_atomic(empty_wiki: Path) -> None:
     """Multiple H1 headers on one page is the canonical "two atomic
     notes glued together" pattern — bilingual duplicates (CN + EN

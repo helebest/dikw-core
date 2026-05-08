@@ -173,6 +173,68 @@ async def test_text_match_seed_ranks_above_graph_only_neighbor(linked_wiki) -> N
 
 
 @pytest.mark.asyncio
+async def test_graph_weight_zero_treats_leg_as_off(linked_wiki) -> None:
+    """``graph_weight=0`` must opt out cleanly — appending a zero-weight
+    leg lets graph-only chunks land at score 0 (visible whenever limit
+    exceeds positive-score hits) and can break CombMNZ's leg-count
+    accounting. Treating zero as "leg off" matches user intent and
+    keeps fusion math safe."""
+    storage = linked_wiki["storage"]
+    searcher = HybridSearcher(
+        storage, embedder=None, graph_enabled=True, graph_weight=0.0
+    )
+    hits = await searcher.search("alpha", limit=10)
+    chunk_ids = [h.chunk_id for h in hits]
+    assert linked_wiki["a_chunk"] in chunk_ids
+    assert linked_wiki["b_chunk"] not in chunk_ids
+    assert linked_wiki["c_chunk"] not in chunk_ids
+
+
+@pytest.mark.asyncio
+async def test_layer_filter_propagates_to_graph_leg(parametrized_storage) -> None:
+    """The graph leg must respect the same layer filter as FTS/vector.
+    Otherwise a wikilink from a K-layer page to a D-layer source would
+    leak across the layer boundary on a ``layer=Layer.WIKI`` search."""
+    storage = parametrized_storage
+    page_a = _doc("wiki/concepts/alpha.md")
+    source_b = DocumentRecord(
+        doc_id="D::sources/bravo.md",
+        path="sources/bravo.md",
+        title="bravo",
+        hash="hash-source-bravo",
+        mtime=time.time(),
+        layer=Layer.SOURCE,
+        active=True,
+    )
+    for d in (page_a, source_b):
+        await storage.upsert_document(d)
+    a_chunks = await storage.replace_chunks(
+        page_a.doc_id,
+        [ChunkRecord(doc_id=page_a.doc_id, seq=0, start=0, end=30, text="alpha alpha alpha")],
+    )
+    b_chunks = await storage.replace_chunks(
+        source_b.doc_id,
+        [ChunkRecord(doc_id=source_b.doc_id, seq=0, start=0, end=30, text="bravo bravo unrelated")],
+    )
+    await storage.upsert_link(
+        LinkRecord(
+            src_doc_id=page_a.doc_id,
+            dst_path="sources/bravo.md",
+            link_type=LinkType.WIKILINK,
+            anchor=None,
+            line=1,
+        )
+    )
+    searcher = HybridSearcher(storage, embedder=None, graph_enabled=True)
+    hits = await searcher.search("alpha", limit=10, layer=Layer.WIKI)
+    chunk_ids = [h.chunk_id for h in hits]
+    assert a_chunks[0] in chunk_ids
+    assert b_chunks[0] not in chunk_ids, (
+        "graph leg leaked a Layer.SOURCE neighbor under layer=Layer.WIKI"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fusion", ["rrf", "combsum", "combmnz"])
 async def test_graph_leg_works_with_all_fusion_modes(linked_wiki, fusion) -> None:
     """Graph leg must integrate cleanly with all three fusion algorithms,

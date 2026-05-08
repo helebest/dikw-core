@@ -449,7 +449,7 @@ class HybridSearcher:
         vec_ranked = [h.chunk_id for h in vec_hits]
 
         graph_neighbors = await self._collect_graph_neighbors(
-            vec_ranked, fts_ranked, per_leg_limit
+            vec_ranked, fts_ranked, per_leg_limit, layer=layer
         )
 
         # Asset channel rides the vector weight — same family of signal
@@ -615,34 +615,44 @@ class HybridSearcher:
         vec_ranked: list[int],
         fts_ranked: list[int],
         per_leg_limit: int,
+        *,
+        layer: Layer | None = None,
     ) -> list[ChunkNeighborRecord]:
         """Optional 4th leg: K-layer wikilink graph.
 
-        Seeds come from the unfused vec + fts top-K (deterministic across
-        fusion-mode changes); storage walks one hop via the wikilink
-        graph and returns neighbors ordered by edge_count desc. Returns
-        an empty list when disabled or when the storage backend lacks
-        the neighbor primitive (older adapters).
+        Seeds round-robin from vec + fts top-K so a BM25-only match
+        still gets a chance even when the vector leg fills the budget.
+        Storage walks one hop via the wikilink graph (filtered to
+        ``layer`` when set, so the leg respects the same scope as the
+        text legs) and returns neighbors ordered by edge_count desc.
+        Returns an empty list when disabled, when ``graph_weight`` is
+        zero (treats as opt-out), or when the backend lacks the
+        primitive (older adapters).
         """
-        if not self._graph_enabled:
+        if not self._graph_enabled or self._graph_weight == 0.0:
             return []
         seeds: list[int] = []
         seen: set[int] = set()
-        for cid in (
-            *vec_ranked[: self._graph_seed_top_k],
-            *fts_ranked[: self._graph_seed_top_k],
-        ):
-            if cid in seen:
-                continue
-            seeds.append(cid)
-            seen.add(cid)
+        vec_top = vec_ranked[: self._graph_seed_top_k]
+        fts_top = fts_ranked[: self._graph_seed_top_k]
+        for i in range(max(len(vec_top), len(fts_top))):
+            for cid in (
+                vec_top[i] if i < len(vec_top) else None,
+                fts_top[i] if i < len(fts_top) else None,
+            ):
+                if cid is None or cid in seen:
+                    continue
+                seeds.append(cid)
+                seen.add(cid)
+                if len(seeds) >= self._graph_seed_top_k:
+                    break
             if len(seeds) >= self._graph_seed_top_k:
                 break
         if not seeds:
             return []
         try:
             return await self._storage.neighbor_chunks_via_links(
-                seeds, limit=per_leg_limit
+                seeds, layer=layer, limit=per_leg_limit
             )
         except NotSupported:
             return []

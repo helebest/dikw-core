@@ -1,10 +1,14 @@
 """K-layer hygiene checker.
 
-Reports three classes of issue that are safe to detect deterministically:
+Reports four classes of issue that are safe to detect deterministically:
 
 * ``broken_wikilink`` — wikilinks whose target title isn't a known K/W page.
 * ``orphan_page`` — pages with no inbound wikilinks and no listing source.
 * ``duplicate_title`` — more than one K-layer page with identical title.
+* ``non_atomic_page`` — page body looks like multiple wikipage worth of
+  content stuffed together (long body, many H2 sections, link-list-y).
+  Layer-3 backstop for the Zettelkasten atomicity rule the synth prompt
+  enforces in layer 1; the prompt can drift, this can't.
 
 Phases 3+ may add semantic checks (stale claims, missing evidence for
 approved wisdom items, etc.); this module intentionally stays lexical.
@@ -12,6 +16,7 @@ approved wisdom items, etc.); this module intentionally stays lexical.
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +26,16 @@ import frontmatter
 from ...schemas import Layer, LinkType
 from ...storage.base import Storage
 from .links import parse_links
+
+# Heuristic thresholds for ``non_atomic_page``. A page is flagged when ANY
+# of these are exceeded — they're independent symptoms of "this page is
+# really N pages glued together". Tuned against Stage A fan-out output;
+# revisit once we have eval data on real K-layer corpora.
+_ATOMIC_BODY_CHARS = 1500
+_ATOMIC_H2_COUNT = 3
+_ATOMIC_WIKILINK_COUNT = 8
+
+_H2_LINE = re.compile(r"^\s{0,3}##\s+\S", flags=re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -72,10 +87,15 @@ async def run_lint(storage: Storage, *, root: Path) -> LintReport:
             post = frontmatter.load(str(abs_path))
         except Exception:
             continue
-        for link in parse_links(post.content):
+        body = post.content
+        page_links = parse_links(body)
+        wikilink_count = 0
+        for link in page_links:
+            if link.kind is not LinkType.WIKILINK:
+                continue
+            wikilink_count += 1
             if (
-                link.kind is LinkType.WIKILINK
-                and link.target not in title_set
+                link.target not in title_set
                 and not any(t.lower() == link.target.lower() for t in title_set)
             ):
                 issues.append(
@@ -86,6 +106,30 @@ async def run_lint(storage: Storage, *, root: Path) -> LintReport:
                         line=link.line,
                     )
                 )
+
+        # atomicity check — independent symptoms; report once per page.
+        violations: list[str] = []
+        if len(body) > _ATOMIC_BODY_CHARS:
+            violations.append(f"body {len(body)} chars > {_ATOMIC_BODY_CHARS}")
+        h2_count = len(_H2_LINE.findall(body))
+        if h2_count > _ATOMIC_H2_COUNT:
+            violations.append(f"{h2_count} H2 sections > {_ATOMIC_H2_COUNT}")
+        if wikilink_count > _ATOMIC_WIKILINK_COUNT:
+            violations.append(
+                f"{wikilink_count} wikilinks > {_ATOMIC_WIKILINK_COUNT}"
+            )
+        if violations:
+            issues.append(
+                LintIssue(
+                    kind="non_atomic_page",
+                    path=doc.path,
+                    detail=(
+                        "page looks like multiple atomic notes glued together: "
+                        + "; ".join(violations)
+                        + " — consider splitting via `dikw synth --force <path>`"
+                    ),
+                )
+            )
 
         # accumulate inbound link counts (resolved links from storage)
         for stored in await storage.links_from(doc.doc_id):

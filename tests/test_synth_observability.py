@@ -1,33 +1,23 @@
-"""Per-group / per-LLM-call progress events emitted by Stage A synth fan-out.
+"""``_synth_pages_from_source`` per-group ``synth_llm`` event contract.
 
-Without these events the client UI freezes on the source counter (e.g.
-``synth 2/43``) for the entire duration of a multi-group source — large
-markdown books take minutes per LLM call and the user can't tell the
-process apart from a deadlock. The fan-out helper ``_synth_pages_from_source``
-must emit a ``synth_llm`` ``calling`` / ``returned`` event pair per group
-(plus an ``error`` event when the LLM call or parser fails) so a server
-task wrapper can fan them out to NDJSON subscribers.
-
-The event tape and detail-dict contract are pinned here so a future
-refactor of the group loop can't silently regress observability.
+Pins the event tape (calling/returned/error per group) and the detail
+dict shape — server NDJSON consumers branch on both.
 """
 
 from __future__ import annotations
-
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from typing import Any
 
 import pytest
 
 from dikw_core import api
 from dikw_core.config import DikwConfig
 from dikw_core.progress import CancelToken
-from dikw_core.providers import LLMResponse, LLMStreamEvent, ToolSpec
 from dikw_core.schemas import ChunkRecord
 
-from .fakes import make_provider_cfg
+from .fakes import FakeLLM, make_provider_cfg
 from .test_progress_reporter import ListReporter
+
+_VALID_PAGE = '<page path="wiki/x.md" type="concept">\n# X\n\nbody\n</page>'
+_UNPARSEABLE = "not a <page> block"
 
 
 def _build_cfg(target_tokens: int = 40) -> DikwConfig:
@@ -62,66 +52,25 @@ def _three_chunk_body() -> tuple[str, list[ChunkRecord]]:
     return body, chunks
 
 
-@dataclass
-class _ScriptedLLM:
-    """Returns a fixed text on every ``complete`` call; tracks call count."""
-
-    response_text: str = "<page path=\"wiki/x.md\" type=\"concept\">\n# X\n\nbody\n</page>"
-    calls: int = 0
-
-    async def complete(
-        self,
-        *,
-        system: str,
-        user: str,
-        model: str,
-        max_tokens: int = 4096,
-        temperature: float = 0.2,
-        tools: list[ToolSpec] | None = None,
-    ) -> LLMResponse:
-        _ = (system, user, model, max_tokens, temperature, tools)
-        self.calls += 1
-        return LLMResponse(text=self.response_text, finish_reason="end_turn")
-
-    def complete_stream(
-        self, **_: Any
-    ) -> AsyncIterator[LLMStreamEvent]:
-        raise NotImplementedError
-
-
-@dataclass
-class _FailingLLM:
-    """Raises ``SynthesisError`` from inside ``complete`` to drive the
-    error-event branch. The synth loop catches and continues; the test
-    asserts the error event was reported before the next group started."""
-
-    calls: int = 0
-
-    async def complete(self, **_: Any) -> LLMResponse:
-        self.calls += 1
-        # Simulate a parser failure by returning text that fails to parse;
-        # SynthesisError surfaces from parse_synthesis_response, not from
-        # the LLM call itself, so we return junk text and let the parser
-        # raise. This matches the production failure mode.
-        return LLMResponse(text="not a <page> block", finish_reason="end_turn")
-
-
 # ---- per-group event tape ------------------------------------------------
+
+
+_TEMPLATE = (
+    "src={source_path} body={source_body} idx={group_index}/"
+    "{group_total} headings={group_outline} max={max_pages} "
+    "types={allowed_types}"
+)
 
 
 @pytest.mark.asyncio
 async def test_emits_calling_and_returned_event_per_group() -> None:
-    """≥2 groups → reporter gets matching ``calling`` / ``returned`` pairs."""
     body, chunks = _three_chunk_body()
     cfg = _build_cfg()
-    llm = _ScriptedLLM()
     reporter = ListReporter()
 
-    await api._synth_pages_from_source(
-        llm=llm,
-        template="src={source_path} body={source_body} idx={group_index}/"
-        "{group_total} headings={group_outline} max={max_pages} "
-        "types={allowed_types}",
+    outcome = await api._synth_pages_from_source(
+        llm=FakeLLM(response_text=_VALID_PAGE),
+        template=_TEMPLATE,
         cfg=cfg,
         source_path="sources/multi.md",
         source_body=body,
@@ -137,34 +86,29 @@ async def test_emits_calling_and_returned_event_per_group() -> None:
     statuses = [e.payload["detail"]["status"] for e in llm_events]
     calling = statuses.count("calling")
     returned = statuses.count("returned")
-    assert calling == llm.calls, "one `calling` event per LLM call"
-    assert returned == llm.calls, "one `returned` event per successful LLM call"
+    assert calling == outcome.groups_processed
+    assert returned == outcome.groups_processed
     assert calling >= 2, (
         f"expected ≥2 groups (forced via tiny target_tokens), got {calling}"
     )
-    # current/total monotonically advances and matches LLM call count.
     currents = [
         e.payload["current"] for e in llm_events
         if e.payload["detail"]["status"] == "calling"
     ]
-    assert currents == sorted(currents)
+    assert currents == list(range(1, outcome.groups_processed + 1))
     totals = {e.payload["total"] for e in llm_events}
-    assert totals == {llm.calls}, "total field carries group count on every event"
+    assert totals == {outcome.groups_processed}
 
 
 @pytest.mark.asyncio
 async def test_synth_llm_event_payload_contract() -> None:
-    """Lock the detail-dict shape so server NDJSON consumers can rely on
-    a stable field set. Adding fields is fine; renaming or dropping is not."""
     body, chunks = _three_chunk_body()
     cfg = _build_cfg()
-    llm = _ScriptedLLM()
     reporter = ListReporter()
 
     await api._synth_pages_from_source(
-        llm=llm,
-        template="x={source_body} {group_index}/{group_total} "
-        "{group_outline} {max_pages} {allowed_types} {source_path}",
+        llm=FakeLLM(response_text=_VALID_PAGE),
+        template=_TEMPLATE,
         cfg=cfg,
         source_path="sources/multi.md",
         source_body=body,
@@ -184,42 +128,29 @@ async def test_synth_llm_event_payload_contract() -> None:
         e for e in llm_events if e.payload["detail"]["status"] == "returned"
     )
 
-    calling_keys = set(calling.payload["detail"].keys())
     assert {
         "source_path", "model", "status", "section_count", "approx_tokens",
-    } <= calling_keys, (
-        f"calling event missing required fields; got {calling_keys}"
-    )
+    } <= set(calling.payload["detail"]), calling.payload["detail"]
     assert calling.payload["detail"]["source_path"] == "sources/multi.md"
-    assert calling.payload["detail"]["status"] == "calling"
     assert calling.payload["detail"]["model"] == cfg.provider.llm_model
     assert calling.payload["detail"]["section_count"] >= 1
     assert calling.payload["detail"]["approx_tokens"] >= 1
 
-    returned_keys = set(returned.payload["detail"].keys())
     assert {
         "source_path", "status", "response_chars",
-    } <= returned_keys, (
-        f"returned event missing required fields; got {returned_keys}"
-    )
-    assert returned.payload["detail"]["status"] == "returned"
-    assert returned.payload["detail"]["response_chars"] == len(llm.response_text)
+    } <= set(returned.payload["detail"]), returned.payload["detail"]
+    assert returned.payload["detail"]["response_chars"] == len(_VALID_PAGE)
 
 
 @pytest.mark.asyncio
 async def test_emits_error_event_when_parse_fails() -> None:
-    """A parser failure must surface a ``status="error"`` event before
-    the loop moves on, so operators see *which* group blew up rather
-    than only an aggregate ``parse_errors`` count post-hoc."""
     body, chunks = _three_chunk_body()
     cfg = _build_cfg()
-    llm = _FailingLLM()
     reporter = ListReporter()
 
     outcome = await api._synth_pages_from_source(
-        llm=llm,
-        template="x={source_body} {group_index}/{group_total} "
-        "{group_outline} {max_pages} {allowed_types} {source_path}",
+        llm=FakeLLM(response_text=_UNPARSEABLE),
+        template=_TEMPLATE,
         cfg=cfg,
         source_path="sources/multi.md",
         source_body=body,
@@ -228,7 +159,6 @@ async def test_emits_error_event_when_parse_fails() -> None:
         reporter=reporter,
     )
 
-    # Parser raised — synth loop logged it and continued.
     assert outcome.parse_errors >= 1
 
     error_events = [
@@ -237,25 +167,23 @@ async def test_emits_error_event_when_parse_fails() -> None:
         and e.payload["phase"] == "synth_llm"
         and e.payload["detail"].get("status") == "error"
     ]
-    assert error_events, "expected at least one synth_llm error event"
+    assert error_events
     detail = error_events[0].payload["detail"]
     assert detail["error_kind"] in {"SynthesisError", "SynthesisPartialError"}
-    assert isinstance(detail["error_msg"], str) and detail["error_msg"]
+    assert detail["error_msg"]
     assert detail["source_path"] == "sources/multi.md"
 
 
 @pytest.mark.asyncio
 async def test_no_reporter_keeps_legacy_silent_path() -> None:
-    """Backwards-compat: ``reporter=None`` (or omitted) must not raise.
-    Callers that don't care about events should keep working unchanged."""
+    """``reporter=None`` (or omitted) must not raise — pre-reporter callers
+    keep working unchanged."""
     body, chunks = _three_chunk_body()
     cfg = _build_cfg()
-    llm = _ScriptedLLM()
 
     outcome = await api._synth_pages_from_source(
-        llm=llm,
-        template="x={source_body} {group_index}/{group_total} "
-        "{group_outline} {max_pages} {allowed_types} {source_path}",
+        llm=FakeLLM(response_text=_VALID_PAGE),
+        template=_TEMPLATE,
         cfg=cfg,
         source_path="sources/multi.md",
         source_body=body,
@@ -272,20 +200,15 @@ async def test_no_reporter_keeps_legacy_silent_path() -> None:
 async def test_synth_logs_per_group_at_debug(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """DEBUG-level logs give operators tail-able visibility into the
-    LLM call cadence — same data as the progress events but on the
-    operator channel (terminal / file) rather than the user UI channel."""
     import logging
 
     caplog.set_level(logging.DEBUG)
     body, chunks = _three_chunk_body()
     cfg = _build_cfg()
-    llm = _ScriptedLLM()
 
-    await api._synth_pages_from_source(
-        llm=llm,
-        template="x={source_body} {group_index}/{group_total} "
-        "{group_outline} {max_pages} {allowed_types} {source_path}",
+    outcome = await api._synth_pages_from_source(
+        llm=FakeLLM(response_text=_VALID_PAGE),
+        template=_TEMPLATE,
         cfg=cfg,
         source_path="sources/multi.md",
         source_body=body,
@@ -297,31 +220,26 @@ async def test_synth_logs_per_group_at_debug(
         r.getMessage() for r in caplog.records
         if r.levelno == logging.DEBUG and r.name == "dikw_core.api"
     ]
-    # one "calling" + one "returned" log per group
     calling = [m for m in debug_msgs if "calling" in m and "group" in m]
     returned = [m for m in debug_msgs if "returned" in m and "group" in m]
-    assert len(calling) == llm.calls, f"expected {llm.calls} calling logs, got {calling}"
-    assert len(returned) == llm.calls, f"expected {llm.calls} returned logs, got {returned}"
-    assert all("group" in m for m in calling)
+    assert len(calling) == outcome.groups_processed
+    assert len(returned) == outcome.groups_processed
 
 
 @pytest.mark.asyncio
 async def test_synth_logs_group_failure_at_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A parser failure must surface at WARNING level — operators tailing
-    a default-INFO server still see the failure even with DEBUG noise off."""
+    """Parser failure surfaces at WARNING — visible at default INFO."""
     import logging
 
     caplog.set_level(logging.WARNING, logger="dikw_core.api")
     body, chunks = _three_chunk_body()
     cfg = _build_cfg()
-    llm = _FailingLLM()
 
     await api._synth_pages_from_source(
-        llm=llm,
-        template="x={source_body} {group_index}/{group_total} "
-        "{group_outline} {max_pages} {allowed_types} {source_path}",
+        llm=FakeLLM(response_text=_UNPARSEABLE),
+        template=_TEMPLATE,
         cfg=cfg,
         source_path="sources/multi.md",
         source_body=body,
@@ -333,6 +251,4 @@ async def test_synth_logs_group_failure_at_warning(
         r.getMessage() for r in caplog.records
         if r.levelno == logging.WARNING and r.name == "dikw_core.api"
     ]
-    assert any("group" in m and "FAILED" in m for m in warning_msgs), (
-        f"expected WARNING-level group failure log, got: {warning_msgs}"
-    )
+    assert any("group" in m and "FAILED" in m for m in warning_msgs), warning_msgs

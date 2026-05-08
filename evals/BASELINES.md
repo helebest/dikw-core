@@ -79,6 +79,71 @@ during this ablation; ablation harness must use `cache_mode="off"`.
 Architectural fix (include retrieval_cfg fingerprint in key) is a
 separate follow-up.
 
+## 2026-05-08 — Stage A K-layer fan-out + atomicity (elon-musk.md, 1500-line subset)
+
+**Status:** first real-data baseline for the Stage A `1:N` synth fan-out
+(PR #62 shipped in main) and the `non_atomic_page` lint heuristic
+(branch `feat/atomicity-lint`, commits `6cf3a5f` → `7b1251a` → `423cfcc`
++ tags-domain fix `6047906`). Tunes the lint thresholds against
+LLM-generated K-layer pages.
+
+### Run shape
+
+- **Source:** `~/Project/opendikw/dikw-data/datasets/markdown-books/elon-musk.md`
+  trimmed to the first 1500 lines (~12 chapters / ~263 KB / 91 D-layer chunks).
+- **LLM:** `openai_codex` provider, model `gpt-5.5`, ChatGPT subscription
+  OAuth (no per-token cost). Auth bootstrapped via
+  `dikw auth import openai-codex` from `~/.codex/auth.json`.
+- **Embedding:** `Qwen3-Embedding-0.6B` via Gitee AI (1024-dim, batch_size=16).
+- **Synth:** target_tokens_per_group=3600, max_pages_per_group=4,
+  slug_dedup=merge_body. Resulted in **19 chunk groups → 70 wiki pages
+  created + 2 updated** (zero parse / LLM errors).
+- **Branch:** integration of `main + feat/atomicity-lint + feat/wikilink-recall`
+  (validate/elon-musk).
+- **Commit:** `423cfcc` (tip of `feat/atomicity-lint` after threshold calibration).
+
+### Lint outcomes (post-calibration)
+
+| issue kind          | count | rate |
+|---------------------|-------|------|
+| broken_wikilink     |  241  | n/a (cross-source refs) |
+| orphan_page         |   53  | 73% (no second-pass index page yet) |
+| non_atomic_page     |    5  | **6.9% of 72 pages** (target band 5-25%) |
+| duplicate_title     |    1  | 1.4% |
+
+`non_atomic_page` sample of 5/5 flagged pages:
+
+| page                                  | trip reason          | verdict |
+|---------------------------------------|----------------------|---------|
+| `entities/joshua-haldeman.md`         | 2 H1 (CN + EN dup)   | TP |
+| `entities/errol-musk.md`              | 2 H1 (CN + EN dup)   | TP |
+| `entities/tesla-roadster.md`          | 2 H1 (same EN twice) | TP |
+| `concepts/idiot-index.md`             | 2 H1 (same EN twice) | TP |
+| `notes/tesla-2006-funding-round.md`   | 17 wikilinks         | FP (event w/ many entities) |
+
+True-positive rate: **4/5 = 80%**, meets the ≥4/5 acceptance criterion.
+
+5/5 unflagged 1500-2500 char "borderline" pages were genuinely atomic
+(true negatives).
+
+### Threshold calibration commits
+
+| commit     | change                                                            |
+|------------|-------------------------------------------------------------------|
+| `6047906`  | tags-domain: only count *namespaced* tags (not flat); fixes 100% FP rate from LLM-generated 3-5 flat tags per page |
+| `7b1251a`  | body 1500 → 2500 chars; wikilinks 8 → 15; eliminates borderline single-topic FPs (4/5 of original sample) |
+| `423cfcc`  | new H1-count > 1 detector; catches bilingual / glued-duplicate pattern that body-chars at 2500 misses |
+
+### Known limitation
+
+Full `elon-musk.md` (6160 lines / 77 chunk groups) hung indefinitely on
+the first synth attempt — server process showed near-zero CPU and no
+outbound HTTPS connections after first LLM call. Hypothesis: codex SSE
+keepalive bytes reset httpx's `read` timeout, so a stalled stream is
+never timed out. 1500-line subset (19 groups) completes cleanly in
+~10 min. Full-text reproduction + provider-side fix is a separate
+follow-up; doesn't block the lint feature shipping.
+
 ## 2026-05-05 — Postgres backend on cmteb, post-CJK-symmetry
 
 **Status:** first PG-backend canonical baseline, paired with the SQLite

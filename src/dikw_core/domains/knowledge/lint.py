@@ -51,6 +51,7 @@ _ATOMIC_WIKILINK_COUNT = 15
 # heuristic only fires when the wiki actually adopts namespaced tags.
 _ATOMIC_TAG_DOMAIN_COUNT = 1
 
+_H1_LINE = re.compile(r"^\s{0,3}#\s+\S", flags=re.MULTILINE)
 _H2_LINE = re.compile(r"^\s{0,3}##\s+\S", flags=re.MULTILINE)
 
 
@@ -127,6 +128,11 @@ async def run_lint(storage: Storage, *, root: Path) -> LintReport:
         violations: list[str] = []
         if len(body) > _ATOMIC_BODY_CHARS:
             violations.append(f"body {len(body)} chars > {_ATOMIC_BODY_CHARS}")
+        h1_count = len(_H1_LINE.findall(body))
+        if h1_count > 1:
+            violations.append(
+                f"{h1_count} H1 sections — atomic page should have exactly one"
+            )
         h2_count = len(_H2_LINE.findall(body))
         if h2_count > _ATOMIC_H2_COUNT:
             violations.append(f"{h2_count} H2 sections > {_ATOMIC_H2_COUNT}")

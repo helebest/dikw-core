@@ -133,6 +133,27 @@ async def test_many_wikilinks_trigger_non_atomic(empty_wiki: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_multiple_h1_triggers_non_atomic(empty_wiki: Path) -> None:
+    """Multiple H1 headers on one page is the canonical "two atomic
+    notes glued together" pattern — bilingual duplicates (CN + EN
+    versions of the same biography), or two unrelated subjects sharing
+    a frontmatter. Caught at body-length thresholds only when total
+    chars > 2500, which misses short bilingual pages; H1-count catches
+    them deterministically. Real elon-musk.md baseline (2026-05-08)
+    surfaced ``joshua-haldeman.md`` with 中文 + English versions."""
+    body = (
+        "# 乔舒亚\n\nFirst version of the biography.\n\n"
+        "---\n\n"
+        "# Joshua\n\nSecond version of the same biography.\n"
+    )
+    await _seed_page(wiki_root=empty_wiki, title="Joshua", body=body)
+    report = await _run_lint(empty_wiki)
+    issues = [i for i in report.issues if i.kind == "non_atomic_page"]
+    assert len(issues) == 1
+    assert "H1 sections" in issues[0].detail
+
+
+@pytest.mark.asyncio
 async def test_event_page_with_many_entities_does_not_trigger(empty_wiki: Path) -> None:
     """Real elon-musk.md baseline (2026-05-08): event pages routinely
     cite 8-12 entities (PayPal coup, Tesla funding round) — these are

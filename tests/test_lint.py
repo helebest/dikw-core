@@ -117,8 +117,9 @@ async def test_many_h2_sections_trigger_non_atomic(empty_wiki: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_many_wikilinks_trigger_non_atomic(empty_wiki: Path) -> None:
-    """16 wikilinks in one short body — true MOC-style aggregation,
-    not a single-event entity-rich page (those routinely cite 8-12)."""
+    """16 distinct wikilink targets in one short body — true MOC-style
+    aggregation, not a single-event entity-rich page (those routinely
+    cite 8-12 distinct entities)."""
     body = (
         "# Hub Page\n\n"
         "References [[A]], [[B]], [[C]], [[D]], [[E]], [[F]], "
@@ -130,6 +131,22 @@ async def test_many_wikilinks_trigger_non_atomic(empty_wiki: Path) -> None:
     issues = [i for i in report.issues if i.kind == "non_atomic_page"]
     assert len(issues) == 1
     assert "wikilinks" in issues[0].detail
+
+
+@pytest.mark.asyncio
+async def test_repeated_wikilink_target_does_not_trigger(empty_wiki: Path) -> None:
+    """A biography that mentions the same entity 20 times is atomic
+    about that entity, not a 20-topic page. The heuristic counts
+    *distinct* targets so this case stays clean."""
+    body = (
+        "# Biography\n\n"
+        + " ".join(["[[Elon Musk]]"] * 20)
+        + " was discussed throughout the source.\n"
+    )
+    await _seed_page(wiki_root=empty_wiki, title="Biography", body=body)
+    report = await _run_lint(empty_wiki)
+    issues = [i for i in report.issues if i.kind == "non_atomic_page"]
+    assert issues == []
 
 
 @pytest.mark.asyncio

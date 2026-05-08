@@ -108,11 +108,11 @@ async def run_lint(storage: Storage, *, root: Path) -> LintReport:
             continue
         body = post.content
         page_links = parse_links(body)
-        wikilink_count = 0
+        wikilink_targets: set[str] = set()
         for link in page_links:
             if link.kind is not LinkType.WIKILINK:
                 continue
-            wikilink_count += 1
+            wikilink_targets.add(link.target)
             if (
                 link.target not in title_set
                 and not any(t.lower() == link.target.lower() for t in title_set)
@@ -138,9 +138,12 @@ async def run_lint(storage: Storage, *, root: Path) -> LintReport:
         h2_count = len(_H2_LINE.findall(body))
         if h2_count > _ATOMIC_H2_COUNT:
             violations.append(f"{h2_count} H2 sections > {_ATOMIC_H2_COUNT}")
-        if wikilink_count > _ATOMIC_WIKILINK_COUNT:
+        # Count distinct targets so a single-topic page that repeats one
+        # entity ([[Elon Musk]] x 16) doesn't trip the threshold.
+        distinct_wikilinks = len(wikilink_targets)
+        if distinct_wikilinks > _ATOMIC_WIKILINK_COUNT:
             violations.append(
-                f"{wikilink_count} wikilinks > {_ATOMIC_WIKILINK_COUNT}"
+                f"{distinct_wikilinks} distinct wikilinks > {_ATOMIC_WIKILINK_COUNT}"
             )
         raw_tags = post.metadata.get("tags") or []
         tag_list = [t for t in raw_tags if isinstance(t, str) and t.strip()]
@@ -156,7 +159,7 @@ async def run_lint(storage: Storage, *, root: Path) -> LintReport:
                     detail=(
                         "page looks like multiple atomic notes glued together: "
                         + "; ".join(violations)
-                        + " — consider splitting via `dikw synth --force <path>`"
+                        + " — consider splitting the page by hand"
                     ),
                 )
             )

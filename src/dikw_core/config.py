@@ -172,9 +172,14 @@ class RetrievalConfig(BaseModel):
     # ``graph_weight``. Default-off until eval evidence shows the leg
     # actually moves nDCG — wikilink graphs need to be dense enough for
     # one-hop neighbor expansion to be informative.
+    #
+    # ``graph_weight`` defaults to ``bm25_weight`` so a graph-only
+    # neighbor never outranks an exact BM25 match by itself — the leg
+    # augments rather than overpowers the lexical signal. Override to
+    # raise/lower per corpus.
     graph_enabled: bool = False
     graph_seed_top_k: int = Field(default=20, ge=1)
-    graph_weight: float = Field(default=0.5, ge=0.0)
+    graph_weight: float = Field(default=0.3, ge=0.0)
 
 
 class SQLiteStorageConfig(BaseModel):

@@ -173,6 +173,36 @@ async def test_text_match_seed_ranks_above_graph_only_neighbor(linked_wiki) -> N
 
 
 @pytest.mark.asyncio
+async def test_prod_weights_keep_bm25_above_graph_only(linked_wiki) -> None:
+    """Same precision invariant under production ``RetrievalConfig``
+    defaults (bm25_weight=0.3, graph_weight matched). Without this
+    pin, raising ``graph_weight`` above ``bm25_weight`` lets a
+    rank-1 graph-only neighbor outscore an exact BM25 match
+    (0.5/61 vs 0.3/61) when the vector leg is absent or misses."""
+    from dikw_core.config import RetrievalConfig
+
+    cfg = RetrievalConfig()
+    storage = linked_wiki["storage"]
+    searcher = HybridSearcher(
+        storage,
+        embedder=None,
+        graph_enabled=True,
+        bm25_weight=cfg.bm25_weight,
+        vector_weight=cfg.vector_weight,
+        graph_weight=cfg.graph_weight,
+    )
+    hits = await searcher.search("alpha", limit=10)
+    chunk_ids = [h.chunk_id for h in hits]
+    a_idx = chunk_ids.index(linked_wiki["a_chunk"])
+    b_idx = chunk_ids.index(linked_wiki["b_chunk"])
+    assert a_idx < b_idx, (
+        f"BM25-matching seed (A) must rank above graph-only neighbor (B) "
+        f"under prod weights; got A@{a_idx} vs B@{b_idx} — "
+        f"graph_weight {cfg.graph_weight} must be ≤ bm25_weight {cfg.bm25_weight}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_graph_weight_zero_treats_leg_as_off(linked_wiki) -> None:
     """``graph_weight=0`` must opt out cleanly — appending a zero-weight
     leg lets graph-only chunks land at score 0 (visible whenever limit

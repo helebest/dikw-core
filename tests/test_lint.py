@@ -177,20 +177,40 @@ async def test_no_tags_does_not_trigger_tag_violation(empty_wiki: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tags_no_namespace_treats_each_as_domain(empty_wiki: Path) -> None:
-    """Flat tags without ``/`` separators are treated as separate domains
-    each — being conservative pushes the user toward namespaced tags."""
-    body = "# Flat-Tagged Page\n\nMixes unrelated flat tags.\n"
+async def test_flat_tags_only_do_not_trigger(empty_wiki: Path) -> None:
+    """Flat tags (no ``/``) are *ignored* by the cross-domain heuristic.
+    2026-05-08 elon-musk.md real-data validation: LLM-generated atomic
+    pages routinely carry 3-5 flat tags
+    (``entrepreneur, biography, spacex, tesla``). Counting each as its
+    own domain produced 100% false positives, so the heuristic only
+    fires when the wiki has actually adopted namespaced tags."""
+    body = "# Flat-Tagged Page\n\nA real-world atomic page with flat tags.\n"
     await _seed_page(
         wiki_root=empty_wiki,
         title="Flat-Tagged Page",
         body=body,
-        tags=["foo", "bar"],
+        tags=["entrepreneur", "biography", "spacex", "tesla"],
     )
     report = await _run_lint(empty_wiki)
     issues = [i for i in report.issues if i.kind == "non_atomic_page"]
-    assert len(issues) == 1
-    assert "tags span" in issues[0].detail
+    assert issues == []
+
+
+@pytest.mark.asyncio
+async def test_namespaced_plus_flat_only_counts_namespaced(empty_wiki: Path) -> None:
+    """A mix of namespaced (``ml/research``) and flat (``biography``)
+    tags only counts namespaced ones toward the domain set. Single
+    namespaced domain + arbitrary flat tags is still atomic."""
+    body = "# Mixed Tags Page\n\nNamespaced + flat together.\n"
+    await _seed_page(
+        wiki_root=empty_wiki,
+        title="Mixed Tags Page",
+        body=body,
+        tags=["ml/research", "biography", "spacex"],
+    )
+    report = await _run_lint(empty_wiki)
+    issues = [i for i in report.issues if i.kind == "non_atomic_page"]
+    assert issues == []
 
 
 @pytest.mark.asyncio

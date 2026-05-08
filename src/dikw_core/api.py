@@ -2481,6 +2481,14 @@ async def _synth_pages_from_source(
                 "approx_tokens": group.token_count,
             },
         )
+        logger.debug(
+            "  group %d/%d calling llm.complete (model=%s, sections=%d, ~%d tokens)",
+            group_pos,
+            total_groups,
+            cfg.provider.llm_model,
+            len(group.section_starts),
+            group.token_count,
+        )
         response = await llm.complete(
             system="You synthesise K-layer wiki pages for dikw-core.",
             user=user_prompt,
@@ -2497,6 +2505,12 @@ async def _synth_pages_from_source(
                 "status": "returned",
                 "response_chars": len(response.text),
             },
+        )
+        logger.debug(
+            "  group %d/%d ← returned (%d chars)",
+            group_pos,
+            total_groups,
+            len(response.text),
         )
         try:
             new_pages = parse_synthesis_response(
@@ -2529,6 +2543,13 @@ async def _synth_pages_from_source(
             errors += 1
             notes.append(
                 f"group {group_pos}/{total_groups} parse error: {e}"
+            )
+            logger.warning(
+                "  group %d/%d FAILED: %s: %s",
+                group_pos,
+                total_groups,
+                type(e).__name__,
+                e,
             )
             await _reporter.progress(
                 phase="synth_llm",

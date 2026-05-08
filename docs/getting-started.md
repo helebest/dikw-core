@@ -110,6 +110,17 @@ If a single source freezes for minutes without inner events you're
 either looking at a provider stall (codex SSE keepalive bug, gateway
 buffering) or a real network hang — not a synth-loop issue.
 
+For server-side detail, raise the log level on the server process:
+
+```bash
+DIKW_LOG_LEVEL=DEBUG dikw serve --base $DIKW_BASE
+```
+
+DEBUG adds a per-group log line on each side of the LLM call (model,
+section count, response chars). A parser failure surfaces at WARNING
+even at the default INFO level — operators tailing the server don't
+need DEBUG to spot one.
+
 ## 6. Distil Wisdom (the W layer)
 
 ```bash

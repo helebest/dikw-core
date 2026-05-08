@@ -263,3 +263,76 @@ async def test_no_reporter_keeps_legacy_silent_path() -> None:
         cancel=CancelToken(),
     )
     assert outcome.groups_processed >= 2
+
+
+# ---- per-group logger calls ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_synth_logs_per_group_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEBUG-level logs give operators tail-able visibility into the
+    LLM call cadence — same data as the progress events but on the
+    operator channel (terminal / file) rather than the user UI channel."""
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    body, chunks = _three_chunk_body()
+    cfg = _build_cfg()
+    llm = _ScriptedLLM()
+
+    await api._synth_pages_from_source(
+        llm=llm,
+        template="x={source_body} {group_index}/{group_total} "
+        "{group_outline} {max_pages} {allowed_types} {source_path}",
+        cfg=cfg,
+        source_path="sources/multi.md",
+        source_body=body,
+        chunks=chunks,
+        cancel=CancelToken(),
+    )
+
+    debug_msgs = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.DEBUG and r.name == "dikw_core.api"
+    ]
+    # one "calling" + one "returned" log per group
+    calling = [m for m in debug_msgs if "calling" in m and "group" in m]
+    returned = [m for m in debug_msgs if "returned" in m and "group" in m]
+    assert len(calling) == llm.calls, f"expected {llm.calls} calling logs, got {calling}"
+    assert len(returned) == llm.calls, f"expected {llm.calls} returned logs, got {returned}"
+    assert all("group" in m for m in calling)
+
+
+@pytest.mark.asyncio
+async def test_synth_logs_group_failure_at_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A parser failure must surface at WARNING level — operators tailing
+    a default-INFO server still see the failure even with DEBUG noise off."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="dikw_core.api")
+    body, chunks = _three_chunk_body()
+    cfg = _build_cfg()
+    llm = _FailingLLM()
+
+    await api._synth_pages_from_source(
+        llm=llm,
+        template="x={source_body} {group_index}/{group_total} "
+        "{group_outline} {max_pages} {allowed_types} {source_path}",
+        cfg=cfg,
+        source_path="sources/multi.md",
+        source_body=body,
+        chunks=chunks,
+        cancel=CancelToken(),
+    )
+
+    warning_msgs = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "dikw_core.api"
+    ]
+    assert any("group" in m and "FAILED" in m for m in warning_msgs), (
+        f"expected WARNING-level group failure log, got: {warning_msgs}"
+    )

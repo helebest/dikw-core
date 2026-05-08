@@ -235,6 +235,24 @@ async def test_layer_filter_propagates_to_graph_leg(parametrized_storage) -> Non
 
 
 @pytest.mark.asyncio
+async def test_graph_leg_skipped_in_bm25_mode(linked_wiki) -> None:
+    """Single-leg modes (``bm25`` / ``vector``) are diagnostic
+    ablations used by ``dikw eval --retrieval all`` to compare against
+    published baselines. The graph leg must NOT activate in those
+    modes — even with ``graph_enabled=True`` — or the bm25 / vector
+    numbers stop being pure-leg measurements. ``vector`` mode shares
+    the same gate but requires a real embedder; covering ``bm25``
+    here gives the gate sufficient coverage."""
+    storage = linked_wiki["storage"]
+    searcher = HybridSearcher(storage, embedder=None, graph_enabled=True)
+    hits = await searcher.search("alpha", limit=10, mode="bm25")
+    chunk_ids = [h.chunk_id for h in hits]
+    assert linked_wiki["a_chunk"] in chunk_ids
+    assert linked_wiki["b_chunk"] not in chunk_ids
+    assert linked_wiki["c_chunk"] not in chunk_ids
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fusion", ["rrf", "combsum", "combmnz"])
 async def test_graph_leg_works_with_all_fusion_modes(linked_wiki, fusion) -> None:
     """Graph leg must integrate cleanly with all three fusion algorithms,

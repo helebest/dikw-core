@@ -448,9 +448,15 @@ class HybridSearcher:
         fts_ranked = [h.chunk_id for h in fts_hits if h.chunk_id is not None]
         vec_ranked = [h.chunk_id for h in vec_hits]
 
-        graph_neighbors = await self._collect_graph_neighbors(
-            vec_ranked, fts_ranked, per_leg_limit, layer=layer
-        )
+        # Graph leg only fires in hybrid mode — single-leg modes
+        # (bm25 / vector) are diagnostic ablations and ``mode="all"``
+        # eval depends on bm25 / vector being pure for the comparison
+        # against published baselines.
+        graph_neighbors: list[ChunkNeighborRecord] = []
+        if mode == "hybrid":
+            graph_neighbors = await self._collect_graph_neighbors(
+                vec_ranked, fts_ranked, per_leg_limit, layer=layer
+            )
 
         # Asset channel rides the vector weight — same family of signal
         # (semantic similarity in the multimodal space), distinct only in

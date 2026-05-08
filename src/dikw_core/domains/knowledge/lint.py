@@ -20,6 +20,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import frontmatter
 
@@ -29,36 +30,37 @@ from .links import parse_links
 
 # Heuristic thresholds for ``non_atomic_page``. A page is flagged when ANY
 # of these are exceeded — they're independent symptoms of "this page is
-# really N pages glued together". Calibrated 2026-05-08 against
-# elon-musk.md (1500-line subset, 70 LLM-synthesised K pages):
-# - body 2500 chars: catches multi-language duplicate content (bilingual
-#   pages); permissive enough that single-topic notes with substantive
-#   narrative don't false-trigger
-# - H2 ≥ 4: rare in atomic notes, common in MOC-style aggregations
-# - wikilinks ≥ 15: entity-rich event pages routinely cite 8-12
+# really N pages glued together":
+# - body chars: catches bilingual/duplicate content; permissive enough
+#   that single-topic notes with substantive narrative don't false-trigger
+# - H2 count: rare in atomic notes, common in MOC-style aggregations
+# - wikilink count: entity-rich event pages routinely cite 8-12
 #   participants without being non-atomic; only true index pages
 #   accumulate 15+ distinct references
+# - tag-domain count: only namespaced tags (``area/topic``) count;
+#   flat tags ignored, since LLM-generated atomic pages routinely carry
+#   3-5 flat tags. See ``evals/BASELINES.md`` for calibration data.
 _ATOMIC_BODY_CHARS = 2500
 _ATOMIC_H2_COUNT = 3
 _ATOMIC_WIKILINK_COUNT = 15
-# Tags using namespaces (``area/topic`` form) that span > 1 top-level
-# area suggest the page straddles unrelated knowledge domains — almost
-# always N atomic notes glued together. Flat tags (no "/") are *ignored*
-# entirely: 2026-05-08 real-data validation on elon-musk.md showed that
-# LLM-generated atomic pages routinely carry 3-5 flat tags
-# (e.g. ``entrepreneur, biography, spacex, tesla``), so treating each
-# flat tag as its own domain produced 100% false positives. The
-# heuristic only fires when the wiki actually adopts namespaced tags.
 _ATOMIC_TAG_DOMAIN_COUNT = 1
 
 _H1_LINE = re.compile(r"^\s{0,3}#\s+\S", flags=re.MULTILINE)
 _H2_LINE = re.compile(r"^\s{0,3}##\s+\S", flags=re.MULTILINE)
 
 
+LintKind = Literal[
+    "broken_wikilink",
+    "orphan_page",
+    "duplicate_title",
+    "non_atomic_page",
+]
+
+
 @dataclass(frozen=True)
 class LintIssue:
-    kind: str            # broken_wikilink | orphan_page | duplicate_title
-    path: str            # the doc exhibiting the issue
+    kind: LintKind
+    path: str
     detail: str
     line: int | None = None
 
@@ -71,8 +73,8 @@ class LintReport:
     def ok(self) -> bool:
         return not self.issues
 
-    def by_kind(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
+    def by_kind(self) -> dict[LintKind, int]:
+        counts: dict[LintKind, int] = {}
         for i in self.issues:
             counts[i.kind] = counts.get(i.kind, 0) + 1
         return counts

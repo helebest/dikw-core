@@ -137,10 +137,8 @@ async def test_multiple_h1_triggers_non_atomic(empty_wiki: Path) -> None:
     """Multiple H1 headers on one page is the canonical "two atomic
     notes glued together" pattern — bilingual duplicates (CN + EN
     versions of the same biography), or two unrelated subjects sharing
-    a frontmatter. Caught at body-length thresholds only when total
-    chars > 2500, which misses short bilingual pages; H1-count catches
-    them deterministically. Real elon-musk.md baseline (2026-05-08)
-    surfaced ``joshua-haldeman.md`` with 中文 + English versions."""
+    a frontmatter. Body-length alone misses short bilingual pages;
+    H1-count catches them deterministically."""
     body = (
         "# 乔舒亚\n\nFirst version of the biography.\n\n"
         "---\n\n"
@@ -155,9 +153,9 @@ async def test_multiple_h1_triggers_non_atomic(empty_wiki: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_event_page_with_many_entities_does_not_trigger(empty_wiki: Path) -> None:
-    """Real elon-musk.md baseline (2026-05-08): event pages routinely
-    cite 8-12 entities (PayPal coup, Tesla funding round) — these are
-    atomic by topic but entity-rich. Threshold 15 keeps these clean."""
+    """Event pages routinely cite 8-12 entities (e.g. ``Tesla 2006
+    funding round`` listing all participants) — these are atomic by
+    topic but entity-rich. The threshold of 15 keeps them clean."""
     body = (
         "# Tesla 2006 Funding Round\n\n"
         "[[Elon Musk]], [[Kimbal Musk]], [[Marc Tarpenning]], "
@@ -222,10 +220,9 @@ async def test_no_tags_does_not_trigger_tag_violation(empty_wiki: Path) -> None:
 @pytest.mark.asyncio
 async def test_flat_tags_only_do_not_trigger(empty_wiki: Path) -> None:
     """Flat tags (no ``/``) are *ignored* by the cross-domain heuristic.
-    2026-05-08 elon-musk.md real-data validation: LLM-generated atomic
-    pages routinely carry 3-5 flat tags
-    (``entrepreneur, biography, spacex, tesla``). Counting each as its
-    own domain produced 100% false positives, so the heuristic only
+    LLM-generated atomic pages routinely carry 3-5 flat tags
+    (``entrepreneur, biography, spacex, tesla``); counting each as its
+    own domain would produce false positives, so the heuristic only
     fires when the wiki has actually adopted namespaced tags."""
     body = "# Flat-Tagged Page\n\nA real-world atomic page with flat tags.\n"
     await _seed_page(

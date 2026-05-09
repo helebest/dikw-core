@@ -596,6 +596,14 @@ class PostgresStorage:
             rows = await cur.fetchall()
         return [_row_to_link(r) for r in rows]
 
+    async def delete_links_from(self, src_doc_id: str) -> None:
+        async with self._acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM links WHERE src_doc_id = %s", (src_doc_id,)
+                )
+            await conn.commit()
+
     async def neighbor_chunks_via_links(
         self,
         seed_chunk_ids: Sequence[int],

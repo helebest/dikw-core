@@ -191,6 +191,18 @@ class Storage(Protocol):
     async def links_from(self, src_doc_id: str) -> list[LinkRecord]: ...
     async def links_to(self, dst_path: str) -> list[LinkRecord]: ...
 
+    async def delete_links_from(self, src_doc_id: str) -> None:
+        """Remove every outgoing link whose source is ``src_doc_id``.
+
+        Idempotent — calling on a source with no recorded links is a
+        no-op, not an error. Used by ``_persist_wiki_page`` to reconcile
+        the link set whenever a wiki page is rewritten, so removing a
+        ``[[wikilink]]`` from the body actually drops the edge from
+        storage instead of leaving a ghost record that pollutes
+        graph-leg retrieval and orphan/broken-link lint.
+        """
+        ...
+
     async def neighbor_chunks_via_links(
         self,
         seed_chunk_ids: Sequence[int],

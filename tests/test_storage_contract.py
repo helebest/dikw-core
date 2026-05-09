@@ -1047,6 +1047,67 @@ async def test_link_graph(storage: Storage) -> None:
     assert out[0].dst_path == "wiki/b.md"
 
 
+async def test_delete_links_from_removes_only_that_source(storage: Storage) -> None:
+    """Reconciliation primitive: ``delete_links_from(src)`` wipes
+    outgoing edges from one source while leaving other sources
+    untouched. Used by ``_persist_wiki_page`` so removing a
+    ``[[wikilink]]`` from a page body actually drops the edge —
+    without this the link table accumulates ghost edges as wiki pages
+    are edited, polluting graph-leg retrieval and orphan/broken-link
+    lint reporting."""
+    src_a = _make_doc("wiki/a.md", layer=Layer.WIKI)
+    src_other = _make_doc("wiki/other.md", layer=Layer.WIKI)
+    dst_b = _make_doc("wiki/b.md", layer=Layer.WIKI)
+    dst_c = _make_doc("wiki/c.md", layer=Layer.WIKI)
+    for d in (src_a, src_other, dst_b, dst_c):
+        await storage.upsert_document(d)
+
+    await storage.upsert_link(
+        LinkRecord(
+            src_doc_id=src_a.doc_id,
+            dst_path="wiki/b.md",
+            link_type=LinkType.WIKILINK,
+            anchor=None,
+            line=1,
+        )
+    )
+    await storage.upsert_link(
+        LinkRecord(
+            src_doc_id=src_a.doc_id,
+            dst_path="wiki/c.md",
+            link_type=LinkType.WIKILINK,
+            anchor=None,
+            line=2,
+        )
+    )
+    await storage.upsert_link(
+        LinkRecord(
+            src_doc_id=src_other.doc_id,
+            dst_path="wiki/b.md",
+            link_type=LinkType.WIKILINK,
+            anchor=None,
+            line=1,
+        )
+    )
+
+    await storage.delete_links_from(src_a.doc_id)
+
+    assert await storage.links_from(src_a.doc_id) == []
+    other_out = await storage.links_from(src_other.doc_id)
+    assert len(other_out) == 1 and other_out[0].dst_path == "wiki/b.md"
+    # links_to scoped by dst_path returns survivors only — src_a's edge
+    # to b is gone, src_other's stays.
+    inbound_b = await storage.links_to("wiki/b.md")
+    assert {l.src_doc_id for l in inbound_b} == {src_other.doc_id}
+
+    # Idempotent: a second delete on the now-empty src is a no-op,
+    # not an error — _persist_wiki_page calls this unconditionally
+    # before each upsert loop, including the first persist when
+    # there is nothing to delete.
+    await storage.delete_links_from(src_a.doc_id)
+    assert await storage.links_from(src_a.doc_id) == []
+
+
 async def test_neighbor_chunks_via_links_one_hop(storage: Storage) -> None:
     """Wikilink-graph leg of HybridSearcher: from a seed chunk in
     ``page_a``, get to the chunks of ``page_b`` and ``page_c`` via

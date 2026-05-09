@@ -644,6 +644,16 @@ class SQLiteStorage:
 
         return await asyncio.to_thread(_run)
 
+    async def delete_links_from(self, src_doc_id: str) -> None:
+        def _run() -> None:
+            conn = self._require_conn()
+            with conn:
+                conn.execute(
+                    "DELETE FROM links WHERE src_doc_id = ?", (src_doc_id,)
+                )
+
+        await asyncio.to_thread(_run)
+
     async def neighbor_chunks_via_links(
         self,
         seed_chunk_ids: Sequence[int],

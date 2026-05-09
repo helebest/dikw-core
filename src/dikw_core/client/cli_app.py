@@ -435,12 +435,14 @@ def lint_proposals_cmd(
             )
         propose_rows = tasks_resp if isinstance(tasks_resp, list) else []
         applies = applies_resp if isinstance(applies_resp, list) else []
-        # Cross-reference apply.params.proposal_task_id to derive
-        # which proposals have already been applied.
+        # Cross-reference applies via apply.result.proposal_task_id.
+        # TaskRow exposes only ``params_digest`` (not raw params), so
+        # the cross-reference key has to live in the apply runner's
+        # result payload — which lint_op stamps in before completion.
         applied_ids: set[str] = set()
         for r in applies:
-            params = (r or {}).get("params") or {}
-            ref = params.get("proposal_task_id")
+            result = (r or {}).get("result") or {}
+            ref = result.get("proposal_task_id")
             if isinstance(ref, str):
                 applied_ids.add(ref)
         from .progress import render_lint_proposals_listing

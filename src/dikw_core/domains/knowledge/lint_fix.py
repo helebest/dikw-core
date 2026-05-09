@@ -97,6 +97,12 @@ class ApplyReport(BaseModel):
     applied: list[FixOperation] = Field(default_factory=list)
     skipped: list[dict[str, Any]] = Field(default_factory=list)
     wiki_paths_changed: list[str] = Field(default_factory=list)
+    # The source ``lint.propose`` task id that produced the proposals
+    # we just applied. Server runners stamp this in so the proposals
+    # listing in the CLI can show which proposal tasks have been
+    # applied without depending on raw task ``params`` (TaskRow only
+    # exposes ``params_digest``).
+    proposal_task_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -336,6 +342,13 @@ async def run_lint_apply(
     skipped: list[dict[str, Any]] = []
     paths_changed: set[str] = set()
     deleted_paths: set[str] = set()
+    # Every path mutated by an in-pass op (whether write or delete) so
+    # subsequent ops on the same path can't silently revert each other.
+    # Each ``new_body`` was generated against the pre-apply tree;
+    # applying op #2's body on top of op #1's changes would clobber
+    # the first fix. We skip rather than try to compose — the user
+    # re-runs ``lint propose`` against the post-apply tree.
+    touched_paths: set[str] = set()
 
     total_ops = sum(len(p.operations) for p in proposals)
     op_counter = 0
@@ -350,6 +363,15 @@ async def run_lint_apply(
                 total=total_ops,
                 detail={"op": op.kind, "path": op.path},
             )
+            if op.path in touched_paths:
+                skipped.append(
+                    _skip(
+                        proposal.proposal_id, op,
+                        "superseded by earlier op on the same path in this apply pass — "
+                        "re-run lint propose to refresh remaining fixes",
+                    )
+                )
+                continue
             skip_reason = await _apply_one_op(
                 op=op,
                 storage=storage,
@@ -359,6 +381,7 @@ async def run_lint_apply(
             )
             if skip_reason is None:
                 applied.append(op)
+                touched_paths.add(op.path)
                 if op.kind == "delete_page":
                     deleted_paths.add(op.path)
                 else:

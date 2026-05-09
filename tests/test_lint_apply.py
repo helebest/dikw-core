@@ -377,6 +377,70 @@ async def test_pick_filter_applies_only_picked_proposals(
 
 
 @pytest.mark.asyncio
+async def test_two_ops_same_path_skip_subsequent_with_superseded_reason(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """Real-world hazard: two ``broken_wikilink`` issues on the same
+    page each generate a proposal whose ``new_body`` was computed
+    against the original on-disk file. Naively applying both would
+    silently revert the first fix; we want the second op to land in
+    ``skipped`` with a clear ``superseded`` reason."""
+    storage = parametrized_storage
+    src_doc_id = await _seed_page(
+        storage=storage, wiki_root=wiki_root,
+        path="wiki/multi.md", title="Multi",
+        body="# Multi\n\nLinks: [[alpha]] and [[beta]] here.\n",
+    )
+    abs_src = wiki_root / "wiki/multi.md"
+    snapshot_hash = file_sha256(abs_src)
+
+    # Both ops carry the SAME pre-apply hash + each carries its own
+    # full new_body that fixes one of the two broken links.
+    p1 = FixProposal(
+        proposal_id="p1", issue_kind="broken_wikilink",
+        issue_path="wiki/multi.md",
+        issue_detail="[[alpha]] has no matching wiki page",
+        operations=[FixOperation(
+            kind="update_page", path="wiki/multi.md",
+            new_frontmatter={"title": "Multi"},
+            new_body="# Multi\n\nLinks: [[Alpha]] and [[beta]] here.\n",
+            expected_hash=snapshot_hash,
+        )],
+        rationale="r", source="heuristic",
+    )
+    p2 = FixProposal(
+        proposal_id="p2", issue_kind="broken_wikilink",
+        issue_path="wiki/multi.md",
+        issue_detail="[[beta]] has no matching wiki page",
+        operations=[FixOperation(
+            kind="update_page", path="wiki/multi.md",
+            new_frontmatter={"title": "Multi"},
+            new_body="# Multi\n\nLinks: [[alpha]] and [[Beta]] here.\n",
+            expected_hash=snapshot_hash,
+        )],
+        rationale="r", source="heuristic",
+    )
+
+    report = await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[p1, p2]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+    # First op applies; second is skipped with a clear superseded reason
+    # — not a hash-mismatch lie that misleads the user about which
+    # version of the file was being targeted.
+    assert len(report.applied) == 1
+    assert report.applied[0].path == "wiki/multi.md"
+    assert len(report.skipped) == 1
+    assert "superseded" in report.skipped[0]["reason"].lower()
+    # Make sure the on-disk body was not silently reverted to op #2's
+    # body (which would have lost op #1's fix).
+    rewritten = abs_src.read_text(encoding="utf-8")
+    assert "[[Alpha]]" in rewritten
+    _ = src_doc_id
+
+
+@pytest.mark.asyncio
 async def test_skip_filter_drops_skipped_proposals(
     parametrized_storage: Storage, wiki_root: Path,
 ) -> None:

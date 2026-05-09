@@ -524,28 +524,30 @@ def render_lint_proposals_listing(
     """Render the ``dikw client lint proposals`` table.
 
     Each row is a successful ``lint.propose`` task. ``applied_ids``
-    is the set of task_ids that already have a ``lint.apply`` task
-    referencing them via ``params.proposal_task_id``."""
+    is the set of propose-task ids referenced by some ``lint.apply``
+    task's ``result.proposal_task_id``."""
     if not rows:
         console.print("[green]no pending lint proposals[/green]")
         return
     table = Table(title="lint proposals", show_header=True, header_style="bold")
     table.add_column("task_id")
     table.add_column("created_at")
-    table.add_column("rule")
-    table.add_column("limit", justify="right")
+    table.add_column("proposals", justify="right")
+    table.add_column("skipped", justify="right")
     table.add_column("applied?")
     for row in rows:
         if not isinstance(row, dict):
             continue
-        params = row.get("params") or {}
+        result = row.get("result") or {}
         task_id = str(row.get("task_id") or "")
         applied = "yes" if task_id in applied_ids else "no"
+        proposals_count = len(result.get("proposals") or [])
+        skipped_count = len(result.get("skipped") or [])
         table.add_row(
             task_id,
             str(row.get("created_at") or ""),
-            str(params.get("rule") or "(all)"),
-            str(params.get("limit") or ""),
+            str(proposals_count),
+            str(skipped_count),
             applied,
         )
     console.print(table)

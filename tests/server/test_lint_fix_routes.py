@@ -152,6 +152,32 @@ async def test_lint_apply_unknown_propose_id_fails_with_clear_cause(
 
 
 @pytest.mark.asyncio
+async def test_lint_apply_rejects_non_propose_task_id(
+    server_client: httpx.AsyncClient, wiki_root: Path,
+) -> None:
+    """If the caller passes a SUCCEEDED task from a different op (e.g.
+    ``echo``), apply must reject with a ``proposal_wrong_op`` error
+    rather than silently treating an unrelated result dict as an empty
+    ``FixProposalReport``."""
+    _ = wiki_root
+    echo = await server_client.post("/v1/echo", json={"count": 1})
+    assert echo.status_code == 200, echo.text
+    echo_id = echo.json()["task_id"]
+    await _wait_terminal(server_client, echo_id)
+
+    apply_resp = await server_client.post(
+        "/v1/lint/apply", json={"proposal_task_id": echo_id}
+    )
+    assert apply_resp.status_code == 200, apply_resp.text
+    apply_id = apply_resp.json()["task_id"]
+    row = await _wait_terminal(server_client, apply_id)
+    assert row["status"] == "failed"
+    err = (await server_client.get(f"/v1/tasks/{apply_id}/result")).json()
+    assert err["status"] == "failed"
+    assert "lint.propose" in str(err["error"])
+
+
+@pytest.mark.asyncio
 async def test_lint_propose_rejects_invalid_limit(
     server_client: httpx.AsyncClient, wiki_root: Path,
 ) -> None:

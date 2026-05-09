@@ -21,6 +21,13 @@ from ..progress import ProgressReporter
 from .errors import BadRequest, NotFoundError
 from .tasks import TaskStatus, TaskStore
 
+#: Canonical task ``op`` strings — these are the wire-level identifiers
+#: for ``POST /v1/lint/propose`` / ``POST /v1/lint/apply``. The apply
+#: runner cross-checks the source row's ``op`` against ``_PROPOSE_OP``
+#: so the wrong task id can't slip through model validation.
+_PROPOSE_OP = "lint.propose"
+_APPLY_OP = "lint.apply"
+
 
 def make_lint_propose_runner(
     *,
@@ -72,6 +79,16 @@ def make_lint_apply_runner(
             raise NotFoundError(
                 f"propose task {proposal_task_id!r} not found"
             )
+        # Pin the source op kind so a caller can't pass an unrelated
+        # SUCCEEDED task id (e.g. a synth or echo job) — every
+        # ``FixProposalReport`` field has a default, so model_validate
+        # would otherwise accept arbitrary result dicts as an empty
+        # proposal report and apply silently as a no-op.
+        if row.op != _PROPOSE_OP:
+            raise BadRequest(
+                f"task {proposal_task_id!r} has op {row.op!r}, expected {_PROPOSE_OP!r}",
+                code="proposal_wrong_op",
+            )
         if row.status != TaskStatus.SUCCEEDED:
             raise BadRequest(
                 f"propose task {proposal_task_id!r} is in status "
@@ -99,6 +116,10 @@ def make_lint_apply_runner(
             skip=skip,
             reporter=reporter,
         )
+        # Stamp the source propose task id on the result so the CLI can
+        # cross-reference applied proposals without reaching into raw
+        # task ``params`` (TaskRow exposes only ``params_digest``).
+        apply_report.proposal_task_id = proposal_task_id
         return apply_report.model_dump(mode="json")
 
     return _runner

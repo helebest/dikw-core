@@ -65,10 +65,10 @@ async def test_persist_wiki_page_drops_removed_wikilinks(tmp_path: Path) -> None
 
         src_doc_id = api._doc_id_for(Layer.WIKI, "wiki/src.md")
         wikilinks_v1 = [
-            l for l in await storage.links_from(src_doc_id)
-            if l.link_type == LinkType.WIKILINK
+            link for link in await storage.links_from(src_doc_id)
+            if link.link_type == LinkType.WIKILINK
         ]
-        assert {l.dst_path for l in wikilinks_v1} == {target_a.path}
+        assert {link.dst_path for link in wikilinks_v1} == {target_a.path}
 
         # Rewrite the same page so the [[Target A]] reference is gone.
         src_v2 = build_page(
@@ -81,12 +81,12 @@ async def test_persist_wiki_page_drops_removed_wikilinks(tmp_path: Path) -> None
         await _persist(storage, root, src_v2)
 
         wikilinks_v2 = [
-            l for l in await storage.links_from(src_doc_id)
-            if l.link_type == LinkType.WIKILINK
+            link for link in await storage.links_from(src_doc_id)
+            if link.link_type == LinkType.WIKILINK
         ]
         # Without reconciliation, target_a still shows up here as a
         # ghost edge — that's the bug this test pins.
-        assert {l.dst_path for l in wikilinks_v2} == {target_b.path}
+        assert {link.dst_path for link in wikilinks_v2} == {target_b.path}
     finally:
         await storage.close()
 
@@ -119,8 +119,8 @@ async def test_persist_wiki_page_drops_all_wikilinks_when_body_loses_them(
 
         src_doc_id = api._doc_id_for(Layer.WIKI, "wiki/src.md")
         wikilinks_v1 = [
-            l for l in await storage.links_from(src_doc_id)
-            if l.link_type == LinkType.WIKILINK
+            link for link in await storage.links_from(src_doc_id)
+            if link.link_type == LinkType.WIKILINK
         ]
         assert len(wikilinks_v1) == 1
 
@@ -134,8 +134,8 @@ async def test_persist_wiki_page_drops_all_wikilinks_when_body_loses_them(
         await _persist(storage, root, src_v2)
 
         wikilinks_v2 = [
-            l for l in await storage.links_from(src_doc_id)
-            if l.link_type == LinkType.WIKILINK
+            link for link in await storage.links_from(src_doc_id)
+            if link.link_type == LinkType.WIKILINK
         ]
         assert wikilinks_v2 == []
     finally:

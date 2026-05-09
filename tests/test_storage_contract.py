@@ -1098,7 +1098,7 @@ async def test_delete_links_from_removes_only_that_source(storage: Storage) -> N
     # links_to scoped by dst_path returns survivors only — src_a's edge
     # to b is gone, src_other's stays.
     inbound_b = await storage.links_to("wiki/b.md")
-    assert {l.src_doc_id for l in inbound_b} == {src_other.doc_id}
+    assert {link.src_doc_id for link in inbound_b} == {src_other.doc_id}
 
     # Idempotent: a second delete on the now-empty src is a no-op,
     # not an error — _persist_wiki_page calls this unconditionally

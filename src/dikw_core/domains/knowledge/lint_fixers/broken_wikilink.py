@@ -38,13 +38,19 @@ from ..lint_fix import (
 HEURISTIC_RATIO_THRESHOLD = 0.85
 _MIN_TARGET_LEN = 4
 
-_NON_ALNUM = re.compile(r"[^a-z0-9\s]+")
+# Unicode-aware normalize: ``\w`` (with ``re.UNICODE``, the py3 default)
+# covers Latin + CJK + Cyrillic + Greek + everything else. The earlier
+# ``[a-z0-9]`` filter stripped every CJK glyph, making the fuzzy match
+# silently no-op for multilingual bases — the bug codex caught in
+# round 2. Lowercasing is still useful for Western titles and a no-op
+# for scripts without case (Han, Arabic).
+_NON_WORD = re.compile(r"[^\w\s]+", flags=re.UNICODE)
 _WS = re.compile(r"\s+")
 
 
 def _normalize_title(s: str) -> str:
     lowered = s.lower()
-    no_puncts = _NON_ALNUM.sub(" ", lowered)
+    no_puncts = _NON_WORD.sub(" ", lowered)
     return _WS.sub(" ", no_puncts).strip()
 
 

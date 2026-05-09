@@ -443,17 +443,39 @@ async def _apply_one_op(
     that the caller appends to :attr:`ApplyReport.skipped` on failure."""
     abs_path = (wiki_root / op.path).resolve()
 
+    # Sandbox: a malformed proposal whose ``path`` is absolute or
+    # traverses outside the wiki tree (``../../etc/passwd``) must
+    # never reach ``write_page`` / ``unlink``. ``Path.resolve`` already
+    # collapses ``..`` segments, so the relative-to check is a clean
+    # post-resolution boundary.
+    resolved_root = wiki_root.resolve()
+    try:
+        abs_path.relative_to(resolved_root)
+    except ValueError:
+        return _skip(
+            proposal_id, op,
+            f"refusing to operate outside wiki root: {op.path!r}",
+        )
+
     if op.kind in ("update_page", "delete_page"):
         if not abs_path.is_file():
             return _skip(proposal_id, op, "file not found on disk")
-        if op.expected_hash:
-            actual = file_sha256(abs_path)
-            if actual != op.expected_hash:
-                return _skip(
-                    proposal_id, op,
-                    f"hash mismatch — concurrent edit detected "
-                    f"(expected {op.expected_hash[:8]}…, got {actual[:8]}…)",
-                )
+        # ``expected_hash`` is the contract for these ops — a proposal
+        # that omits it could no-op past the concurrent-edit guard
+        # (custom / persisted reports can bypass the fixer's own
+        # ``hash_bytes`` stamping). Missing hash = malformed proposal.
+        if not op.expected_hash:
+            return _skip(
+                proposal_id, op,
+                f"missing expected_hash on {op.kind} — required for safety",
+            )
+        actual = file_sha256(abs_path)
+        if actual != op.expected_hash:
+            return _skip(
+                proposal_id, op,
+                f"hash mismatch — concurrent edit detected "
+                f"(expected {op.expected_hash[:8]}…, got {actual[:8]}…)",
+            )
 
     if op.kind in ("create_page", "update_page"):
         if op.kind == "create_page" and abs_path.exists():

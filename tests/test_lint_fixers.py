@@ -164,6 +164,41 @@ async def test_match_excludes_self_page(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fuzzy_match_works_on_non_ascii_titles(tmp_path: Path) -> None:
+    """The earlier ASCII-only ``[a-z0-9]`` normalize regex stripped
+    every CJK glyph and made the fixer a no-op for multilingual bases.
+    Verify a mixed-case CJK target now resolves."""
+    wiki_root = tmp_path
+    target_page = _make_page("卡尔曼滤波", "# 卡尔曼滤波\nbody\n")
+    src_page = _make_page(
+        "Source CJK",
+        "# Source CJK\n\nReference [[卡尔曼 滤波]] here.\n",
+    )
+    src_abs = wiki_root / src_page.path
+    src_abs.parent.mkdir(parents=True, exist_ok=True)
+    src_abs.write_text(
+        "---\ntitle: Source CJK\n---\n\n"
+        "# Source CJK\n\nReference [[卡尔曼 滤波]] here.\n",
+        encoding="utf-8",
+    )
+
+    issue = LintIssue(
+        kind="broken_wikilink",
+        path=src_page.path,
+        detail="[[卡尔曼 滤波]] has no matching wiki page",
+        line=3,
+    )
+    fixer = BrokenWikilinkFixer()
+    proposal = await fixer.propose(
+        issue,
+        _ctx(pages=[target_page, src_page], wiki_root=wiki_root),
+        reporter=_NullReporter(),
+    )
+    assert proposal is not None, "non-ASCII titles must not be silently skipped"
+    assert "[[卡尔曼滤波]]" in proposal.operations[0].new_body  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_extracts_target_from_detail_when_issue_lacks_explicit_target(
     tmp_path: Path,
 ) -> None:

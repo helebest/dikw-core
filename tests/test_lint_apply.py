@@ -377,6 +377,71 @@ async def test_pick_filter_applies_only_picked_proposals(
 
 
 @pytest.mark.asyncio
+async def test_apply_refuses_paths_outside_wiki_root(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """A malformed proposal with an absolute path or ``..`` traversal
+    must never reach ``write_page`` / ``unlink`` — sandbox to wiki_root."""
+    storage = parametrized_storage
+
+    proposal = FixProposal(
+        proposal_id="evil", issue_kind="broken_wikilink",
+        issue_path="../../../etc/passwd",
+        issue_detail="evil",
+        operations=[FixOperation(
+            kind="create_page",
+            path="../../../etc/dikw-leak.md",
+            new_frontmatter={"title": "Leak"},
+            new_body="oops\n",
+            expected_hash=None,
+        )],
+        rationale="r", source="heuristic",
+    )
+    report = await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+    assert report.applied == []
+    assert len(report.skipped) == 1
+    assert "outside" in report.skipped[0]["reason"].lower()
+    # Confirm nothing landed on disk.
+    assert not (wiki_root / "../../../etc/dikw-leak.md").resolve().exists()
+
+
+@pytest.mark.asyncio
+async def test_update_page_without_expected_hash_is_rejected(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """A proposal that omits ``expected_hash`` for an update_page op
+    must skip rather than silently bypass the concurrent-edit guard."""
+    storage = parametrized_storage
+    await _seed_page(
+        storage=storage, wiki_root=wiki_root,
+        path="wiki/x.md", title="X", body="# X\n",
+    )
+    proposal = FixProposal(
+        proposal_id="p", issue_kind="broken_wikilink",
+        issue_path="wiki/x.md", issue_detail="d",
+        operations=[FixOperation(
+            kind="update_page", path="wiki/x.md",
+            new_frontmatter={"title": "X"},
+            new_body="# X\nclobbered\n",
+            expected_hash=None,  # malformed proposal — bypass attempt.
+        )],
+        rationale="r", source="heuristic",
+    )
+    report = await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+    assert report.applied == []
+    assert len(report.skipped) == 1
+    assert "expected_hash" in report.skipped[0]["reason"]
+
+
+@pytest.mark.asyncio
 async def test_two_ops_same_path_skip_subsequent_with_superseded_reason(
     parametrized_storage: Storage, wiki_root: Path,
 ) -> None:

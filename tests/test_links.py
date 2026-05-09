@@ -47,3 +47,70 @@ def test_resolve_links_flags_unresolved_wikilinks() -> None:
     assert resolved[0].dst_path == "wiki/concepts/known.md"
     assert len(unresolved) == 1
     assert "Unknown Page" in unresolved[0].target_text
+
+
+# ---- fuzzy normalize (PR1) -----------------------------------------------
+#
+# `resolve_links` does exact + case-insensitive lookup today; that misses
+# typing variations users hit constantly: "Neural Network" vs
+# "Neural Networks", "Elon Musk" vs "Elon Musk.", full-width 中文 punctuation
+# trailing the title, etc. PR1 adds a deterministic L1 (NFKC + casefold +
+# punctuation strip) + L2 (trailing s/es/ies stem) normalize that fires
+# *after* exact + case-insensitive miss. Collision-on-normalize must NOT
+# resolve — falling back to broken_wikilink keeps `dikw lint` honest.
+
+
+def test_resolve_fuzzy_plural_variant() -> None:
+    # body says "[[Neural Networks]]" but the page title is the singular form
+    body = "See [[Neural Networks]] for the architecture."
+    links = parse_links(body)
+    resolved, unresolved = resolve_links(
+        "doc:test",
+        links,
+        title_to_path={"Neural Network": "wiki/concepts/neural-network.md"},
+    )
+    assert len(resolved) == 1
+    assert resolved[0].dst_path == "wiki/concepts/neural-network.md"
+    assert unresolved == []
+
+
+def test_resolve_fuzzy_punctuation_strip() -> None:
+    body = "Per [[Elon Musk.]] biographies."
+    links = parse_links(body)
+    resolved, _ = resolve_links(
+        "doc:test",
+        links,
+        title_to_path={"Elon Musk": "wiki/entities/elon-musk.md"},
+    )
+    assert len(resolved) == 1
+    assert resolved[0].dst_path == "wiki/entities/elon-musk.md"
+
+
+def test_resolve_fuzzy_collision_returns_unresolved() -> None:
+    # "Tesla" the company and "tesla" the SI magnetic flux unit normalize to
+    # the same key. We refuse to guess — leave broken so `dikw lint` reports.
+    body = "Note about [[TESLA]] in the Maxwell paper."
+    links = parse_links(body)
+    resolved, unresolved = resolve_links(
+        "doc:test",
+        links,
+        title_to_path={
+            "Tesla": "wiki/entities/tesla-company.md",
+            "tesla": "wiki/concepts/tesla-unit.md",
+        },
+    )
+    assert resolved == []
+    assert len(unresolved) == 1
+
+
+def test_resolve_fuzzy_unicode_full_width_punctuation() -> None:
+    # NFKC normalizes 中文/全角 punctuation; trailing comma must strip
+    body = "见 [[DIKW pyramid，]] 模型。"
+    links = parse_links(body)
+    resolved, _ = resolve_links(
+        "doc:test",
+        links,
+        title_to_path={"DIKW pyramid": "wiki/concepts/dikw.md"},
+    )
+    assert len(resolved) == 1
+    assert resolved[0].dst_path == "wiki/concepts/dikw.md"

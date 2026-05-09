@@ -51,3 +51,20 @@ def test_write_then_read_roundtrip(tmp_path: Path) -> None:
     assert "dikw" in read_back.tags
     assert "sources/notes/dikw.md" in read_back.sources
     assert read_back.id == page.id
+
+
+def test_user_aliases_frontmatter_survives_roundtrip(tmp_path: Path) -> None:
+    # Obsidian users (and gbrain-style enrich workflows) write a top-level
+    # `aliases:` frontmatter list. dikw-core does NOT consume aliases yet —
+    # PR_alias is deferred — but the field must survive write_page →
+    # read_page via `extras` so a future consumer (and Obsidian itself)
+    # can still see what the user wrote.
+    page = build_page(
+        title="Elon Musk",
+        body="# Elon Musk\n\nFounder, several companies.",
+        type_="entity",
+        extras={"aliases": ["Musk", "Elon R. Musk"]},
+    )
+    write_page(tmp_path, page)
+    read_back = read_page(tmp_path, page.path)
+    assert read_back.extras.get("aliases") == ["Musk", "Elon R. Musk"]

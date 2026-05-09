@@ -153,3 +153,43 @@ def test_resolve_fuzzy_does_not_invent_link_to_unrelated_technical_title() -> No
     )
     assert resolved == []
     assert len(unresolved) == 1
+
+
+def test_resolve_fuzzy_handles_e_plural_singulars() -> None:
+    # The earlier ``-es`` / ``-ies`` rewrites collapsed Uses->"us",
+    # Databases->"databas", Movies->"movy" — none of which match the
+    # actual singular page. Drop-trailing-s gets the regular cases
+    # right and is what we ship.
+    body = "Refer to [[Uses]], [[Databases]] and [[Movies]] sections."
+    links = parse_links(body)
+    resolved, unresolved = resolve_links(
+        "doc:test",
+        links,
+        title_to_path={
+            "Use": "wiki/concepts/use.md",
+            "Database": "wiki/concepts/database.md",
+            "Movie": "wiki/concepts/movie.md",
+        },
+    )
+    assert {r.dst_path for r in resolved} == {
+        "wiki/concepts/use.md",
+        "wiki/concepts/database.md",
+        "wiki/concepts/movie.md",
+    }
+    assert unresolved == []
+
+
+def test_resolve_fuzzy_does_not_invent_us_link_from_uses() -> None:
+    # Pre-fix: ``Uses`` normalized to ``us`` and a body ``[[US]]`` would
+    # resolve to the Uses page (or vice versa) — a wrong-page edge.
+    # With drop-trailing-s, ``Uses`` normalizes to ``use`` and ``US``
+    # to ``us`` — distinct keys, no false link.
+    body = "See [[US]] for the country page."
+    links = parse_links(body)
+    resolved, unresolved = resolve_links(
+        "doc:test",
+        links,
+        title_to_path={"Uses": "wiki/concepts/uses.md"},
+    )
+    assert resolved == []
+    assert len(unresolved) == 1

@@ -46,24 +46,27 @@ _BOUNDARY_PUNCT = set(
 
 
 def _stem_plural(word: str) -> str:
-    """Trailing-plural stemmer for ASCII English nouns.
+    """Trailing-plural stemmer for ASCII English nouns: drop a single ``s``.
 
-    ASCII-scoped on purpose: CJK titles don't pluralize with ``s`` and
-    stronger morphology (``children`` -> ``child``) carries unbounded
-    false-merge risk that the deterministic resolve path can't take.
-    Broken wikilinks are recoverable via ``dikw lint``; wrong-merges
-    are not.
+    Only the regular plural rule (``Network`` -> ``Networks``,
+    ``Movie`` -> ``Movies``, ``Use`` -> ``Uses``). The fancier ``-es`` /
+    ``-ies`` rewrites would mangle the most common cases — ``Uses``
+    -> ``us``, ``Movies`` -> ``movy``, ``Databases`` -> ``databas`` —
+    because they assume the singular ends in ``s/x/z/ch/sh`` or
+    consonant-y, which is wrong for the dominant ``e+s`` family. We
+    accept missing the ``Buses`` -> ``Bus`` and ``Ponies`` -> ``Pony``
+    variants in exchange for not creating false fuzzy edges among
+    common English titles. ASCII-scoped: CJK has no ``s`` plural.
     """
-    if len(word) <= 3 or not word.isascii() or not word.isalpha():
+    if (
+        len(word) <= 3
+        or not word.isascii()
+        or not word.isalpha()
+        or not word.endswith("s")
+        or word.endswith("ss")
+    ):
         return word
-    if word.endswith("ies") and len(word) > 4:
-        return word[:-3] + "y"
-    for suffix in ("ses", "ches", "shes", "xes", "zes"):
-        if word.endswith(suffix):
-            return word[:-2]
-    if word.endswith("s") and not word.endswith("ss"):
-        return word[:-1]
-    return word
+    return word[:-1]
 
 
 def _strip_boundary_punct(token: str) -> str:

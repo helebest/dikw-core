@@ -1047,64 +1047,68 @@ async def test_link_graph(storage: Storage) -> None:
     assert out[0].dst_path == "wiki/b.md"
 
 
-async def test_delete_links_from_removes_only_that_source(storage: Storage) -> None:
-    """Reconciliation primitive: ``delete_links_from(src)`` wipes
-    outgoing edges from one source while leaving other sources
-    untouched. Used by ``_persist_wiki_page`` so removing a
-    ``[[wikilink]]`` from a page body actually drops the edge —
-    without this the link table accumulates ghost edges as wiki pages
-    are edited, polluting graph-leg retrieval and orphan/broken-link
-    lint reporting."""
+async def test_replace_links_from_atomically_swaps_outgoing_set(
+    storage: Storage,
+) -> None:
+    """``replace_links_from(src, links)`` atomically deletes all prior
+    edges from ``src`` and inserts the new set in one transaction.
+    Pass ``[]`` to wipe entirely; pass a fresh source's first set to
+    no-op the leading delete. Used by ``_persist_wiki_page`` so
+    removing a ``[[wikilink]]`` from the body actually drops the
+    edge — without this the link table accumulates ghost edges as
+    wiki pages are edited, polluting graph-leg retrieval and
+    orphan/broken-link lint."""
     src_a = _make_doc("wiki/a.md", layer=Layer.WIKI)
     src_other = _make_doc("wiki/other.md", layer=Layer.WIKI)
-    dst_b = _make_doc("wiki/b.md", layer=Layer.WIKI)
-    dst_c = _make_doc("wiki/c.md", layer=Layer.WIKI)
-    for d in (src_a, src_other, dst_b, dst_c):
+    for d in (
+        src_a,
+        src_other,
+        _make_doc("wiki/b.md", layer=Layer.WIKI),
+        _make_doc("wiki/c.md", layer=Layer.WIKI),
+        _make_doc("wiki/d.md", layer=Layer.WIKI),
+    ):
         await storage.upsert_document(d)
 
-    await storage.upsert_link(
-        LinkRecord(
-            src_doc_id=src_a.doc_id,
-            dst_path="wiki/b.md",
+    def _link(src: str, dst: str, line: int) -> LinkRecord:
+        return LinkRecord(
+            src_doc_id=src,
+            dst_path=dst,
             link_type=LinkType.WIKILINK,
             anchor=None,
-            line=1,
+            line=line,
         )
-    )
-    await storage.upsert_link(
-        LinkRecord(
-            src_doc_id=src_a.doc_id,
-            dst_path="wiki/c.md",
-            link_type=LinkType.WIKILINK,
-            anchor=None,
-            line=2,
-        )
-    )
-    await storage.upsert_link(
-        LinkRecord(
-            src_doc_id=src_other.doc_id,
-            dst_path="wiki/b.md",
-            link_type=LinkType.WIKILINK,
-            anchor=None,
-            line=1,
-        )
-    )
 
-    await storage.delete_links_from(src_a.doc_id)
+    # Fresh src — leading DELETE no-ops, the inserts land.
+    await storage.replace_links_from(
+        src_a.doc_id,
+        [_link(src_a.doc_id, "wiki/b.md", 1), _link(src_a.doc_id, "wiki/c.md", 2)],
+    )
+    await storage.upsert_link(_link(src_other.doc_id, "wiki/b.md", 1))
+    initial_a = await storage.links_from(src_a.doc_id)
+    assert {link.dst_path for link in initial_a} == {"wiki/b.md", "wiki/c.md"}
 
-    assert await storage.links_from(src_a.doc_id) == []
-    other_out = await storage.links_from(src_other.doc_id)
-    assert len(other_out) == 1 and other_out[0].dst_path == "wiki/b.md"
-    # links_to scoped by dst_path returns survivors only — src_a's edge
-    # to b is gone, src_other's stays.
+    # Swap src_a's set entirely: drop b/c, install d.
+    await storage.replace_links_from(
+        src_a.doc_id, [_link(src_a.doc_id, "wiki/d.md", 1)]
+    )
+    a_out = await storage.links_from(src_a.doc_id)
+    assert {link.dst_path for link in a_out} == {"wiki/d.md"}
+    # links_to scoped by dst_path: src_a no longer points at b;
+    # src_other's edge to b survives the unrelated replace call.
     inbound_b = await storage.links_to("wiki/b.md")
     assert {link.src_doc_id for link in inbound_b} == {src_other.doc_id}
 
-    # Idempotent: a second delete on the now-empty src is a no-op,
-    # not an error — _persist_wiki_page calls this unconditionally
-    # before each upsert loop, including the first persist when
-    # there is nothing to delete.
-    await storage.delete_links_from(src_a.doc_id)
+    # Empty list wipes the source's outgoing edges — the explicit
+    # contract for "page body lost every wikilink".
+    await storage.replace_links_from(src_a.doc_id, [])
+    assert await storage.links_from(src_a.doc_id) == []
+    # And src_other is still untouched.
+    assert len(await storage.links_from(src_other.doc_id)) == 1
+
+    # Idempotent: replacing an already-empty source with an empty
+    # set is a no-op, not an error — _persist_wiki_page invokes
+    # this unconditionally on every persist including the first.
+    await storage.replace_links_from(src_a.doc_id, [])
     assert await storage.links_from(src_a.doc_id) == []
 
 

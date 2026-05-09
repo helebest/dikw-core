@@ -644,13 +644,31 @@ class SQLiteStorage:
 
         return await asyncio.to_thread(_run)
 
-    async def delete_links_from(self, src_doc_id: str) -> None:
+    async def replace_links_from(
+        self, src_doc_id: str, links: Sequence[LinkRecord]
+    ) -> None:
         def _run() -> None:
             conn = self._require_conn()
             with conn:
                 conn.execute(
                     "DELETE FROM links WHERE src_doc_id = ?", (src_doc_id,)
                 )
+                if links:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO links"
+                        "(src_doc_id, dst_path, link_type, anchor, line) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [
+                            (
+                                link.src_doc_id,
+                                link.dst_path,
+                                link.link_type.value,
+                                link.anchor,
+                                link.line,
+                            )
+                            for link in links
+                        ],
+                    )
 
         await asyncio.to_thread(_run)
 

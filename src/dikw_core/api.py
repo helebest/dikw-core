@@ -84,6 +84,7 @@ from .domains.knowledge.lint_fix import (
     ApplyReport,
     FixerContext,
     FixProposalReport,
+    WikiPageMeta,
     run_lint_apply,
     run_lint_propose,
 )
@@ -95,7 +96,6 @@ from .domains.knowledge.synthesize import (
     parse_synthesis_response,
 )
 from .domains.knowledge.wiki import WikiPage, now_iso, write_page
-from .domains.knowledge.wiki import read_page as _wiki_read_page
 from .domains.wisdom.apply import ApplicableWisdom, pick_applicable
 from .domains.wisdom.distill import WisdomCandidate, parse_distill_response
 from .domains.wisdom.io import write_candidate_file
@@ -2331,15 +2331,13 @@ async def lint_propose(
     _cfg, root, storage = await _with_storage(path)
     try:
         report = await run_lint(storage, root=root)
-        all_pages: list[WikiPage] = []
-        for doc in await storage.list_documents(layer=Layer.WIKI, active=True):
-            try:
-                all_pages.append(_wiki_read_page(root, doc.path))
-            except (FileNotFoundError, OSError, ValueError):
-                # The wiki tree may have drifted since the last ingest;
-                # silently skip orphaned rows so propose doesn't fail
-                # on bookkeeping issues unrelated to the user's request.
-                continue
+        # Title + path is enough for every PR1 fixer (broken_wikilink)
+        # and most PR2 fixers; heavy fixers re-read the page body on
+        # demand from disk rather than holding every body in memory.
+        all_pages = [
+            WikiPageMeta(path=doc.path, title=doc.title)
+            for doc in await storage.list_documents(layer=Layer.WIKI, active=True)
+        ]
         ctx = FixerContext(
             storage=storage,
             llm=llm,

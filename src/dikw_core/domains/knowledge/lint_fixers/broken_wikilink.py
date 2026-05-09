@@ -26,8 +26,8 @@ from ..lint_fix import (
     FixerContext,
     FixOperation,
     FixProposal,
+    bytes_sha256,
     extract_broken_target,
-    file_sha256,
 )
 
 #: A page rewrites the broken link only when the closest existing title
@@ -88,7 +88,11 @@ class BrokenWikilinkFixer:
             # skip rather than synthesising an op against missing state.
             return None
 
-        post = frontmatter.load(str(abs_path))
+        # Read the file once: hash from bytes, parse the frontmatter
+        # from the same payload. Avoids the second disk roundtrip a
+        # naive frontmatter.load + file_sha256 pair would do.
+        file_bytes = abs_path.read_bytes()
+        post = frontmatter.loads(file_bytes.decode("utf-8"))
         body = post.content
         old = f"[[{target}]]"
         new = f"[[{best_title}]]"
@@ -104,7 +108,7 @@ class BrokenWikilinkFixer:
             path=issue.path,
             new_frontmatter=dict(post.metadata),
             new_body=new_body,
-            expected_hash=file_sha256(abs_path),
+            expected_hash=bytes_sha256(file_bytes),
         )
         return FixProposal(
             proposal_id=str(uuid.uuid4()),

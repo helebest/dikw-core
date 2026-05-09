@@ -1,9 +1,9 @@
 """Wiki-lint fix-proposal subsystem.
 
-`run_lint` (in :mod:`lint`) reports four classes of K-layer hygiene issues
-but never proposes how to fix them. This module adds a ``propose`` /
-``apply`` pair so each lint issue can become a structured, reviewable,
-applicable repair plan.
+`run_lint` (in :mod:`lint`) reports four classes of K-layer hygiene
+issues but never proposes how to fix them. This module adds a
+``propose`` / ``apply`` pair so each lint issue can become a structured,
+reviewable, applicable repair plan.
 
 The contract is:
 
@@ -24,20 +24,23 @@ The contract is:
 
 from __future__ import annotations
 
-import hashlib
+import dataclasses
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+import frontmatter
 from pydantic import BaseModel, Field
 
 from ...providers.base import EmbeddingProvider, LLMProvider
-from ...schemas import Layer, LinkRecord, LinkType
+from ...schemas import Layer
 from ...storage.base import Storage
+from ..data.hashing import hash_bytes, hash_file
+from ..data.path_norm import normalize_path
 from .links import parse_links, resolve_links
 from .lint import LintKind
-from .wiki import WikiPage, now_iso, write_page
+from .wiki import WikiPage, build_page, write_page
 
 
 class FixOperation(BaseModel):
@@ -97,6 +100,21 @@ class ApplyReport(BaseModel):
 
 
 @dataclass(frozen=True)
+class WikiPageMeta:
+    """Lightweight wiki-page descriptor handed to fixers.
+
+    Title + path is enough for PR1's broken_wikilink fuzzy matcher and
+    the metadata browsing PR2 fixers (orphan / duplicate) need. Heavy
+    fixers that operate on a page body re-read the body from
+    ``ctx.wiki_root / path`` on demand; we don't hold every K-layer
+    page's body in memory for the duration of the propose task.
+    """
+
+    path: str
+    title: str | None
+
+
+@dataclass(frozen=True)
 class FixerContext:
     """Per-task context handed to every fixer.
 
@@ -104,14 +122,15 @@ class FixerContext:
     (the PR1 broken_wikilink path) never touch them. Fixers that *do*
     need them (orphan_page, duplicate_title, non_atomic_page in later
     PRs) raise their own ``ValueError`` if asked to run without one.
-    ``all_pages`` is pre-loaded by the orchestrator so each fixer does
-    not re-read the K-layer page list."""
+    ``all_pages`` is pre-built by the orchestrator from
+    ``storage.list_documents`` so each fixer doesn't repeat the round-trip.
+    """
 
     storage: Storage | None
     llm: LLMProvider | None
     embedding: EmbeddingProvider | None
     wiki_root: Path
-    all_pages: list[WikiPage]
+    all_pages: list[WikiPageMeta]
 
 
 class Fixer(Protocol):
@@ -143,8 +162,11 @@ def extract_broken_target(detail: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+# Re-export ``hash_file`` / ``hash_bytes`` under the names the fixers and
+# tests already import from this module — keeps the call sites local
+# while the actual implementation lives in :mod:`domains.data.hashing`.
+file_sha256 = hash_file
+bytes_sha256 = hash_bytes
 
 
 async def run_lint_propose(
@@ -180,6 +202,16 @@ async def run_lint_propose(
     proposals: list[FixProposal] = []
     skipped: list[dict[str, Any]] = []
 
+    def _record_skip(idx: int, issue: Any, reason: str) -> None:
+        skipped.append(
+            {
+                "issue_index": idx,
+                "issue_path": issue.path,
+                "issue_kind": issue.kind,
+                "reason": reason,
+            }
+        )
+
     for idx, issue in enumerate(issues):
         reporter.cancel_token().raise_if_cancelled()
         await reporter.progress(
@@ -190,14 +222,7 @@ async def run_lint_propose(
         )
         fixer = registry.get(issue.kind)
         if fixer is None:
-            skipped.append(
-                {
-                    "issue_index": idx,
-                    "issue_path": issue.path,
-                    "issue_kind": issue.kind,
-                    "reason": f"no fixer registered for kind {issue.kind!r}",
-                }
-            )
+            _record_skip(idx, issue, f"no fixer registered for kind {issue.kind!r}")
             continue
         try:
             proposal = await fixer.propose(issue, ctx, reporter)
@@ -206,30 +231,16 @@ async def run_lint_propose(
                 "WARN",
                 f"fixer for {issue.path} ({issue.kind}) raised: {e}",
             )
-            skipped.append(
-                {
-                    "issue_index": idx,
-                    "issue_path": issue.path,
-                    "issue_kind": issue.kind,
-                    "reason": f"fixer raised: {e}",
-                }
-            )
+            _record_skip(idx, issue, f"fixer raised: {e}")
             continue
         if proposal is None:
-            skipped.append(
-                {
-                    "issue_index": idx,
-                    "issue_path": issue.path,
-                    "issue_kind": issue.kind,
-                    "reason": "fixer returned None",
-                }
-            )
+            _record_skip(idx, issue, "fixer returned None")
             continue
         proposals.append(proposal)
 
-    # Final progress event — total/total — so subscribers see the loop
-    # completed even when the last issue was skipped.
     if total:
+        # Final progress event lets subscribers display 100% even when
+        # the last issue was skipped (no per-issue 'success' event fires).
         await reporter.progress(
             phase="lint_propose",
             current=total,
@@ -248,42 +259,46 @@ def _wiki_doc_id(path: str) -> str:
     to import from :mod:`api` (the dependency arrow points the other
     way: ``api`` may import knowledge, not the reverse).
     """
-    from ..data.path_norm import normalize_path
-
     return f"{Layer.WIKI.value}:{normalize_path(path)}"
 
 
 def _build_page_from_op(op: FixOperation) -> WikiPage:
     """Materialise a :class:`WikiPage` from an op's frontmatter + body.
 
-    Missing required fields (``id`` / ``type`` / ``created`` / ``updated``)
-    are filled in with sensible defaults so a fixer that doesn't carry
-    e.g. a stable ``id`` (PR2's stub-page LLM fallback) can still be
-    persisted. ``write_page`` uses these to assemble the YAML header.
+    Defaults (stable ``id`` from :func:`wiki.make_page_id`, ISO-now
+    timestamps) come from :func:`wiki.build_page` so create / update
+    paths share the same construction rules synth uses. Proposal
+    frontmatter overrides those defaults when present, so a fixer that
+    *does* know the canonical ``id`` (e.g. an LLM stub-page proposal in
+    PR2) can pin it.
     """
     if op.new_body is None:
         raise ValueError(f"op {op.kind} for {op.path} missing new_body")
-    fm: dict[str, Any] = dict(op.new_frontmatter or {})
+    fm = dict(op.new_frontmatter or {})
     title = str(fm.pop("title", Path(op.path).stem.replace("-", " ").title()))
     type_ = str(fm.pop("type", "note"))
-    page_id = str(fm.pop("id", f"K-{abs(hash(op.path)) % 0xFFFFFFFFFFFF:012x}"))
-    now = now_iso()
-    created = str(fm.pop("created", now))
-    updated = str(fm.pop("updated", now))
     tags = list(fm.pop("tags", []) or [])
     sources = list(fm.pop("sources", []) or [])
-    return WikiPage(
-        path=op.path,
-        id=page_id,
-        type=type_,
+    page_id = fm.pop("id", None)
+    created = fm.pop("created", None)
+    updated = fm.pop("updated", None)
+    page = build_page(
         title=title,
         body=op.new_body,
+        type_=type_,
         tags=tags,
         sources=sources,
-        created=created,
-        updated=updated,
+        path=op.path,
         extras=fm,
     )
+    overrides: dict[str, Any] = {}
+    if page_id is not None:
+        overrides["id"] = str(page_id)
+    if created is not None:
+        overrides["created"] = str(created)
+    if updated is not None:
+        overrides["updated"] = str(updated)
+    return dataclasses.replace(page, **overrides) if overrides else page
 
 
 async def run_lint_apply(
@@ -307,19 +322,7 @@ async def run_lint_apply(
     ``pick`` / ``skip`` filter the proposal list by index. Both may be
     set; pick is applied first, then skip removes from that subset.
     """
-    proposals = list(proposal_report.proposals)
-    if pick is not None:
-        pick_set = set(pick)
-        proposals = [p for i, p in enumerate(proposal_report.proposals) if i in pick_set]
-    if skip is not None:
-        skip_set = set(skip)
-        if pick is not None:
-            kept = [(i, p) for i, p in enumerate(proposal_report.proposals)
-                    if i in set(pick) and i not in skip_set]
-        else:
-            kept = [(i, p) for i, p in enumerate(proposal_report.proposals)
-                    if i not in skip_set]
-        proposals = [p for _, p in kept]
+    proposals = _filter_proposals(proposal_report.proposals, pick=pick, skip=skip)
 
     # Pre-load K-layer doc rows for path→doc_id and title→path resolution.
     docs = list(await storage.list_documents(layer=Layer.WIKI, active=True))
@@ -347,38 +350,38 @@ async def run_lint_apply(
                 total=total_ops,
                 detail={"op": op.kind, "path": op.path},
             )
-            outcome = await _apply_one_op(
+            skip_reason = await _apply_one_op(
                 op=op,
                 storage=storage,
                 wiki_root=wiki_root,
                 proposal_id=proposal.proposal_id,
                 path_to_doc_id=path_to_doc_id,
             )
-            if outcome["ok"]:
+            if skip_reason is None:
                 applied.append(op)
                 if op.kind == "delete_page":
                     deleted_paths.add(op.path)
                 else:
                     paths_changed.add(op.path)
             else:
-                skipped.append(outcome["skip"])
+                skipped.append(skip_reason)
 
     # Reconcile outgoing wikilinks for every still-extant changed page.
     for path in sorted(paths_changed):
         abs_path = (wiki_root / path).resolve()
         if not abs_path.is_file():
             continue
-        body = abs_path.read_text(encoding="utf-8")
-        # Strip a leading frontmatter block — link parsing operates on body only.
-        body_only = _strip_frontmatter(body)
+        body_only = frontmatter.loads(
+            abs_path.read_text(encoding="utf-8")
+        ).content
         doc_id = path_to_doc_id.get(path) or _wiki_doc_id(path)
         parsed = parse_links(body_only)
         resolved, _unresolved = resolve_links(
             doc_id, parsed, title_to_path=title_to_path
         )
-        # Replace_links_from requires the source doc row to exist. For
-        # a freshly-created page (not in path_to_doc_id) we skip — the
-        # next ``dikw ingest`` will pick it up and reconcile.
+        # ``replace_links_from`` requires the source doc row to exist.
+        # For a freshly-created page (not in path_to_doc_id) we skip —
+        # the next ``dikw ingest`` will pick it up and reconcile.
         if path in path_to_doc_id:
             await storage.replace_links_from(doc_id, resolved)
 
@@ -389,6 +392,22 @@ async def run_lint_apply(
     )
 
 
+def _filter_proposals(
+    proposals: list[FixProposal],
+    *,
+    pick: list[int] | None,
+    skip: list[int] | None,
+) -> list[FixProposal]:
+    """Return a (pick ∩ ¬skip) slice of ``proposals``, preserving order."""
+    pick_set = set(pick) if pick is not None else None
+    skip_set = set(skip) if skip is not None else set()
+    return [
+        p
+        for i, p in enumerate(proposals)
+        if (pick_set is None or i in pick_set) and i not in skip_set
+    ]
+
+
 async def _apply_one_op(
     *,
     op: FixOperation,
@@ -396,8 +415,9 @@ async def _apply_one_op(
     wiki_root: Path,
     proposal_id: str,
     path_to_doc_id: dict[str, str],
-) -> dict[str, Any]:
-    """Execute one op; return ``{"ok": True}`` or ``{"ok": False, "skip": {...}}``."""
+) -> dict[str, Any] | None:
+    """Execute one op. Returns ``None`` on success, or a skip-record dict
+    that the caller appends to :attr:`ApplyReport.skipped` on failure."""
     abs_path = (wiki_root / op.path).resolve()
 
     if op.kind in ("update_page", "delete_page"):
@@ -408,26 +428,19 @@ async def _apply_one_op(
             if actual != op.expected_hash:
                 return _skip(
                     proposal_id, op,
-                    f"hash mismatch — concurrent edit detected (expected {op.expected_hash[:8]}…, got {actual[:8]}…)",
+                    f"hash mismatch — concurrent edit detected "
+                    f"(expected {op.expected_hash[:8]}…, got {actual[:8]}…)",
                 )
 
-    if op.kind == "create_page":
-        if abs_path.exists():
+    if op.kind in ("create_page", "update_page"):
+        if op.kind == "create_page" and abs_path.exists():
             return _skip(proposal_id, op, "file already exists at create_page path")
         try:
             page = _build_page_from_op(op)
             write_page(wiki_root, page)
         except (OSError, ValueError) as e:
             return _skip(proposal_id, op, f"write_page failed: {e}")
-        return {"ok": True}
-
-    if op.kind == "update_page":
-        try:
-            page = _build_page_from_op(op)
-            write_page(wiki_root, page)
-        except (OSError, ValueError) as e:
-            return _skip(proposal_id, op, f"write_page failed: {e}")
-        return {"ok": True}
+        return None
 
     if op.kind == "delete_page":
         try:
@@ -437,32 +450,23 @@ async def _apply_one_op(
         doc_id = path_to_doc_id.get(op.path)
         if doc_id is not None:
             await storage.deactivate_document(doc_id)
-        return {"ok": True}
+        return None
 
     return _skip(proposal_id, op, f"unknown op kind {op.kind!r}")
 
 
 def _skip(proposal_id: str, op: FixOperation, reason: str) -> dict[str, Any]:
     return {
-        "ok": False,
-        "skip": {
-            "proposal_id": proposal_id,
-            "op": op.kind,
-            "path": op.path,
-            "reason": reason,
-        },
+        "proposal_id": proposal_id,
+        "op": op.kind,
+        "path": op.path,
+        "reason": reason,
     }
 
 
-_FRONTMATTER_FENCE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
-
-
-def _strip_frontmatter(text: str) -> str:
-    """Drop a leading YAML frontmatter block so link parsing operates
-    only on the body. Mirrors ``frontmatter.load`` without re-parsing
-    the YAML — apply has already validated the file."""
-    return _FRONTMATTER_FENCE.sub("", text, count=1)
-
-
-# Type-hint indirection so static checkers see ``LinkRecord`` is used.
-_ = LinkRecord, LinkType
+# These provider symbols are referenced only by ``FixerContext``'s field
+# annotations; the type checker reads them at module load time but they
+# don't appear in any runtime expression. Keep the imports explicit
+# rather than under ``TYPE_CHECKING`` so a future runtime ``isinstance``
+# check (e.g. routing logic) doesn't have to gate on string forward refs.
+_ = (EmbeddingProvider, LLMProvider)

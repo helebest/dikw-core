@@ -19,26 +19,33 @@ from dikw_core.domains.knowledge.lint_fix import (
     FixerContext,
     FixOperation,
     FixProposal,
+    WikiPageMeta,
 )
 from dikw_core.domains.knowledge.lint_fixers.broken_wikilink import (
     BrokenWikilinkFixer,
 )
-from dikw_core.domains.knowledge.wiki import WikiPage, build_page
+from dikw_core.domains.knowledge.wiki import build_page
 
 from .fakes import FakeLLM
 
 
-def _make_page(title: str, body: str) -> WikiPage:
+def _make_page(title: str, body: str) -> Any:
+    """Build a real ``WikiPage`` so tests can write the same path layout
+    on disk that production synth would produce."""
     return build_page(title=title, body=body, type_="concept")
 
 
-def _ctx(*, pages: list[WikiPage], wiki_root: Path) -> FixerContext:
+def _meta_from(page: Any) -> WikiPageMeta:
+    return WikiPageMeta(path=page.path, title=page.title)
+
+
+def _ctx(*, pages: list[Any], wiki_root: Path) -> FixerContext:
     return FixerContext(
-        storage=None,  # type: ignore[arg-type]
+        storage=None,
         llm=FakeLLM(),  # type: ignore[arg-type]
         embedding=None,
         wiki_root=wiki_root,
-        all_pages=pages,
+        all_pages=[_meta_from(p) for p in pages],
     )
 
 

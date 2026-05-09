@@ -21,7 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..domains.knowledge.lint import LintKind
 from .errors import BadRequest, NotFoundError
@@ -126,7 +126,7 @@ class LintProposeSubmit(BaseModel):
     """
 
     rule: LintKind | None = None
-    limit: int = 10
+    limit: int = Field(default=10, ge=1, le=200)
 
 
 class LintApplySubmit(BaseModel):
@@ -293,8 +293,6 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         body: LintProposeSubmit = Body(default_factory=LintProposeSubmit),
     ) -> TaskHandle:
         rt: ServerRuntime = get_runtime(request.app)
-        if body.limit < 1:
-            raise BadRequest(f"limit must be >= 1, got {body.limit}")
         runner: TaskRunner = make_lint_propose_runner(
             wiki_root=rt.root,
             rule=body.rule,

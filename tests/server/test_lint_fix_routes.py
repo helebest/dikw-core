@@ -160,5 +160,6 @@ async def test_lint_propose_rejects_invalid_limit(
         "/v1/lint/propose",
         json={"limit": 0},
     )
-    assert resp.status_code == 400
+    # pydantic Field(ge=1) rejects with 422 unprocessable.
+    assert resp.status_code == 422
     assert "limit" in resp.text.lower()

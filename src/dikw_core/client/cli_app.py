@@ -427,17 +427,16 @@ def lint_proposals_cmd(
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
-            tasks_resp = await t.get_json(
-                "/v1/tasks?op=lint.propose&status=succeeded"
-            )
-            applies_resp = await t.get_json(
-                "/v1/tasks?op=lint.apply&status=succeeded"
+            # Fetch propose + apply listings in parallel — they're
+            # independent reads and the second saves a round trip.
+            tasks_resp, applies_resp = await asyncio.gather(
+                t.get_json("/v1/tasks?op=lint.propose&status=succeeded"),
+                t.get_json("/v1/tasks?op=lint.apply&status=succeeded"),
             )
         propose_rows = tasks_resp if isinstance(tasks_resp, list) else []
         applies = applies_resp if isinstance(applies_resp, list) else []
-        # Note: rt.task_store filters by op + status; we still need to
-        # cross-reference apply.params.proposal_task_id to derive
-        # which proposals are already applied.
+        # Cross-reference apply.params.proposal_task_id to derive
+        # which proposals have already been applied.
         applied_ids: set[str] = set()
         for r in applies:
             params = (r or {}).get("params") or {}

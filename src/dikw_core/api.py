@@ -79,7 +79,14 @@ from .domains.knowledge.grouping import (
 )
 from .domains.knowledge.indexgen import regenerate_index
 from .domains.knowledge.links import parse_links, resolve_links
-from .domains.knowledge.lint import LintReport, run_lint
+from .domains.knowledge.lint import LintKind, LintReport, run_lint
+from .domains.knowledge.lint_fix import (
+    ApplyReport,
+    FixerContext,
+    FixProposalReport,
+    run_lint_apply,
+    run_lint_propose,
+)
 from .domains.knowledge.log import render_log
 from .domains.knowledge.synthesize import (
     SynthesisError,
@@ -88,6 +95,7 @@ from .domains.knowledge.synthesize import (
     parse_synthesis_response,
 )
 from .domains.knowledge.wiki import WikiPage, now_iso, write_page
+from .domains.knowledge.wiki import read_page as _wiki_read_page
 from .domains.wisdom.apply import ApplicableWisdom, pick_applicable
 from .domains.wisdom.distill import WisdomCandidate, parse_distill_response
 from .domains.wisdom.io import write_candidate_file
@@ -2299,6 +2307,82 @@ async def lint(path: str | Path | None = None) -> LintReport:
     _cfg, root, storage = await _with_storage(path)
     try:
         return await run_lint(storage, root=root)
+    finally:
+        await storage.close()
+
+
+async def lint_propose(
+    path: str | Path | None = None,
+    *,
+    rule: LintKind | None = None,
+    limit: int = 10,
+    llm: Any = None,
+    embedder: Any = None,
+    reporter: ProgressReporter | None = None,
+) -> FixProposalReport:
+    """Run lint + dispatch fixers, returning a :class:`FixProposalReport`.
+
+    PR1 ships only ``broken_wikilink`` (heuristic-only), so ``llm`` and
+    ``embedder`` are unused — they're accepted now to keep the call
+    signature stable when PR2 adds the LLM stub fallback. ``rule``
+    filters the lint report before dispatch; ``limit`` caps the issues
+    consumed (the default of 10 keeps a single ``propose`` task short).
+    """
+    _cfg, root, storage = await _with_storage(path)
+    try:
+        report = await run_lint(storage, root=root)
+        all_pages: list[WikiPage] = []
+        for doc in await storage.list_documents(layer=Layer.WIKI, active=True):
+            try:
+                all_pages.append(_wiki_read_page(root, doc.path))
+            except (FileNotFoundError, OSError, ValueError):
+                # The wiki tree may have drifted since the last ingest;
+                # silently skip orphaned rows so propose doesn't fail
+                # on bookkeeping issues unrelated to the user's request.
+                continue
+        ctx = FixerContext(
+            storage=storage,
+            llm=llm,
+            embedding=embedder,
+            wiki_root=root,
+            all_pages=all_pages,
+        )
+        used_reporter: ProgressReporter = reporter or NoopReporter()
+        return await run_lint_propose(
+            report=report,
+            rule=rule,
+            limit=limit,
+            ctx=ctx,
+            reporter=used_reporter,
+        )
+    finally:
+        await storage.close()
+
+
+async def lint_apply(
+    path: str | Path | None = None,
+    *,
+    proposal_report: FixProposalReport,
+    pick: list[int] | None = None,
+    skip: list[int] | None = None,
+    reporter: ProgressReporter | None = None,
+) -> ApplyReport:
+    """Mutate ``wiki/`` per a previously-produced proposal report.
+
+    ``pick`` / ``skip`` filter the proposal list by index. Both may be
+    set; pick is applied first, then skip removes from that subset.
+    """
+    _cfg, root, storage = await _with_storage(path)
+    try:
+        used_reporter: ProgressReporter = reporter or NoopReporter()
+        return await run_lint_apply(
+            proposal_report=proposal_report,
+            storage=storage,
+            wiki_root=root,
+            pick=pick,
+            skip=skip,
+            reporter=used_reporter,
+        )
     finally:
         await storage.close()
 

@@ -105,7 +105,7 @@ def test_resolve_fuzzy_collision_returns_unresolved() -> None:
 
 def test_resolve_fuzzy_unicode_full_width_punctuation() -> None:
     # NFKC normalizes 中文/全角 punctuation; trailing comma must strip
-    body = "见 [[DIKW pyramid，]] 模型。"
+    body = "见 [[DIKW pyramid，]] 模型。"  # noqa: RUF001 - intentional CJK punctuation in test data
     links = parse_links(body)
     resolved, _ = resolve_links(
         "doc:test",

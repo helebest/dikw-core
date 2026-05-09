@@ -26,34 +26,27 @@ import unicodedata
 from dataclasses import dataclass
 
 from ...schemas import LinkRecord, LinkType
+from ..info.tokenize import WORD_OR_CJK_CHARS
 
 _WIKILINK = re.compile(r"\[\[([^\]\|\n]+?)(?:\|([^\]\n]+?))?\]\]")
 _MD_LINK = re.compile(r"(?<!\!)\[([^\]\n]+?)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _URL = re.compile(r"(?<![\[\(])\b(https?://[^\s\)]+)")
 
-# Punctuation we strip out before fuzzy comparison. NFKC normalizes the
-# common full-width ASCII variants (e.g. fullwidth comma to ASCII comma);
-# we still need to enumerate the CJK-only punctuation that has no ASCII
-# compatibility decomposition (ideographic full stop, ideographic comma,
-# full-width brackets, smart quotes) so a trailing CJK punctuation mark
-# in a wikilink doesn't keep it from resolving.
-_PUNCT_STRIP = set(
-    ".,!?;:\"'()[]{}<>"          # ASCII (NFKC handles full-width forms)
-    "。、《》〈〉「」『』【】"     # CJK
-    + "“”‘’"                     # noqa: RUF001 - intentional smart quotes
-)
+# Strip everything that's not a word char (``\w`` is Unicode-aware), a
+# CJK ideograph, or whitespace — same character class the FTS-adjacent
+# code uses (see ``info/tokenize.WORD_OR_CJK_CHARS``). This drops ASCII
+# and CJK punctuation in one rule without us curating both lists.
+_NON_TOKEN_RE = re.compile(rf"[^{WORD_OR_CJK_CHARS}\s]")
 
 
 def _stem_plural(word: str) -> str:
-    """Crude trailing-plural stemmer for ASCII English nouns.
+    """Trailing-plural stemmer for ASCII English nouns.
 
-    We deliberately scope this to ASCII so trailing ``s`` on a CJK title
-    is left alone (CJK does not pluralize with ``s``). The rules cover
-    the high-frequency English suffixes that produce wiki-page
-    fragmentation in practice — ``Networks``/``Network``,
-    ``Strategies``/``Strategy``, ``Buses``/``Bus``. Stronger morphology
-    (``children``/``child``) is intentionally out of scope: false-merge
-    risk grows fast and ``dikw lint`` already catches the broken link.
+    ASCII-scoped on purpose: CJK titles don't pluralize with ``s`` and
+    stronger morphology (``children`` -> ``child``) carries unbounded
+    false-merge risk that the deterministic resolve path can't take.
+    Broken wikilinks are recoverable via ``dikw lint``; wrong-merges
+    are not.
     """
     if len(word) <= 3 or not word.isascii() or not word.isalpha():
         return word
@@ -61,7 +54,7 @@ def _stem_plural(word: str) -> str:
         return word[:-3] + "y"
     for suffix in ("ses", "ches", "shes", "xes", "zes"):
         if word.endswith(suffix):
-            return word[:-2]  # drop ``-es``, leaving the singular root
+            return word[:-2]
     if word.endswith("s") and not word.endswith("ss"):
         return word[:-1]
     return word
@@ -70,18 +63,14 @@ def _stem_plural(word: str) -> str:
 def _normalize_for_match(s: str) -> str:
     """Collapse a title or wikilink target onto a fuzzy-matchable key.
 
-    Layered: NFKC (full-width → ASCII), casefold (Unicode-aware lower),
-    punctuation strip, whitespace collapse, then ASCII trailing-plural
-    stem on the last token. Word boundaries are preserved — ``Neural
-    Network`` never collapses to ``neuralnetwork``.
-
-    Used by ``resolve_links`` as the third lookup stage; a return value
-    of ``""`` (empty after normalization) is treated as "no key" and
-    skipped during index build + lookup.
+    Word boundaries are preserved (``Neural Network`` never becomes
+    ``neuralnetwork``). Returns ``""`` for input that's all punctuation
+    or whitespace; callers treat empty as "no key" so an all-symbol
+    wikilink can't accidentally collide with an empty-keyed page.
     """
     s = unicodedata.normalize("NFKC", s)
     s = s.casefold()
-    s = "".join(ch for ch in s if ch not in _PUNCT_STRIP)
+    s = _NON_TOKEN_RE.sub("", s)
     s = " ".join(s.split())
     if not s:
         return ""
@@ -89,6 +78,26 @@ def _normalize_for_match(s: str) -> str:
         head, _, last = s.rpartition(" ")
         return f"{head} {_stem_plural(last)}"
     return _stem_plural(s)
+
+
+def build_fuzzy_index(title_to_path: dict[str, str]) -> dict[str, list[str]]:
+    """Precompute the normalize-keyed lookup ``resolve_links`` needs.
+
+    Hoisting this out of ``resolve_links`` lets a synth caller building
+    a single ``title_to_path`` for a batch of pages avoid rebuilding
+    the fuzzy index on each per-page resolve call (Stage A 1:N fan-out
+    persists tens-to-hundreds of pages per source against the same
+    title set).
+    """
+    index: dict[str, list[str]] = {}
+    for title, path in title_to_path.items():
+        key = _normalize_for_match(title)
+        if not key:
+            continue
+        bucket = index.setdefault(key, [])
+        if path not in bucket:
+            bucket.append(path)
+    return index
 
 
 @dataclass(frozen=True)
@@ -189,32 +198,23 @@ def resolve_links(
     links: list[ParsedLink],
     *,
     title_to_path: dict[str, str],
+    fuzzy_index: dict[str, list[str]] | None = None,
 ) -> tuple[list[LinkRecord], list[UnresolvedLink]]:
     """Turn ``ParsedLink``s into storage records.
 
-    ``title_to_path`` maps a K/W page title to its wiki-relative path so
-    wikilinks can be resolved deterministically when the title is unique.
-    URLs and Markdown links get their target copied verbatim.
+    ``title_to_path`` maps a K/W page title to its wiki-relative path.
+    Wikilink resolution falls through three deterministic stages:
+    exact title match → fuzzy normalize match (NFKC + casefold +
+    punctuation strip + ASCII trailing-plural stem) → collision refusal
+    (two-or-more normalize-equivalent paths leave the link broken so
+    ``dikw lint`` surfaces the ambiguity rather than letting us guess).
 
-    Wikilink resolution falls through three stages:
-
-    1. Exact title match
-    2. Fuzzy normalize match — ``[[Neural Networks]]`` resolves to a
-       page titled ``Neural Network``, ``[[Elon Musk.]]`` to ``Elon
-       Musk``. Casefold subsumes the previous lowercase fallback.
-    3. Collision refusal — when normalize maps the link to a key whose
-       index entry holds **two or more** distinct paths, return it as
-       ``UnresolvedLink`` rather than guess. ``dikw lint`` then surfaces
-       the ambiguity to the user.
+    ``fuzzy_index`` is the output of ``build_fuzzy_index(title_to_path)``;
+    callers persisting many pages against the same title set should hoist
+    that build to amortize it. ``None`` means "build it here", which is
+    fine for tests + one-shot callers.
     """
-    fuzzy_to_paths: dict[str, list[str]] = {}
-    for title, indexed_path in title_to_path.items():
-        key = _normalize_for_match(title)
-        if not key:
-            continue
-        bucket = fuzzy_to_paths.setdefault(key, [])
-        if indexed_path not in bucket:
-            bucket.append(indexed_path)
+    fuzzy_to_paths = fuzzy_index if fuzzy_index is not None else build_fuzzy_index(title_to_path)
 
     resolved: list[LinkRecord] = []
     unresolved: list[UnresolvedLink] = []
@@ -227,7 +227,6 @@ def resolve_links(
                 candidates = fuzzy_to_paths.get(key, []) if key else []
                 if len(candidates) == 1:
                     target_path = candidates[0]
-                # 0 candidates → broken; >=2 → collision, refuse
             if target_path is None:
                 unresolved.append(
                     UnresolvedLink(

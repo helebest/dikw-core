@@ -78,7 +78,7 @@ from .domains.knowledge.grouping import (
     group_sections,
 )
 from .domains.knowledge.indexgen import regenerate_index
-from .domains.knowledge.links import parse_links, resolve_links
+from .domains.knowledge.links import build_fuzzy_index, parse_links, resolve_links
 from .domains.knowledge.lint import LintKind, LintReport, run_lint
 from .domains.knowledge.lint_fix import (
     ApplyReport,
@@ -409,6 +409,11 @@ class SynthReport:
     updated: int = 0
     skipped: int = 0
     errors: int = 0
+    # Outgoing ``[[wikilinks]]`` from this run's pages that did not resolve
+    # to any K-layer page (after exact + fuzzy normalize + collision
+    # refusal). High counts signal LLM-generated references that nobody
+    # has authored yet — actionable signal even before ``dikw lint`` runs.
+    unresolved_wikilinks: int = 0
 
 
 @dataclass(frozen=True)
@@ -2217,6 +2222,7 @@ async def synthesize(
                         title_to_path[d.title] = d.path
                 for page in deduped:
                     title_to_path.setdefault(page.title, page.path)
+            fuzzy_index = build_fuzzy_index(title_to_path) if deduped else None
 
             created_for_src = 0
             updated_for_src = 0
@@ -2225,7 +2231,7 @@ async def synthesize(
                     _doc_id_for(Layer.WIKI, page.path)
                 )
                 write_page(root, page)
-                await _persist_wiki_page(
+                page_unresolved = await _persist_wiki_page(
                     storage=storage,
                     root=root,
                     page=page,
@@ -2234,7 +2240,14 @@ async def synthesize(
                     text_version_id=text_version_id,
                     cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
                     title_to_path=title_to_path,
+                    fuzzy_index=fuzzy_index,
                 )
+                if page_unresolved:
+                    report = _sr_replace(
+                        report,
+                        unresolved_wikilinks=report.unresolved_wikilinks
+                        + page_unresolved,
+                    )
                 await storage.append_wiki_log(
                     WikiLogEntry(
                         ts=time.time(),
@@ -2413,7 +2426,8 @@ async def _persist_wiki_page(
     text_version_id: int | None,
     cjk_tokenizer: CjkTokenizer = "none",
     title_to_path: dict[str, str] | None = None,
-) -> None:
+    fuzzy_index: dict[str, list[str]] | None = None,
+) -> int:
     """Index ``page`` into the K layer: document, chunks, embeddings, links.
 
     The caller writes ``page`` to disk via ``write_page`` *before*
@@ -2424,6 +2438,9 @@ async def _persist_wiki_page(
     and chunking ``page.body`` would silently diverge from the
     read-back parsed body, causing ``read_page`` to falsely flag every
     K-layer page as stale (empty anchors).
+
+    Returns the count of unresolved outgoing wikilinks so the synth
+    caller can fold it into ``SynthReport.unresolved_wikilinks``.
     """
     doc_id = _doc_id_for(Layer.WIKI, page.path)
     abs_path = (root / page.path).resolve()
@@ -2481,8 +2498,14 @@ async def _persist_wiki_page(
     # lint. ``replace_links_from`` no-ops the leading delete on a
     # fresh page (no prior edges to wipe).
     parsed_links = parse_links(parsed.body)
-    resolved, _unresolved = resolve_links(doc_id, parsed_links, title_to_path=title_to_path)
+    resolved, unresolved = resolve_links(
+        doc_id,
+        parsed_links,
+        title_to_path=title_to_path,
+        fuzzy_index=fuzzy_index,
+    )
     await storage.replace_links_from(doc_id, resolved)
+    return len(unresolved)
 
 
 # A wiki_log row with ``action="synth_source_done"`` and this sentinel

@@ -57,7 +57,7 @@ async def _seed(wiki_root: Path) -> None:
         "---\nid: K-source\ntype: concept\ntitle: Source\n"
         "created: 2026-05-09T00:00:00+00:00\n"
         "updated: 2026-05-09T00:00:00+00:00\n---\n\n"
-        "# Source\n\nSee [[foo  bar]] for context.\n",
+        "# Source\n\nSee [[fooo bar]] for context.\n",
         encoding="utf-8",
     )
     _cfg, _root, storage = await api_module._with_storage(wiki_root)

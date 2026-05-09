@@ -2393,6 +2393,13 @@ async def _persist_wiki_page(
         for d in k_docs:
             if d.title and d.title not in title_to_path:
                 title_to_path[d.title] = d.path
+    # Reconcile outgoing links: drop any prior edges from this doc so
+    # the stored set matches the body we're about to index. Without
+    # this, removing a [[wikilink]] from the body leaves a ghost edge
+    # in the links table — the graph-leg retrieval channel still
+    # walks it and orphan/broken-link lint silently miscounts.
+    # Idempotent on first persist, so unconditional is safe.
+    await storage.delete_links_from(doc_id)
     parsed_links = parse_links(parsed.body)
     resolved, _unresolved = resolve_links(doc_id, parsed_links, title_to_path=title_to_path)
     for link in resolved:

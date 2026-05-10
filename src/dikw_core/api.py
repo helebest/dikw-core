@@ -95,7 +95,7 @@ from .domains.knowledge.synthesize import (
     dedup_pages_by_slug,
     parse_synthesis_response,
 )
-from .domains.knowledge.wiki import WikiPage, now_iso, write_page
+from .domains.knowledge.wiki import WikiPage, now_iso, type_from_path, write_page
 from .domains.wisdom.apply import ApplicableWisdom, pick_applicable
 from .domains.wisdom.distill import WisdomCandidate, parse_distill_response
 from .domains.wisdom.io import write_candidate_file
@@ -2161,6 +2161,8 @@ async def synthesize(
                 source_body=body,
                 chunks=src_chunks,
                 cancel=_reporter.cancel_token(),
+                storage=storage,
+                text_version_id=text_version_id,
                 reporter=_reporter,
             )
             report = _sr_replace(
@@ -2517,6 +2519,101 @@ async def _persist_wiki_page(
 _LEGACY_BACKFILL_SENTINEL = "__dikw_legacy_backfill_complete__"
 
 
+async def _existing_pages_for_prompt(
+    storage: Storage,
+    *,
+    group_chunks: list[ChunkRecord],
+    max_bytes: int,
+    top_k: int,
+    version_id: int | None,
+) -> list[tuple[str, str]]:
+    """Return ``[(title, type), ...]`` for the synth prompt's existing-pages section.
+
+    Full render up to ``max_bytes`` of the rendered ``- Title (type)``
+    bullets; above the threshold, switches to a vec_search-gated top-K
+    driven by the group's chunk embeddings (per-chunk vec_search →
+    union by doc_id → score sort → top-K). The retrieval branch keeps
+    the prompt size bounded as the wiki grows; without it a base with
+    thousands of pages would eventually overflow the model's context
+    window.
+
+    Returns ``[]`` (empty section) for a fresh wiki or a base with no
+    embedded source chunks — the caller renders the falsy section as
+    ``(no existing pages …)`` so the LLM sees a clear signal rather
+    than a missing block.
+    """
+    all_pages = [
+        d for d in await storage.list_documents(layer=Layer.WIKI, active=True)
+        if d.title
+    ]
+    if not all_pages:
+        return []
+    full_render_bytes = sum(
+        len(f"- {d.title} ({type_from_path(d.path)})\n".encode())
+        for d in all_pages
+    )
+    if full_render_bytes <= max_bytes:
+        # ``d.title`` is narrowed to ``str`` by the leading filter
+        # comprehension; mypy can't see that across the loop boundary,
+        # so the explicit ``or ""`` here is purely a typing hint.
+        return [(d.title or "", type_from_path(d.path)) for d in all_pages]
+
+    # Over the byte threshold → retrieval-gated top-K. Per-chunk
+    # vec_search against the WIKI layer is what the locked design
+    # specifies; union by doc_id, sort by best (smallest) distance,
+    # take top-K. Distance is cosine here (smaller = closer); we
+    # invert to "score" only as a sort-aid intuition, the math still
+    # uses raw distances.
+    embs = await storage.get_chunk_embeddings(
+        [c.chunk_id for c in group_chunks if c.chunk_id is not None],
+        version_id=version_id,
+    )
+    if not embs:
+        # No embeddings available (fresh wiki, fake-embed run, or
+        # version mismatch). Falling back to "no pages" is safer than
+        # spilling the full overflow list — the caller still gets a
+        # clear `(no existing pages …)` signal in the prompt.
+        return []
+    best_dist: dict[str, float] = {}
+    for emb in embs.values():
+        try:
+            hits = await storage.vec_search(emb, layer=Layer.WIKI, limit=top_k)
+        except NotSupported:
+            return []
+        for hit in hits:
+            prior = best_dist.get(hit.doc_id)
+            if prior is None or hit.distance < prior:
+                best_dist[hit.doc_id] = hit.distance
+    if not best_dist:
+        return []
+    ordered_doc_ids = [
+        doc_id for doc_id, _ in sorted(best_dist.items(), key=lambda kv: kv[1])
+    ][:top_k]
+    docs = await storage.get_documents(ordered_doc_ids)
+    by_id = {d.doc_id: d for d in docs}
+    out: list[tuple[str, str]] = []
+    for doc_id in ordered_doc_ids:
+        d = by_id.get(doc_id)
+        if d is not None and d.title:
+            out.append((d.title, type_from_path(d.path)))
+    return out
+
+
+def _render_existing_section(
+    pages: list[tuple[str, str]], header: str
+) -> str:
+    """Render a list of ``(title, type)`` tuples as a markdown section.
+
+    Empty input returns ``""`` so callers can concatenate two sections
+    (batch accumulator + base snapshot) and fall back to a single
+    "(no existing pages …)" sentinel only when both are empty.
+    """
+    if not pages:
+        return ""
+    lines = [f"## {header}", ""] + [f"- {t} ({tp})" for t, tp in pages]
+    return "\n".join(lines) + "\n"
+
+
 @dataclass(frozen=True)
 class _SourceSynthOutcome:
     """Per-source aggregate of all the LLM calls Stage A made for that source."""
@@ -2536,6 +2633,8 @@ async def _synth_pages_from_source(
     source_body: str,
     chunks: list[ChunkRecord],
     cancel: CancelToken,
+    storage: Storage | None = None,
+    text_version_id: int | None = None,
     reporter: ProgressReporter | None = None,
 ) -> _SourceSynthOutcome:
     """Fan a single source out into ChunkGroups and call the LLM per group.
@@ -2545,6 +2644,15 @@ async def _synth_pages_from_source(
     receives a ``synth_llm`` ``calling`` / ``returned`` event pair per
     group so server clients can render group-level progress instead of
     freezing on the per-source counter while a multi-group LLM call runs.
+
+    ``storage`` + ``text_version_id`` drive the per-group existing-pages
+    section: each group's prompt receives a ``## Already created in
+    this batch`` accumulator (per-source state, lifecycle = this call)
+    plus a ``## Existing wiki pages`` snapshot of the base K-layer
+    (full list under ``synth.existing_pages_max_bytes``, retrieval-gated
+    top-K above). Without this awareness the LLM regenerates pages it
+    cannot see, polluting the wiki with semantic duplicates that PR1's
+    fuzzy resolver cannot absorb.
     """
     _reporter: ProgressReporter = reporter or NoopReporter()
     sections = derive_sections_from_chunks(
@@ -2564,9 +2672,45 @@ async def _synth_pages_from_source(
     notes: list[str] = []
     errors = 0
     total_groups = len(groups)
+    # Per-source batch accumulator: each group's prompt sees the titles
+    # emitted by groups 0..N-1 of the SAME source, so group N can
+    # reference [[Title]] instead of regenerating. Lifecycle scoped
+    # tightly to this function — a new source starts with an empty list.
+    batch_accumulator: list[tuple[str, str]] = []
+    # Map section-start → chunk so we can recover per-group chunks for
+    # the retrieval-gated existing-pages branch. ``derive_sections_from_chunks``
+    # builds sections 1:1 from chunks, so ``section.start == chunk.start``.
+    start_to_chunk = {c.start: c for c in chunks}
     for group in groups:
         cancel.raise_if_cancelled()
         group_pos = group.index + 1
+        if storage is not None:
+            group_chunks = [
+                start_to_chunk[s] for s in group.section_starts
+                if s in start_to_chunk
+            ]
+            existing_pages = await _existing_pages_for_prompt(
+                storage,
+                group_chunks=group_chunks,
+                max_bytes=cfg.synth.existing_pages_max_bytes,
+                top_k=cfg.synth.existing_pages_top_k,
+                version_id=text_version_id,
+            )
+        else:
+            # Storage-less callers (narrow unit tests of LLM event shape)
+            # render the no-pages sentinel — they exercise the prompt
+            # plumbing, not the existing-pages contract itself.
+            existing_pages = []
+        existing_pages_section = (
+            _render_existing_section(
+                batch_accumulator,
+                "Already created in this batch (MUST reference, do NOT regenerate)",
+            )
+            + _render_existing_section(
+                existing_pages,
+                "Existing wiki pages (reference via [[Title]] when relevant)",
+            )
+        ).strip() or "(no existing pages — this is a fresh wiki)"
         user_prompt = template.format(
             source_path=source_path,
             source_body=group.text,
@@ -2577,6 +2721,7 @@ async def _synth_pages_from_source(
             group_total=total_groups,
             max_pages=cfg.synth.max_pages_per_group,
             allowed_types=allowed_types_str,
+            existing_pages_section=existing_pages_section,
         )
         # `current` reports groups COMPLETED — Rich's TaskProgressRenderer
         # passes it as `completed`, so a `calling` event must show one
@@ -2689,6 +2834,15 @@ async def _synth_pages_from_source(
             )
             continue
         pages.extend(new_pages)
+        # Feed group N's emitted page titles into the per-source
+        # accumulator so group N+1's prompt sees them. De-dup against
+        # what the accumulator already has — a same-batch slug
+        # collision is harmless for prompt context but reads as noise.
+        seen_titles = {t for t, _ in batch_accumulator}
+        for p in new_pages:
+            if p.title and p.title not in seen_titles:
+                batch_accumulator.append((p.title, p.type or "page"))
+                seen_titles.add(p.title)
 
     return _SourceSynthOutcome(
         pages=pages,

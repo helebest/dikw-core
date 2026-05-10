@@ -220,7 +220,7 @@ async def test_synth_existing_pages_truncates_to_retrieval_top_k(
     )
 
     # Seed enough pages that the full Title (type) render exceeds 200 B.
-    # ~30 bytes per line × 12 pages ≈ 360 bytes > 200.
+    # ~30 bytes per line, 12 pages -> ~360 bytes > 200.
     for i in range(12):
         await _seed_wiki_page(
             wiki, title=f"Seeded page {i}", type_="concept"

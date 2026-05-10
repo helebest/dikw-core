@@ -31,7 +31,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-import frontmatter
 from pydantic import BaseModel, Field
 
 from ...config import DikwConfig
@@ -40,14 +39,14 @@ from ...schemas import Layer
 from ...storage.base import Storage
 from ..data.hashing import hash_bytes, hash_file
 from ..data.path_norm import normalize_path
-from .links import parse_links, resolve_links
 from .lint import LintKind
+from .page_index import persist_wiki_page
 from .synthesize import (
     SynthesisError,
     SynthesisPartialError,
     synthesize_pages_from_text,
 )
-from .wiki import WikiPage, build_page, write_page
+from .wiki import WikiPage, build_page, read_page, write_page
 
 logger = logging.getLogger(__name__)
 
@@ -572,24 +571,34 @@ async def run_lint_apply(
                 skipped.append(skip_reason)
                 proposal_aborted = True
 
-    # Reconcile outgoing wikilinks for every still-extant changed page.
+    # Sync each still-extant changed page into storage:
+    # upsert document + replace_chunks + reconcile outgoing links.
+    # ``embedder=None`` keeps apply provider-free — the next ``dikw
+    # ingest`` will detect ``doc.hash`` drift and re-embed. We pass the
+    # pre-loaded ``title_to_path`` so each persist call doesn't re-pull
+    # the K-layer doc list.
+    #
+    # ``title_to_path`` is the snapshot from BEFORE this apply pass, so
+    # outgoing wikilinks resolve against pages that already existed.
+    # New pages this batch creates aren't in it — but a freshly-created
+    # stub's body is a TODO marker (the LLM stub fixer doesn't author
+    # outgoing links), so the gap doesn't matter in practice. Future
+    # fixers that author cross-links would need to update title_to_path
+    # incrementally between persist calls.
     for path in sorted(paths_changed):
         abs_path = (wiki_root / path).resolve()
         if not abs_path.is_file():
             continue
-        body_only = frontmatter.loads(
-            abs_path.read_text(encoding="utf-8")
-        ).content
-        doc_id = path_to_doc_id.get(path) or _wiki_doc_id(path)
-        parsed = parse_links(body_only)
-        resolved, _unresolved = resolve_links(
-            doc_id, parsed, title_to_path=title_to_path
+        page = read_page(wiki_root, path)
+        await persist_wiki_page(
+            storage=storage,
+            root=wiki_root,
+            page=page,
+            embedder=None,
+            embedding_model="",
+            text_version_id=None,
+            title_to_path=title_to_path,
         )
-        # ``replace_links_from`` requires the source doc row to exist.
-        # For a freshly-created page (not in path_to_doc_id) we skip —
-        # the next ``dikw ingest`` will pick it up and reconcile.
-        if path in path_to_doc_id:
-            await storage.replace_links_from(doc_id, resolved)
 
     return ApplyReport(
         applied=applied,

@@ -774,3 +774,122 @@ async def test_preflight_catches_mid_proposal_hash_drift(
     assert "updated A" not in (wiki_root / "wiki/page-a.md").read_text(
         encoding="utf-8"
     )
+
+
+@pytest.mark.asyncio
+async def test_create_page_apply_indexes_into_storage(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """A successful ``create_page`` op MUST register the page in storage,
+    not just write to disk. Without this, the next ``run_lint`` cannot
+    see the new page (it builds its title map from
+    ``storage.list_documents``)."""
+    storage = parametrized_storage
+    new_path = "wiki/concepts/qin-dynasty.md"
+
+    proposal = FixProposal(
+        proposal_id="p-create",
+        issue_kind="broken_wikilink",
+        issue_path="wiki/articles/china.md",
+        issue_detail="[[Qin Dynasty]] has no matching wiki page",
+        issue_line=1,
+        operations=[
+            FixOperation(
+                kind="create_page",
+                path=new_path,
+                new_frontmatter={
+                    "id": "K-qin-dynasty",
+                    "type": "concept",
+                    "title": "Qin Dynasty",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Qin Dynasty\n\nTODO: stub.\n",
+                expected_hash=None,
+            )
+        ],
+        rationale="LLM-generated stub", source="llm",
+    )
+
+    report = await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    assert len(report.applied) == 1
+    assert report.skipped == []
+
+    # Document row landed.
+    docs = list(await storage.list_documents(layer=Layer.WIKI, active=True))
+    qin = next((d for d in docs if d.path == new_path), None)
+    assert qin is not None, "create_page must register the doc in storage"
+    assert qin.title == "Qin Dynasty"
+    assert qin.hash != ""
+
+    # Chunks landed.
+    chunks = await storage.list_chunks(qin.doc_id)
+    assert len(chunks) >= 1
+
+
+@pytest.mark.asyncio
+async def test_apply_then_lint_does_not_re_report_broken_wikilink(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """End-to-end regression: apply ``create_page`` → immediately
+    ``run_lint`` → the original ``broken_wikilink`` should NOT reappear
+    (no need for a separate ``dikw ingest`` to bridge the gap)."""
+    from dikw_core.domains.knowledge.lint import run_lint
+
+    storage = parametrized_storage
+    src_path = "wiki/articles/china-history.md"
+    await _seed_page(
+        storage=storage, wiki_root=wiki_root,
+        path=src_path, title="China History",
+        body="# China History\n\nThe [[Qin Dynasty]] unified ...\n",
+    )
+
+    before = await run_lint(storage=storage, root=wiki_root)
+    broken_before = [
+        i for i in before.issues
+        if i.kind == "broken_wikilink"
+        and "Qin Dynasty" in i.detail
+        and i.path == src_path
+    ]
+    assert len(broken_before) == 1
+
+    proposal = FixProposal(
+        proposal_id="p-fix",
+        issue_kind="broken_wikilink",
+        issue_path=src_path,
+        issue_detail=broken_before[0].detail,
+        issue_line=broken_before[0].line,
+        operations=[FixOperation(
+            kind="create_page",
+            path="wiki/concepts/qin-dynasty.md",
+            new_frontmatter={
+                "id": "K-qin-dynasty",
+                "type": "concept",
+                "title": "Qin Dynasty",
+                "created": "2026-05-10T00:00:00+00:00",
+                "updated": "2026-05-10T00:00:00+00:00",
+            },
+            new_body="# Qin Dynasty\n\nTODO: stub.\n",
+            expected_hash=None,
+        )],
+        rationale="LLM stub", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    after = await run_lint(storage=storage, root=wiki_root)
+    broken_after = [
+        i for i in after.issues
+        if i.kind == "broken_wikilink"
+        and "Qin Dynasty" in i.detail
+        and i.path == src_path
+    ]
+    assert broken_after == []

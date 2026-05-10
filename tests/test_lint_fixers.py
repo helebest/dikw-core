@@ -678,6 +678,88 @@ async def test_non_atomic_page_refuses_truncated_split(tmp_path: Path) -> None:
     )
 
 
+_DETERMINISTIC_PARTIAL_RESPONSE = (
+    "<page path=\"wiki/concepts/topic-a.md\" type=\"concept\">\n"
+    "---\ntags: [child]\n---\n\n# Topic A\n\nFirst child.\n"
+    "</page>\n\n"
+    "<page path=\"wiki/concepts/topic-b.md\" type=\"concept\">\n"
+    "---\ntags: [child]\n---\n\n# Topic B\n\nSecond child.\n"
+    "</page>\n\n"
+    # A third complete <page> block whose body is missing the required
+    # ATX `# Title` line — parse_synthesis_response treats it as a
+    # deterministic partial (retry=False).
+    "<page path=\"wiki/concepts/topic-c.md\" type=\"concept\">\n"
+    "---\ntags: [child]\n---\n\nNo title heading here, just prose.\n"
+    "</page>\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_non_atomic_page_refuses_deterministic_partial(
+    tmp_path: Path,
+) -> None:
+    """Even when the partial parse is deterministic (one malformed block
+    among valid ones, retry=False), the destructive non_atomic_page
+    fixer must refuse — accepting "2 valid + 1 dropped" would delete
+    the original and silently lose Topic C's intended content."""
+    from dikw_core.domains.knowledge.lint_fixers.non_atomic_page import (
+        NonAtomicPageFixer,
+    )
+
+    wiki_root, page, issue = _make_fat_page_on_disk(tmp_path)
+    fake = FakeLLM(response_text=_DETERMINISTIC_PARTIAL_RESPONSE)
+    fixer = NonAtomicPageFixer()
+    proposal = await fixer.propose(
+        issue,
+        _ctx(
+            pages=[page],
+            wiki_root=wiki_root,
+            llm=fake,
+            enable_llm=True,
+            cfg=_default_cfg(),
+        ),
+        reporter=_NullReporter(),
+    )
+    assert proposal is None, (
+        "deterministic partial split must be refused in strict mode"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_atomic_page_aborts_on_child_collision(
+    tmp_path: Path,
+) -> None:
+    """If ANY child path collides with an existing K-page, the fixer
+    must abort the whole split — silently filtering the colliding
+    child would still emit delete_page for the original, dropping the
+    colliding child's content with it. User resolves by hand."""
+    from dikw_core.domains.knowledge.lint_fixers.non_atomic_page import (
+        NonAtomicPageFixer,
+    )
+
+    wiki_root, page, issue = _make_fat_page_on_disk(tmp_path)
+    # An existing K-page at the path the LLM's first child would claim.
+    colliding_existing = _make_page("Topic A", "# Topic A\nexisting body\n")
+    fake = FakeLLM(response_text=_NON_ATOMIC_LLM_RESPONSE)
+    fixer = NonAtomicPageFixer()
+    proposal = await fixer.propose(
+        issue,
+        _ctx(
+            # Include the colliding page in ctx.all_pages so the fixer
+            # sees it via the ``existing_paths`` set.
+            pages=[page, colliding_existing],
+            wiki_root=wiki_root,
+            llm=fake,
+            enable_llm=True,
+            cfg=_default_cfg(),
+        ),
+        reporter=_NullReporter(),
+    )
+    assert proposal is None, (
+        "any child-path collision must abort the whole non_atomic_page split"
+    )
+
+
 @pytest.mark.asyncio
 async def test_non_atomic_page_skips_when_llm_disabled(tmp_path: Path) -> None:
     """Without ``enable_llm``, the fixer cannot run (no heuristic-only

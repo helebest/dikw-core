@@ -113,21 +113,35 @@ class NonAtomicPageFixer:
             allowed_types=allowed_types,
             system=DEFAULT_SYNTH_SYSTEM,
             log_label="non_atomic_page split",
+            strict=True,
         )
         if not pages:
             return None
 
         children = dedup_pages_by_slug(pages, strategy="merge_body")
-        # Skip a child whose path is the original (a no-op delete +
-        # recreate cycle) or collides with an existing K-layer page
-        # (apply would refuse the create anyway). Filter the children,
-        # not the whole proposal — remaining children still split the
-        # original cleanly.
+        # Refuse the whole split on ANY child collision — silently
+        # filtering would let the proposal still emit delete_page for
+        # the original, dropping the colliding child's content along
+        # with the source. The user resolves the collision by hand
+        # (rename, merge, delete) and re-runs propose.
         existing_paths = {p.path for p in ctx.all_pages}
-        children = [
-            c for c in children
-            if c.path != issue.path and c.path not in existing_paths
-        ]
+        for child in children:
+            if child.path == issue.path:
+                logger.info(
+                    "non_atomic_page split for %s refused: child path "
+                    "collides with original — split by hand and re-run",
+                    issue.path,
+                )
+                return None
+            if child.path in existing_paths:
+                logger.info(
+                    "non_atomic_page split for %s refused: child %s "
+                    "collides with existing K-page — resolve by hand "
+                    "and re-run",
+                    issue.path,
+                    child.path,
+                )
+                return None
         if len(children) < _MIN_CHILDREN:
             return None
 

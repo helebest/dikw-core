@@ -229,24 +229,30 @@ async def safe_synthesize_pages(
     system: str,
     temperature: float = 0.3,
     log_label: str,
+    strict: bool = False,
 ) -> list[WikiPage] | None:
     """LLM call + parse, with the soft-failure contract every fixer needs.
 
-    Returns the parsed pages on success, partial-parse pages when the
-    LLM hit a deterministic mid-block error (we got everything we'd
-    get on retry), or ``None`` to signal "fixer should skip this issue":
+    Returns the parsed pages on success or ``None`` to signal "fixer
+    should skip this issue":
 
     * ``SynthesisError`` (no usable ``<page>`` block) → ``None``.
     * ``SynthesisPartialError`` with ``retry=True`` (max_tokens
       truncation — re-running with a bigger budget would yield more
-      pages) → ``None``. **Critical for destructive callers**:
-      ``non_atomic_page`` deletes the source after a successful split,
-      so accepting a truncated 3-page split as "2 children, good
-      enough" would silently drop the unfinished third child along
-      with the original.
-    * ``SynthesisPartialError`` with ``retry=False`` → ``pe.pages``.
-      The failure was deterministic (e.g. one malformed block among
-      good ones); retrying would just hit the same parse warning.
+      pages) → ``None``. Always — truncation is recoverable, and
+      destructive splits cannot tell whether the missing content was
+      important.
+    * ``SynthesisPartialError`` with ``retry=False`` (deterministic
+      partial — e.g. one malformed ``<page>`` block among valid ones):
+      - **strict=True (destructive callers)** → ``None``. The
+        non_atomic_page splitter deletes the source after writing
+        children; accepting a 3-block response with 1 malformed
+        block as "2 valid children, good enough" would drop the
+        malformed block's content along with the original page.
+      - **strict=False (additive callers)** → ``pe.pages``. The
+        broken_wikilink stub fixer takes only ``pages[0]``; a
+        malformed sibling block does not represent lost content,
+        just a wasted LLM token budget.
     * Any other exception (provider outage, network, JSON drift) →
       log at WARNING + ``None``. Cancellation
       (:class:`asyncio.CancelledError`) is a ``BaseException`` and is
@@ -271,6 +277,15 @@ async def safe_synthesize_pages(
             logger.info(
                 "%s LLM response was truncated for %s — refusing partial "
                 "result (retry on next propose pass with a larger budget)",
+                log_label,
+                source_path,
+            )
+            return None
+        if strict:
+            logger.info(
+                "%s LLM response was a deterministic partial for %s — "
+                "refusing in strict mode (destructive caller cannot tell "
+                "whether the malformed block carried important content)",
                 log_label,
                 source_path,
             )

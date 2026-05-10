@@ -172,9 +172,21 @@ def build_page(
     )
 
 
+def path_slug_title(path: str) -> str:
+    """Derive a human-readable title from a wiki page's path stem.
+
+    The convention across the K layer: ``wiki/concepts/topic-a.md`` →
+    ``"Topic A"``. Centralised here so ``_fallback_title``,
+    ``indexgen``, and ``lint_fix._op_title`` agree on the same rule —
+    if we ever change it (NFKC, CJK handling, etc.), one edit covers
+    every caller.
+    """
+    return Path(path).stem.replace("-", " ").title()
+
+
 def _fallback_title(body: str, path: str) -> str:
     for line in body.splitlines():
         stripped = line.lstrip(" #\t").strip()
         if line.lstrip().startswith("#") and stripped:
             return stripped
-    return Path(path).stem.replace("-", " ").title()
+    return path_slug_title(path)

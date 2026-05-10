@@ -39,15 +39,16 @@ from ...providers.base import EmbeddingProvider, LLMProvider
 from ...schemas import Layer
 from ...storage.base import Storage
 from ..data.hashing import hash_bytes, hash_file
-from ..data.path_norm import normalize_path
+from ..info.tokenize import CjkTokenizer
 from .links import parse_links, resolve_links
 from .lint import LintKind
+from .page_index import persist_wiki_page
 from .synthesize import (
     SynthesisError,
     SynthesisPartialError,
     synthesize_pages_from_text,
 )
-from .wiki import WikiPage, build_page, write_page
+from .wiki import WikiPage, build_page, path_slug_title, write_page
 
 logger = logging.getLogger(__name__)
 
@@ -382,15 +383,20 @@ async def run_lint_propose(
     return FixProposalReport(proposals=proposals, skipped=skipped)
 
 
-def _wiki_doc_id(path: str) -> str:
-    """Mirror of ``api._doc_id_for(Layer.WIKI, path)`` without the cycle.
+def _op_title(op: FixOperation) -> str:
+    """Derive the canonical title for a ``FixOperation``.
 
-    The on-disk format uses ``"<layer>:<normalized_path>"`` as the
-    canonical id; we re-implement here so :mod:`lint_fix` doesn't need
-    to import from :mod:`api` (the dependency arrow points the other
-    way: ``api`` may import knowledge, not the reverse).
+    Single source of truth for the fallback chain — a fixer that
+    forgets to write ``new_frontmatter["title"]`` (or writes a
+    non-string YAML scalar) still gets a stable path-slug derived
+    title, so phase 0's ``title_to_path`` seed and
+    ``_build_page_from_op``'s WikiPage construction agree.
     """
-    return f"{Layer.WIKI.value}:{normalize_path(path)}"
+    fm = op.new_frontmatter or {}
+    raw = fm.get("title")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return path_slug_title(op.path)
 
 
 def _build_page_from_op(op: FixOperation) -> WikiPage:
@@ -406,7 +412,8 @@ def _build_page_from_op(op: FixOperation) -> WikiPage:
     if op.new_body is None:
         raise ValueError(f"op {op.kind} for {op.path} missing new_body")
     fm = dict(op.new_frontmatter or {})
-    title = str(fm.pop("title", Path(op.path).stem.replace("-", " ").title()))
+    title = _op_title(op)
+    fm.pop("title", None)
     type_ = str(fm.pop("type", "note"))
     tags = list(fm.pop("tags", []) or [])
     sources = list(fm.pop("sources", []) or [])
@@ -440,6 +447,7 @@ async def run_lint_apply(
     pick: list[int] | None = None,
     skip: list[int] | None = None,
     reporter: Any,  # ProgressReporter
+    cjk_tokenizer: CjkTokenizer = "none",
 ) -> ApplyReport:
     """Mutate ``wiki/`` per a previously-produced :class:`FixProposalReport`.
 
@@ -572,24 +580,68 @@ async def run_lint_apply(
                 skipped.append(skip_reason)
                 proposal_aborted = True
 
-    # Reconcile outgoing wikilinks for every still-extant changed page.
+    # Phase 0: pre-populate ``title_to_path`` with every changed page
+    # BEFORE phase 1 reconciles any of their outgoing links.
+    # ``paths_changed`` iterates alphabetically, not topologically, so a
+    # ``non_atomic_page`` split that creates "Topic A" + "Topic B"
+    # (where Topic A's body links to ``[[Topic B]]``) would otherwise
+    # see A persisted before B's title entered the resolver — A's edge
+    # to B would silently drop, and phase 2 explicitly skips
+    # ``paths_changed`` so the gap would never recover until the next
+    # ingest. Pulling titles from ``op.new_frontmatter`` avoids any
+    # extra disk reads: every applied create/update op carries a title.
+    for op in applied:
+        if op.kind not in ("create_page", "update_page"):
+            continue
+        op_title = _op_title(op)
+        if op_title not in title_to_path:
+            title_to_path[op_title] = op.path
+
+    # Phase 1: persist each still-extant changed page into storage:
+    # upsert document + replace_chunks + reconcile outgoing links.
+    # ``embedder=None`` keeps apply provider-free — the next ``dikw
+    # ingest`` will detect ``doc.hash`` drift and re-embed.
     for path in sorted(paths_changed):
+        if not (wiki_root / path).resolve().is_file():
+            continue
+        await persist_wiki_page(
+            storage=storage,
+            root=wiki_root,
+            path=path,
+            embedder=None,
+            embedding_model="",
+            text_version_id=None,
+            cjk_tokenizer=cjk_tokenizer,
+            title_to_path=title_to_path,
+        )
+
+    # Phase 2: re-reconcile referrers — every proposal's ``issue.path``
+    # whose body references a page this batch may have just created.
+    # Without this, a ``broken_wikilink`` → ``create_page`` proposal
+    # leaves the source page's storage links stale: the new edge never
+    # lands, ``run_lint`` reads ``links_from(source)`` and concludes
+    # the freshly-created page is an orphan even though the body
+    # clearly links to it. The referrer page itself wasn't mutated, so
+    # we only need a link-only reconcile (no re-chunk, no document
+    # row touch — those would invalidate chunk_ids and orphan
+    # embeddings). Skip referrers already covered by phase 1 or
+    # deleted by this pass.
+    referrer_paths = {
+        proposal.issue_path for proposal in proposals
+    } - paths_changed - deleted_paths
+    for path in sorted(referrer_paths):
         abs_path = (wiki_root / path).resolve()
         if not abs_path.is_file():
             continue
-        body_only = frontmatter.loads(
-            abs_path.read_text(encoding="utf-8")
-        ).content
-        doc_id = path_to_doc_id.get(path) or _wiki_doc_id(path)
-        parsed = parse_links(body_only)
-        resolved, _unresolved = resolve_links(
-            doc_id, parsed, title_to_path=title_to_path
+        doc_id = path_to_doc_id.get(path)
+        if doc_id is None:
+            continue
+        body = frontmatter.loads(abs_path.read_text(encoding="utf-8")).content
+        parsed_links_ = parse_links(body)
+        resolved, _ = resolve_links(
+            doc_id, parsed_links_, title_to_path=title_to_path,
         )
-        # ``replace_links_from`` requires the source doc row to exist.
-        # For a freshly-created page (not in path_to_doc_id) we skip —
-        # the next ``dikw ingest`` will pick it up and reconcile.
-        if path in path_to_doc_id:
-            await storage.replace_links_from(doc_id, resolved)
+        await storage.replace_links_from(doc_id, resolved)
 
     return ApplyReport(
         applied=applied,

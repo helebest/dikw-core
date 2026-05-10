@@ -32,7 +32,7 @@ import os
 import struct
 import time
 import zlib
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -67,6 +67,7 @@ from .domains.data.sources import iter_source_files
 from .domains.info.chunk import chunk_markdown
 from .domains.info.embed import (
     ChunkToEmbed,
+    consume_embedding_stream,
     embed_assets,
     embed_chunks,
     is_unembeddable_asset_mime,
@@ -78,7 +79,7 @@ from .domains.knowledge.grouping import (
     group_sections,
 )
 from .domains.knowledge.indexgen import regenerate_index
-from .domains.knowledge.links import build_fuzzy_index, parse_links, resolve_links
+from .domains.knowledge.links import build_fuzzy_index
 from .domains.knowledge.lint import LintKind, LintReport, run_lint
 from .domains.knowledge.lint_fix import (
     ApplyReport,
@@ -119,7 +120,6 @@ from .schemas import (
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
-    EmbeddingRow,
     EmbeddingVersion,
     Hit,
     ImageContent,
@@ -273,41 +273,6 @@ def _embedding_progress(
     ) as progress:
         task = progress.add_task(description, total=total)
         yield lambda: progress.update(task, advance=1)
-
-
-async def _consume_embedding_stream(
-    stream: AsyncIterator[list[EmbeddingRow]],
-    storage: Storage,
-    *,
-    on_batch: Callable[[], None] | None = None,
-    reporter: ProgressReporter | None = None,
-    phase: str = "embed",
-    total: int = 0,
-) -> int:
-    """Drain an embed_chunks-style stream, upserting each batch as it
-    arrives. Per-batch upsert is the durability guarantee: a mid-flight
-    provider failure leaves prior batches on disk instead of throwing
-    away the entire run's API spend.
-
-    ``on_batch`` keeps the in-process rich progress bar's CLI callback
-    surface; ``reporter`` is the new structured channel a server task
-    listens on. Both fire per batch so a single ingest call can drive a
-    local TTY *and* a remote NDJSON subscriber simultaneously.
-    """
-    embedded = 0
-    batches_done = 0
-    async for batch in stream:
-        await storage.upsert_embeddings(batch)
-        embedded += len(batch)
-        batches_done += 1
-        if on_batch is not None:
-            on_batch()
-        if reporter is not None:
-            await reporter.progress(
-                phase=phase, current=batches_done, total=total
-            )
-            reporter.cancel_token().raise_if_cancelled()
-    return embedded
 
 
 def _qualified_provider(protocol: str, base_url: str) -> str:
@@ -1318,7 +1283,7 @@ async def ingest(
             with _embedding_progress(
                 "embedding chunks", total=chunk_total
             ) as advance_chunk:
-                embedded = await _consume_embedding_stream(
+                embedded = await consume_embedding_stream(
                     embed_chunks(
                         embedder,
                         to_embed,
@@ -1396,7 +1361,7 @@ async def ingest(
             # Per-batch upsert: a mid-flight provider failure leaves
             # prior batches' vectors on disk so the next retry's
             # backfill scan sees only the truly-missing tail. Symmetric
-            # with the chunk side's ``_consume_embedding_stream``.
+            # with the chunk side's ``consume_embedding_stream``.
             with _embedding_progress(
                 "embedding assets", total=asset_total_batches
             ) as advance_asset:
@@ -2402,7 +2367,7 @@ async def lint_apply(
     ``pick`` / ``skip`` filter the proposal list by index. Both may be
     set; pick is applied first, then skip removes from that subset.
     """
-    _cfg, root, storage = await _with_storage(path)
+    cfg, root, storage = await _with_storage(path)
     try:
         used_reporter: ProgressReporter = reporter or NoopReporter()
         return await run_lint_apply(
@@ -2412,6 +2377,7 @@ async def lint_apply(
             pick=pick,
             skip=skip,
             reporter=used_reporter,
+            cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
         )
     finally:
         await storage.close()
@@ -2460,71 +2426,25 @@ async def _persist_wiki_page(
 
     Returns the count of unresolved outgoing wikilinks so the synth
     caller can fold it into ``SynthReport.unresolved_wikilinks``.
+
+    Thin delegate — implementation lives in
+    :mod:`dikw_core.domains.knowledge.page_index` so lint-apply can
+    reuse the same indexing path without depending on api.py internals.
     """
-    doc_id = _doc_id_for(Layer.WIKI, page.path)
-    abs_path = (root / page.path).resolve()
-    parsed = parse_any(abs_path, rel_path=page.path)
-
-    await storage.upsert_document(
-        DocumentRecord(
-            doc_id=doc_id,
-            path=page.path,
-            title=page.title,
-            hash=parsed.hash,
-            mtime=parsed.mtime,
-            layer=Layer.WIKI,
-            active=True,
-        )
-    )
-
-    chunks = chunk_markdown(parsed.body, cjk_tokenizer=cjk_tokenizer)
-    records = [
-        ChunkRecord(doc_id=doc_id, seq=c.seq, start=c.start, end=c.end, text=c.text)
-        for c in chunks
-    ]
-    chunk_ids = await storage.replace_chunks(doc_id, records)
-
-    if embedder is not None and records and text_version_id is not None:
-        to_embed = [
-            ChunkToEmbed(chunk_id=cid, text=r.text)
-            for cid, r in zip(chunk_ids, records, strict=True)
-        ]
-        await _consume_embedding_stream(
-            embed_chunks(
-                embedder,
-                to_embed,
-                model=embedding_model,
-                version_id=text_version_id,
-                storage=storage,
-            ),
-            storage,
-        )
-
-    # Link graph — resolve against the current K-layer title index.
-    # ``title_to_path`` may be supplied by the caller to skip the per-page
-    # ``list_documents`` round-trip when persisting many pages in a row
-    # (Stage A fan-out persists N deduped pages per source — without this,
-    # each ``_persist_wiki_page`` would re-pull the whole K-layer doc list).
-    if title_to_path is None:
-        k_docs = await storage.list_documents(layer=Layer.WIKI, active=True)
-        title_to_path = {}
-        for d in k_docs:
-            if d.title and d.title not in title_to_path:
-                title_to_path[d.title] = d.path
-    # Reconcile outgoing links atomically — removing a [[wikilink]]
-    # from the body must drop the edge from storage, not leave a
-    # ghost that pollutes graph-leg retrieval and orphan/broken-link
-    # lint. ``replace_links_from`` no-ops the leading delete on a
-    # fresh page (no prior edges to wipe).
-    parsed_links = parse_links(parsed.body)
-    resolved, unresolved = resolve_links(
-        doc_id,
-        parsed_links,
+    from .domains.knowledge.page_index import persist_wiki_page
+    unresolved, _ = await persist_wiki_page(
+        storage=storage,
+        root=root,
+        path=page.path,
+        title=page.title,
+        embedder=embedder,
+        embedding_model=embedding_model,
+        text_version_id=text_version_id,
+        cjk_tokenizer=cjk_tokenizer,
         title_to_path=title_to_path,
         fuzzy_index=fuzzy_index,
     )
-    await storage.replace_links_from(doc_id, resolved)
-    return len(unresolved)
+    return unresolved
 
 
 # A wiki_log row with ``action="synth_source_done"`` and this sentinel

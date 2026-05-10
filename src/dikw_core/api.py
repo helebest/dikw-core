@@ -2367,7 +2367,7 @@ async def lint_apply(
     ``pick`` / ``skip`` filter the proposal list by index. Both may be
     set; pick is applied first, then skip removes from that subset.
     """
-    _cfg, root, storage = await _with_storage(path)
+    cfg, root, storage = await _with_storage(path)
     try:
         used_reporter: ProgressReporter = reporter or NoopReporter()
         return await run_lint_apply(
@@ -2377,6 +2377,7 @@ async def lint_apply(
             pick=pick,
             skip=skip,
             reporter=used_reporter,
+            cjk_tokenizer=cfg.retrieval.cjk_tokenizer,
         )
     finally:
         await storage.close()

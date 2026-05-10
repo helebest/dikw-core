@@ -1027,3 +1027,117 @@ async def test_apply_sibling_cross_links_resolve_in_one_pass(
         "Topic A's outgoing wikilink to Topic B was lost — phase 1 "
         "persisted A before B's title entered the resolver index"
     )
+
+
+@pytest.mark.asyncio
+async def test_apply_uses_configured_cjk_tokenizer(
+    parametrized_storage: Storage, wiki_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_lint_apply must thread its cjk_tokenizer kwarg through to
+    persist_wiki_page so K-layer chunks land split with the same
+    tokenizer ingest uses. Otherwise a base configured for ``jieba``
+    silently downgrades lint-apply chunks to whitespace splitting,
+    diverging from doc.hash and breaking embedding backfill."""
+    storage = parametrized_storage
+
+    captured: list[dict[str, Any]] = []
+    from dikw_core.domains.knowledge import lint_fix as lint_fix_module
+    real_persist = lint_fix_module.persist_wiki_page
+
+    async def _spy(**kwargs: Any) -> tuple[int, str]:
+        captured.append(kwargs)
+        return await real_persist(**kwargs)
+
+    monkeypatch.setattr(lint_fix_module, "persist_wiki_page", _spy)
+
+    proposal = FixProposal(
+        proposal_id="p-cjk",
+        issue_kind="broken_wikilink",
+        issue_path="wiki/source.md",
+        issue_detail="stub",
+        operations=[FixOperation(
+            kind="create_page",
+            path="wiki/concepts/qin-dynasty.md",
+            new_frontmatter={
+                "id": "K-qin", "type": "concept", "title": "秦朝",
+                "created": "2026-05-10T00:00:00+00:00",
+                "updated": "2026-05-10T00:00:00+00:00",
+            },
+            new_body="# 秦朝\n\n秦朝是中国历史上第一个大一统的朝代。\n",
+            expected_hash=None,
+        )],
+        rationale="r", source="llm",
+    )
+
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+        cjk_tokenizer="jieba",
+    )
+
+    assert len(captured) == 1
+    assert captured[0].get("cjk_tokenizer") == "jieba"
+
+
+@pytest.mark.asyncio
+async def test_apply_uses_path_slug_title_when_op_frontmatter_missing(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """When an applied create_page op has no string title in
+    new_frontmatter, _build_page_from_op falls back to a path-slug
+    derived title (e.g. wiki/concepts/topic-a.md → 'Topic A'). Phase
+    0 must apply the SAME fallback so a sibling page that links to
+    [[Topic A]] resolves in this batch — without it, the storage
+    edge from the sibling silently drops until the next ingest."""
+    storage = parametrized_storage
+
+    proposal = FixProposal(
+        proposal_id="p-no-title",
+        issue_kind="non_atomic_page",
+        issue_path="wiki/source.md",
+        issue_detail="split",
+        operations=[
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-a.md",
+                new_frontmatter={
+                    "id": "K-a", "type": "concept",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic A\n\nbody.\n",
+                expected_hash=None,
+            ),
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-b.md",
+                new_frontmatter={
+                    "id": "K-b", "type": "concept", "title": "Topic B",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic B\n\nSee [[Topic A]] for context.\n",
+                expected_hash=None,
+            ),
+        ],
+        rationale="split", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    b_id = _wiki_doc_id("wiki/concepts/topic-b.md")
+    b_links = [
+        link for link in await storage.links_from(b_id)
+        if link.link_type == LinkType.WIKILINK
+    ]
+    assert any(
+        link.dst_path == "wiki/concepts/topic-a.md" for link in b_links
+    ), (
+        "Topic B's [[Topic A]] failed to resolve — phase 0 didn't seed "
+        "the path-slug fallback title for op A"
+    )

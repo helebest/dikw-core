@@ -39,6 +39,7 @@ from ...providers.base import EmbeddingProvider, LLMProvider
 from ...schemas import Layer
 from ...storage.base import Storage
 from ..data.hashing import hash_bytes, hash_file
+from ..info.tokenize import CjkTokenizer
 from .links import parse_links, resolve_links
 from .lint import LintKind
 from .page_index import persist_wiki_page
@@ -382,6 +383,22 @@ async def run_lint_propose(
     return FixProposalReport(proposals=proposals, skipped=skipped)
 
 
+def _op_title(op: FixOperation) -> str:
+    """Derive the canonical title for a ``FixOperation``.
+
+    Single source of truth for the fallback chain — a fixer that
+    forgets to write ``new_frontmatter["title"]`` (or writes a
+    non-string YAML scalar) still gets a stable path-slug derived
+    title, so phase 0's ``title_to_path`` seed and
+    ``_build_page_from_op``'s WikiPage construction agree.
+    """
+    fm = op.new_frontmatter or {}
+    raw = fm.get("title")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return Path(op.path).stem.replace("-", " ").title()
+
+
 def _build_page_from_op(op: FixOperation) -> WikiPage:
     """Materialise a :class:`WikiPage` from an op's frontmatter + body.
 
@@ -395,7 +412,8 @@ def _build_page_from_op(op: FixOperation) -> WikiPage:
     if op.new_body is None:
         raise ValueError(f"op {op.kind} for {op.path} missing new_body")
     fm = dict(op.new_frontmatter or {})
-    title = str(fm.pop("title", Path(op.path).stem.replace("-", " ").title()))
+    title = _op_title(op)
+    fm.pop("title", None)
     type_ = str(fm.pop("type", "note"))
     tags = list(fm.pop("tags", []) or [])
     sources = list(fm.pop("sources", []) or [])
@@ -429,6 +447,7 @@ async def run_lint_apply(
     pick: list[int] | None = None,
     skip: list[int] | None = None,
     reporter: Any,  # ProgressReporter
+    cjk_tokenizer: CjkTokenizer = "none",
 ) -> ApplyReport:
     """Mutate ``wiki/`` per a previously-produced :class:`FixProposalReport`.
 
@@ -574,9 +593,8 @@ async def run_lint_apply(
     for op in applied:
         if op.kind not in ("create_page", "update_page"):
             continue
-        fm = op.new_frontmatter or {}
-        op_title = fm.get("title")
-        if isinstance(op_title, str) and op_title and op_title not in title_to_path:
+        op_title = _op_title(op)
+        if op_title not in title_to_path:
             title_to_path[op_title] = op.path
 
     # Phase 1: persist each still-extant changed page into storage:
@@ -593,6 +611,7 @@ async def run_lint_apply(
             embedder=None,
             embedding_model="",
             text_version_id=None,
+            cjk_tokenizer=cjk_tokenizer,
             title_to_path=title_to_path,
         )
 

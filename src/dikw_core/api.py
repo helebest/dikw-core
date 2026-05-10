@@ -284,30 +284,15 @@ async def _consume_embedding_stream(
     phase: str = "embed",
     total: int = 0,
 ) -> int:
-    """Drain an embed_chunks-style stream, upserting each batch as it
-    arrives. Per-batch upsert is the durability guarantee: a mid-flight
-    provider failure leaves prior batches on disk instead of throwing
-    away the entire run's API spend.
-
-    ``on_batch`` keeps the in-process rich progress bar's CLI callback
-    surface; ``reporter`` is the new structured channel a server task
-    listens on. Both fire per batch so a single ingest call can drive a
-    local TTY *and* a remote NDJSON subscriber simultaneously.
-    """
-    embedded = 0
-    batches_done = 0
-    async for batch in stream:
-        await storage.upsert_embeddings(batch)
-        embedded += len(batch)
-        batches_done += 1
-        if on_batch is not None:
-            on_batch()
-        if reporter is not None:
-            await reporter.progress(
-                phase=phase, current=batches_done, total=total
-            )
-            reporter.cancel_token().raise_if_cancelled()
-    return embedded
+    """Thin delegate — implementation lives in
+    :mod:`dikw_core.domains.info.embed` so K-layer indexing
+    (``persist_wiki_page``) can reuse the same drain-and-upsert loop
+    without depending on api.py internals."""
+    from .domains.info.embed import consume_embedding_stream
+    return await consume_embedding_stream(
+        stream, storage,
+        on_batch=on_batch, reporter=reporter, phase=phase, total=total,
+    )
 
 
 def _qualified_provider(protocol: str, base_url: str) -> str:

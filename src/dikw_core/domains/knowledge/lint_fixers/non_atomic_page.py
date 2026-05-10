@@ -111,6 +111,14 @@ class NonAtomicPageFixer:
             group_total=1,
             max_pages=_MAX_CHILDREN_CEILING,
             allowed_types=" | ".join(allowed_types),
+            # Mirrors api.py:_NO_EXISTING_PAGES_SENTINEL. The split fixer
+            # operates on a single page in isolation; the existing-pages
+            # awareness contract from PR #69 is for ingestion fan-out where
+            # earlier groups in the same source need to be visible to later
+            # groups. A future enhancement could surface ctx.all_pages here
+            # to discourage children that duplicate existing K-pages, but
+            # the immediate post-collision filter already catches that.
+            existing_pages_section="(no existing pages — this is a fresh wiki)",
         )
 
         pages = await safe_synthesize_pages(

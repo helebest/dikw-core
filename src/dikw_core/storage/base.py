@@ -128,6 +128,30 @@ class Storage(Protocol):
         """
         ...
 
+    async def get_chunk_embeddings(
+        self,
+        chunk_ids: Sequence[int],
+        *,
+        version_id: int | None = None,
+    ) -> dict[int, list[float]]:
+        """Batch fetch raw embedding vectors keyed by ``chunk_id``.
+
+        Returns ``{chunk_id: vector}`` for HITS only — chunks that were
+        never embedded (or whose row is missing for ``version_id``) are
+        absent from the dict, mirroring ``get_cached_embeddings``. Empty
+        input short-circuits to ``{}`` without a DB round-trip.
+
+        ``version_id=None`` means "the active text version"; adapters
+        resolve via ``get_active_embed_version(modality="text")`` and
+        return ``{}`` if no text embeddings have been indexed yet.
+
+        Used by synth's existing-pages retrieval-gated mode: when the
+        full K-layer page list overflows the prompt budget, each group's
+        chunk embeddings drive a per-chunk ``vec_search`` against the
+        WIKI layer to pick the top-K most relevant pages to surface.
+        """
+        ...
+
     async def list_chunks_missing_embedding(
         self, *, version_id: int
     ) -> list[ChunkRecord]:

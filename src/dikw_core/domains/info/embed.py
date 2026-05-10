@@ -26,6 +26,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...progress import ProgressReporter
 from ...providers import EmbeddingProvider, MultimodalEmbeddingProvider
 from ...schemas import (
     AssetEmbeddingRow,
@@ -311,3 +312,38 @@ async def embed_assets(
             )
             for (asset, _), v in zip(batch_pairs, vectors, strict=True)
         ]
+
+
+async def consume_embedding_stream(
+    stream: AsyncIterator[list[EmbeddingRow]],
+    storage: Storage,
+    *,
+    on_batch: Callable[[], None] | None = None,
+    reporter: ProgressReporter | None = None,
+    phase: str = "embed",
+    total: int = 0,
+) -> int:
+    """Drain an embed_chunks-style stream, upserting each batch as it
+    arrives. Per-batch upsert is the durability guarantee: a mid-flight
+    provider failure leaves prior batches on disk instead of throwing
+    away the entire run's API spend.
+
+    ``on_batch`` keeps the in-process rich progress bar's CLI callback
+    surface; ``reporter`` is the new structured channel a server task
+    listens on. Both fire per batch so a single ingest call can drive a
+    local TTY *and* a remote NDJSON subscriber simultaneously.
+    """
+    embedded = 0
+    batches_done = 0
+    async for batch in stream:
+        await storage.upsert_embeddings(batch)
+        embedded += len(batch)
+        batches_done += 1
+        if on_batch is not None:
+            on_batch()
+        if reporter is not None:
+            await reporter.progress(
+                phase=phase, current=batches_done, total=total
+            )
+            reporter.cancel_token().raise_if_cancelled()
+    return embedded

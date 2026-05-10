@@ -774,3 +774,431 @@ async def test_preflight_catches_mid_proposal_hash_drift(
     assert "updated A" not in (wiki_root / "wiki/page-a.md").read_text(
         encoding="utf-8"
     )
+
+
+@pytest.mark.asyncio
+async def test_create_page_apply_indexes_into_storage(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """A successful ``create_page`` op MUST register the page in storage,
+    not just write to disk. Without this, the next ``run_lint`` cannot
+    see the new page (it builds its title map from
+    ``storage.list_documents``)."""
+    storage = parametrized_storage
+    new_path = "wiki/concepts/qin-dynasty.md"
+
+    proposal = FixProposal(
+        proposal_id="p-create",
+        issue_kind="broken_wikilink",
+        issue_path="wiki/articles/china.md",
+        issue_detail="[[Qin Dynasty]] has no matching wiki page",
+        issue_line=1,
+        operations=[
+            FixOperation(
+                kind="create_page",
+                path=new_path,
+                new_frontmatter={
+                    "id": "K-qin-dynasty",
+                    "type": "concept",
+                    "title": "Qin Dynasty",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Qin Dynasty\n\nTODO: stub.\n",
+                expected_hash=None,
+            )
+        ],
+        rationale="LLM-generated stub", source="llm",
+    )
+
+    report = await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    assert len(report.applied) == 1
+    assert report.skipped == []
+
+    # Document row landed.
+    docs = list(await storage.list_documents(layer=Layer.WIKI, active=True))
+    qin = next((d for d in docs if d.path == new_path), None)
+    assert qin is not None, "create_page must register the doc in storage"
+    assert qin.title == "Qin Dynasty"
+    assert qin.hash != ""
+
+    # Chunks landed.
+    chunks = await storage.list_chunks(qin.doc_id)
+    assert len(chunks) >= 1
+
+
+@pytest.mark.asyncio
+async def test_apply_then_lint_does_not_re_report_broken_wikilink(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """End-to-end regression: apply ``create_page`` → immediately
+    ``run_lint`` → the original ``broken_wikilink`` should NOT reappear
+    (no need for a separate ``dikw ingest`` to bridge the gap)."""
+    from dikw_core.domains.knowledge.lint import run_lint
+
+    storage = parametrized_storage
+    src_path = "wiki/articles/china-history.md"
+    await _seed_page(
+        storage=storage, wiki_root=wiki_root,
+        path=src_path, title="China History",
+        body="# China History\n\nThe [[Qin Dynasty]] unified ...\n",
+    )
+
+    before = await run_lint(storage=storage, root=wiki_root)
+    broken_before = [
+        i for i in before.issues
+        if i.kind == "broken_wikilink"
+        and "Qin Dynasty" in i.detail
+        and i.path == src_path
+    ]
+    assert len(broken_before) == 1
+
+    proposal = FixProposal(
+        proposal_id="p-fix",
+        issue_kind="broken_wikilink",
+        issue_path=src_path,
+        issue_detail=broken_before[0].detail,
+        issue_line=broken_before[0].line,
+        operations=[FixOperation(
+            kind="create_page",
+            path="wiki/concepts/qin-dynasty.md",
+            new_frontmatter={
+                "id": "K-qin-dynasty",
+                "type": "concept",
+                "title": "Qin Dynasty",
+                "created": "2026-05-10T00:00:00+00:00",
+                "updated": "2026-05-10T00:00:00+00:00",
+            },
+            new_body="# Qin Dynasty\n\nTODO: stub.\n",
+            expected_hash=None,
+        )],
+        rationale="LLM stub", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    after = await run_lint(storage=storage, root=wiki_root)
+    broken_after = [
+        i for i in after.issues
+        if i.kind == "broken_wikilink"
+        and "Qin Dynasty" in i.detail
+        and i.path == src_path
+    ]
+    assert broken_after == []
+
+
+@pytest.mark.asyncio
+async def test_apply_create_page_reconciles_referrer_outgoing_links(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """When apply creates a missing target page, the source page's
+    outgoing links MUST be re-resolved against the post-apply title
+    index. Otherwise:
+    - storage.links_from(source) misses the new edge
+    - run_lint's inbound counter never sees it
+    - the freshly-created target is immediately reported as orphan_page
+    despite being linked.
+    """
+    from dikw_core.domains.knowledge.lint import run_lint
+
+    storage = parametrized_storage
+    src_path = "wiki/articles/china-history.md"
+    src_doc_id = await _seed_page(
+        storage=storage, wiki_root=wiki_root,
+        path=src_path, title="China History",
+        body="# China History\n\nThe [[Qin Dynasty]] unified ...\n",
+    )
+
+    proposal = FixProposal(
+        proposal_id="p-fix-referrer",
+        issue_kind="broken_wikilink",
+        issue_path=src_path,
+        issue_detail="[[Qin Dynasty]] has no matching wiki page",
+        issue_line=3,
+        operations=[FixOperation(
+            kind="create_page",
+            path="wiki/concepts/qin-dynasty.md",
+            new_frontmatter={
+                "id": "K-qin", "type": "concept", "title": "Qin Dynasty",
+                "created": "2026-05-10T00:00:00+00:00",
+                "updated": "2026-05-10T00:00:00+00:00",
+            },
+            new_body="# Qin Dynasty\n\nstub\n",
+            expected_hash=None,
+        )],
+        rationale="LLM stub", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    # Source page's storage links must now include the edge to the new page.
+    src_links = [
+        link for link in await storage.links_from(src_doc_id)
+        if link.link_type == LinkType.WIKILINK
+    ]
+    assert any(
+        link.dst_path == "wiki/concepts/qin-dynasty.md" for link in src_links
+    ), "referrer page outgoing link to the newly-created target was not reconciled"
+
+    # And the new page must NOT be reported as orphan in the next run_lint.
+    after = await run_lint(storage=storage, root=wiki_root)
+    orphan = [
+        i for i in after.issues
+        if i.kind == "orphan_page"
+        and i.path == "wiki/concepts/qin-dynasty.md"
+    ]
+    assert orphan == [], (
+        "freshly-created page should not be reported as orphan when the "
+        "referrer's [[Title]] now resolves to it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_sibling_cross_links_resolve_in_one_pass(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """When a single apply batch creates two pages where the
+    earlier-sorted page links to the later-sorted page (common for
+    ``non_atomic_page`` splits with sibling ``[[Title]]`` cross-links),
+    BOTH outgoing edges must land in storage in this pass — otherwise
+    the source page's link to a still-not-persisted sibling silently
+    drops, and phase 2's referrer reconcile skips ``paths_changed`` so
+    the gap is never recovered until the next ingest."""
+    storage = parametrized_storage
+
+    proposal = FixProposal(
+        proposal_id="p-split",
+        issue_kind="non_atomic_page",
+        issue_path="wiki/source.md",
+        issue_detail="splitting fat page into two atomic children",
+        operations=[
+            FixOperation(
+                kind="create_page",
+                # alpha-sorts before topic-b — body links to topic-b
+                # whose title only exists in this same batch.
+                path="wiki/concepts/topic-a.md",
+                new_frontmatter={
+                    "id": "K-a", "type": "concept", "title": "Topic A",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic A\n\nSee also [[Topic B]].\n",
+                expected_hash=None,
+            ),
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-b.md",
+                new_frontmatter={
+                    "id": "K-b", "type": "concept", "title": "Topic B",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic B\n\nbody.\n",
+                expected_hash=None,
+            ),
+        ],
+        rationale="split", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    a_id = _wiki_doc_id("wiki/concepts/topic-a.md")
+    a_links = [
+        link for link in await storage.links_from(a_id)
+        if link.link_type == LinkType.WIKILINK
+    ]
+    assert any(
+        link.dst_path == "wiki/concepts/topic-b.md" for link in a_links
+    ), (
+        "Topic A's outgoing wikilink to Topic B was lost — phase 1 "
+        "persisted A before B's title entered the resolver index"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_uses_configured_cjk_tokenizer(
+    parametrized_storage: Storage, wiki_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_lint_apply must thread its cjk_tokenizer kwarg through to
+    persist_wiki_page so K-layer chunks land split with the same
+    tokenizer ingest uses. Otherwise a base configured for ``jieba``
+    silently downgrades lint-apply chunks to whitespace splitting,
+    diverging from doc.hash and breaking embedding backfill."""
+    storage = parametrized_storage
+
+    captured: list[dict[str, Any]] = []
+    from dikw_core.domains.knowledge import lint_fix as lint_fix_module
+    real_persist = lint_fix_module.persist_wiki_page
+
+    async def _spy(**kwargs: Any) -> tuple[int, str]:
+        captured.append(kwargs)
+        return await real_persist(**kwargs)
+
+    monkeypatch.setattr(lint_fix_module, "persist_wiki_page", _spy)
+
+    proposal = FixProposal(
+        proposal_id="p-cjk",
+        issue_kind="broken_wikilink",
+        issue_path="wiki/source.md",
+        issue_detail="stub",
+        operations=[FixOperation(
+            kind="create_page",
+            path="wiki/concepts/qin-dynasty.md",
+            new_frontmatter={
+                "id": "K-qin", "type": "concept", "title": "秦朝",
+                "created": "2026-05-10T00:00:00+00:00",
+                "updated": "2026-05-10T00:00:00+00:00",
+            },
+            new_body="# 秦朝\n\n秦朝是中国历史上第一个大一统的朝代。\n",
+            expected_hash=None,
+        )],
+        rationale="r", source="llm",
+    )
+
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+        cjk_tokenizer="jieba",
+    )
+
+    assert len(captured) == 1
+    assert captured[0].get("cjk_tokenizer") == "jieba"
+
+
+@pytest.mark.asyncio
+async def test_apply_uses_path_slug_title_when_op_frontmatter_missing(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """When an applied create_page op has no string title in
+    new_frontmatter, _build_page_from_op falls back to a path-slug
+    derived title (e.g. wiki/concepts/topic-a.md → 'Topic A'). Phase
+    0 must apply the SAME fallback so a sibling page that links to
+    [[Topic A]] resolves in this batch — without it, the storage
+    edge from the sibling silently drops until the next ingest."""
+    storage = parametrized_storage
+
+    proposal = FixProposal(
+        proposal_id="p-no-title",
+        issue_kind="non_atomic_page",
+        issue_path="wiki/source.md",
+        issue_detail="split",
+        operations=[
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-a.md",
+                new_frontmatter={
+                    "id": "K-a", "type": "concept",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic A\n\nbody.\n",
+                expected_hash=None,
+            ),
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-b.md",
+                new_frontmatter={
+                    "id": "K-b", "type": "concept", "title": "Topic B",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic B\n\nSee [[Topic A]] for context.\n",
+                expected_hash=None,
+            ),
+        ],
+        rationale="split", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    b_id = _wiki_doc_id("wiki/concepts/topic-b.md")
+    b_links = [
+        link for link in await storage.links_from(b_id)
+        if link.link_type == LinkType.WIKILINK
+    ]
+    assert any(
+        link.dst_path == "wiki/concepts/topic-a.md" for link in b_links
+    ), (
+        "Topic B's [[Topic A]] failed to resolve — phase 0 didn't seed "
+        "the path-slug fallback title for op A"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_strips_whitespace_in_op_title_for_resolver_index(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """A fixer that writes a title with leading/trailing whitespace
+    must not break sibling cross-link resolution. Phase 0 strips the
+    raw title before seeding title_to_path so a sibling [[Topic A]]
+    resolves regardless of how the surrounding op spelled the title."""
+    storage = parametrized_storage
+
+    proposal = FixProposal(
+        proposal_id="p-strip",
+        issue_kind="non_atomic_page",
+        issue_path="wiki/source.md",
+        issue_detail="split",
+        operations=[
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-a.md",
+                new_frontmatter={
+                    "id": "K-a", "type": "concept",
+                    "title": "  Topic A  ",  # leading + trailing whitespace
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic A\n\nbody.\n",
+                expected_hash=None,
+            ),
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-b.md",
+                new_frontmatter={
+                    "id": "K-b", "type": "concept", "title": "Topic B",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic B\n\nSee [[Topic A]] for context.\n",
+                expected_hash=None,
+            ),
+        ],
+        rationale="split", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    b_id = _wiki_doc_id("wiki/concepts/topic-b.md")
+    b_links = [
+        link for link in await storage.links_from(b_id)
+        if link.link_type == LinkType.WIKILINK
+    ]
+    assert any(
+        link.dst_path == "wiki/concepts/topic-a.md" for link in b_links
+    ), (
+        "Topic B's [[Topic A]] did not resolve — _op_title left "
+        "whitespace in the phase-0 dict key"
+    )

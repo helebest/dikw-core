@@ -13,6 +13,8 @@ from pathlib import Path
 
 import frontmatter
 
+from .wiki import path_slug_title
+
 INDEX_PATH = "wiki/index.md"
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
@@ -57,7 +59,7 @@ def _page_entries(wiki_dir: Path) -> list[tuple[str, str, str, str]]:
             continue
         folder = md.parent.name  # e.g. "concepts"
         meta = post.metadata
-        title = str(meta.get("title") or md.stem.replace("-", " ").title())
+        title = str(meta.get("title") or path_slug_title(str(md)))
         summary = _first_paragraph(post.content) or "(empty page)"
         entries.append((folder, title, str(rel).replace("\\", "/"), summary))
     entries.sort(key=lambda e: (e[0], e[1].lower()))

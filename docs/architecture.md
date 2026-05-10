@@ -49,6 +49,7 @@ src/dikw_core/
 │   │   └── search.py        RRF-fused FTS + vector hybrid
 │   ├── knowledge/
 │   │   ├── wiki.py          WikiPage I/O (Obsidian-compatible front-matter)
+│   │   ├── page_index.py    persist_wiki_page — K-layer indexing entrypoint reused by synth + lint apply
 │   │   ├── synthesize.py    LLM -> <page> blocks -> WikiPage
 │   │   ├── links.py         [[wikilinks]] + md + URL parser; fuzzy resolve + collision refusal
 │   │   ├── indexgen.py      regenerate wiki/index.md

@@ -2330,6 +2330,7 @@ async def lint_propose(
     rule: LintKind | None = None,
     limit: int = 10,
     llm: Any = None,
+    embedder: Any = None,
     enable_llm: bool = False,
     reporter: ProgressReporter | None = None,
 ) -> FixProposalReport:
@@ -2345,6 +2346,8 @@ async def lint_propose(
     ``llm`` is a passthrough override used by tests; in production
     it is built from ``cfg.provider`` the same way :func:`synthesize`
     does, so ``$DIKW_*_API_KEY`` resolution flows through one path.
+    ``embedder`` is preserved for call-signature stability (PR1
+    accepted it as a future-fixer hook); no PR2 fixer reads it yet.
     """
     cfg, root, storage = await _with_storage(path)
     try:
@@ -2365,7 +2368,7 @@ async def lint_propose(
         ctx = FixerContext(
             storage=storage,
             llm=_llm,
-            embedding=None,
+            embedding=embedder,
             wiki_root=root,
             all_pages=all_pages,
             enable_llm=enable_llm,

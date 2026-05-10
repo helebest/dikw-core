@@ -478,16 +478,53 @@ async def run_lint_apply(
     total_ops = sum(len(p.operations) for p in proposals)
     op_counter = 0
 
-    for proposal in proposals:
-        # Per-proposal atomicity: a proposal is one logical fix (e.g.
-        # "split this page into N children + delete original"), and
-        # half-applying it produces broken state worse than not
-        # applying at all — drop the original after only some of its
-        # children landed on disk and the unfinished split silently
-        # loses content. Once any op in a proposal skips, abandon the
-        # rest of that proposal; the user re-runs propose against the
-        # post-apply tree to retry. Independent fixes still proceed:
-        # a failed proposal does not abort sibling proposals.
+    # Per-proposal preflight: simulate every op against current disk
+    # state before mutating anything. Catches the "create_page #1
+    # succeeds, create_page #2 collides, delete_page wipes the source
+    # we already half-replaced" path. Real all-or-nothing requires
+    # rollback, but preflight catches the common deterministic failures
+    # — collisions, missing files, hash drift — without growing a WAL.
+    # ``touched_paths`` from earlier proposals also feed in: a sibling
+    # proposal that already mutated path X means a later proposal
+    # acting on X will be flagged here.
+    preflight_skips: dict[int, list[dict[str, Any]]] = {}
+    for idx, proposal in enumerate(proposals):
+        preflight_reason = _preflight_proposal(
+            proposal=proposal,
+            wiki_root=wiki_root,
+            already_touched=touched_paths,
+        )
+        if preflight_reason is not None:
+            preflight_skips[idx] = [
+                _skip(proposal.proposal_id, op, preflight_reason)
+                for op in proposal.operations
+            ]
+
+    for idx, proposal in enumerate(proposals):
+        if idx in preflight_skips:
+            for record in preflight_skips[idx]:
+                op_counter += 1
+                await reporter.progress(
+                    phase="lint_apply",
+                    current=op_counter,
+                    total=total_ops,
+                    detail={
+                        "op": record["op"],
+                        "path": record["path"],
+                        "preflight_failed": True,
+                    },
+                )
+                skipped.append(record)
+            continue
+
+        # Per-proposal atomicity: even after preflight, an op can still
+        # fail at apply time (race between preflight and write, OS
+        # error, sandbox refusal). Once any op in a proposal skips,
+        # abandon the rest — half a fix is worse than no fix. The
+        # remaining-ops loop below records them as skipped without
+        # mutating anything else, but earlier successful writes in this
+        # proposal stay on disk (no rollback). Sibling proposals are
+        # unaffected; preflight already isolated them.
         proposal_aborted = False
         for op in proposal.operations:
             op_counter += 1
@@ -575,6 +612,98 @@ def _filter_proposals(
         for i, p in enumerate(proposals)
         if (pick_set is None or i in pick_set) and i not in skip_set
     ]
+
+
+def _preflight_proposal(
+    *,
+    proposal: FixProposal,
+    wiki_root: Path,
+    already_touched: set[str],
+) -> str | None:
+    """Validate every op of a proposal against current disk state.
+
+    Returns ``None`` when the whole proposal would apply cleanly, or a
+    short reason string explaining the first op that would fail. The
+    real apply pass (:func:`_apply_one_op`) re-checks each condition;
+    this preflight exists so that a multi-op proposal whose 2nd op
+    cannot succeed never lets its 1st op land on disk.
+
+    Simulates op effects within the proposal so a ``create_page`` then
+    ``update_page`` on the same path is recognised as valid (the
+    create makes the file exist for the update). Cross-proposal state
+    is captured via ``already_touched`` — any path mutated by a prior
+    proposal in the same apply pass causes immediate failure here.
+    """
+    wiki_dir = (wiki_root / "wiki").resolve()
+    sim_created: set[str] = set()
+    sim_deleted: set[str] = set()
+
+    def _exists(op_path: str) -> bool:
+        if op_path in sim_deleted:
+            return False
+        if op_path in sim_created:
+            return True
+        abs_path = (wiki_root / op_path).resolve()
+        return abs_path.is_file()
+
+    for op in proposal.operations:
+        abs_path = (wiki_root / op.path).resolve()
+        try:
+            abs_path.relative_to(wiki_dir)
+        except ValueError:
+            return f"op {op.kind} path is outside wiki/ tree: {op.path!r}"
+
+        if op.path in already_touched:
+            return (
+                f"op {op.kind} on {op.path!r} would conflict with a "
+                "sibling proposal that already mutated this path"
+            )
+
+        if op.kind == "create_page":
+            if _exists(op.path):
+                return f"create_page would collide: {op.path!r} already exists"
+            sim_created.add(op.path)
+            sim_deleted.discard(op.path)
+        elif op.kind == "update_page":
+            if not _exists(op.path):
+                return f"update_page target missing: {op.path!r}"
+            if not op.expected_hash:
+                return (
+                    f"update_page on {op.path!r} missing expected_hash "
+                    "— required for safety"
+                )
+            # Hash drift only meaningful against current on-disk bytes.
+            # A simulated post-create file can't have a stable hash to
+            # check against, so skip the hash check on within-proposal
+            # creates. Real apply will compute and verify.
+            if op.path not in sim_created:
+                actual = file_sha256(abs_path)
+                if actual != op.expected_hash:
+                    return (
+                        f"update_page on {op.path!r}: hash mismatch "
+                        "(concurrent edit detected)"
+                    )
+        elif op.kind == "delete_page":
+            if not _exists(op.path):
+                return f"delete_page target missing: {op.path!r}"
+            if not op.expected_hash:
+                return (
+                    f"delete_page on {op.path!r} missing expected_hash "
+                    "— required for safety"
+                )
+            if op.path not in sim_created:
+                actual = file_sha256(abs_path)
+                if actual != op.expected_hash:
+                    return (
+                        f"delete_page on {op.path!r}: hash mismatch "
+                        "(concurrent edit detected)"
+                    )
+            sim_deleted.add(op.path)
+            sim_created.discard(op.path)
+        else:
+            return f"unknown op kind {op.kind!r}"
+
+    return None
 
 
 async def _apply_one_op(

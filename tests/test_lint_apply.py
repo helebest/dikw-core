@@ -690,13 +690,87 @@ async def test_proposal_is_atomic_subsequent_ops_skip_after_failure(
     skipped_paths = [s["path"] for s in report.skipped]
     assert "wiki/concepts/grab-bag.md" not in applied_paths
     assert "wiki/sibling.md" in applied_paths
-    # Both later ops in the split proposal must show as skipped.
+    # All three ops of the split proposal must show as skipped — no
+    # half-applied state on disk, even for the first child whose path
+    # WOULD have been free in isolation. Preflight catches the
+    # collision before any write happens.
     assert "wiki/concepts/topic-a.md" in skipped_paths
     assert "wiki/concepts/topic-b.md" in skipped_paths
     assert "wiki/concepts/grab-bag.md" in skipped_paths
-    # Reasons: op #1 = "file already exists"; ops #2 + #3 = aborted-proposal note.
-    abort_skips = [
+    # Reasons: every op of the split proposal carries the preflight
+    # collision message; the sibling proposal is unaffected.
+    split_skips = [
         s for s in report.skipped
-        if "earlier op in the same proposal" in s["reason"]
+        if s["proposal_id"] == "split"
     ]
-    assert len(abort_skips) == 2  # ops #2 and #3
+    assert len(split_skips) == 3
+    assert all("collide" in s["reason"] for s in split_skips), split_skips
+    # The other-child file that would have landed on disk in isolation
+    # must NOT exist (preflight refused before any write).
+    assert not (wiki_root / "wiki/concepts/topic-b.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_preflight_catches_mid_proposal_hash_drift(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """The earlier per-proposal abort guard only stopped *subsequent*
+    ops once one failed — earlier writes already on disk stayed there.
+    Preflight closes that hole: a multi-op proposal whose 2nd op would
+    fail (hash drift on a sibling page) must NOT mutate the 1st op's
+    target either."""
+    storage = parametrized_storage
+    await _seed_page(
+        storage=storage, wiki_root=wiki_root,
+        path="wiki/page-a.md", title="Page A",
+        body="# Page A\n\noriginal A\n",
+    )
+    await _seed_page(
+        storage=storage, wiki_root=wiki_root,
+        path="wiki/page-b.md", title="Page B",
+        body="# Page B\n\noriginal B\n",
+    )
+    a_hash_correct = file_sha256(wiki_root / "wiki/page-a.md")
+    # Stale hash for B (as if the proposal was generated against an
+    # earlier version of page-b.md and B was edited externally since).
+    b_hash_stale = "0" * 64
+
+    proposal = FixProposal(
+        proposal_id="multi", issue_kind="orphan_page",
+        issue_path="wiki/page-a.md",
+        issue_detail="multi-op fix",
+        operations=[
+            # Op #1 would succeed in isolation: hash matches A.
+            FixOperation(
+                kind="update_page", path="wiki/page-a.md",
+                new_frontmatter={"title": "Page A"},
+                new_body="# Page A\n\nupdated A\n",
+                expected_hash=a_hash_correct,
+            ),
+            # Op #2 has a stale hash for B → preflight rejects whole proposal.
+            FixOperation(
+                kind="update_page", path="wiki/page-b.md",
+                new_frontmatter={"title": "Page B"},
+                new_body="# Page B\n\nupdated B\n",
+                expected_hash=b_hash_stale,
+            ),
+        ],
+        rationale="multi-op", source="heuristic",
+    )
+
+    report = await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    assert report.applied == []
+    assert len(report.skipped) == 2
+    # Page A on disk must still be the original, even though op #1
+    # would have succeeded in isolation.
+    assert "original A" in (wiki_root / "wiki/page-a.md").read_text(
+        encoding="utf-8"
+    )
+    assert "updated A" not in (wiki_root / "wiki/page-a.md").read_text(
+        encoding="utf-8"
+    )

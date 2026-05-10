@@ -51,6 +51,16 @@ logger = logging.getLogger(__name__)
 # than churn its slug. Higher floors silently mask real splits.
 _MIN_CHILDREN = 2
 
+# Upper bound on children the LLM may emit per split. ``cfg.synth.max_pages_per_group``
+# is calibrated for chunk-group fan-out during ingestion (default 4); reusing it
+# here would silently cap fat pages with 5+ atomic topics, and the LLM stops at
+# the cap WITHOUT raising any truncation signal — there's no way to tell whether
+# topics 5/6/7 just didn't exist or got dropped on the floor. Use a much higher
+# ceiling so the cap is informational rather than load-bearing for correctness;
+# the safety net below ("emitted == cap → refuse") then guards the rare page
+# that genuinely fans out beyond this limit.
+_MAX_CHILDREN_CEILING = 16
+
 # Hard cap on the body bytes we will hand to the LLM. ``non_atomic_page``
 # specifically targets fat pages, so the upper tail of inputs IS the
 # common case here, and at least one configured provider (openai_codex)
@@ -92,7 +102,6 @@ class NonAtomicPageFixer:
 
         cfg = ctx.cfg
         allowed_types = tuple(cfg.schema_.page_types) or DEFAULT_ALLOWED_TYPES
-        max_pages = cfg.synth.max_pages_per_group
 
         user_prompt = prompts.load("synthesize").format(
             source_path=issue.path,
@@ -100,7 +109,7 @@ class NonAtomicPageFixer:
             group_outline="(whole page — split into atomic children)",
             group_index=1,
             group_total=1,
-            max_pages=max_pages,
+            max_pages=_MAX_CHILDREN_CEILING,
             allowed_types=" | ".join(allowed_types),
         )
 
@@ -116,6 +125,21 @@ class NonAtomicPageFixer:
             strict=True,
         )
         if not pages:
+            return None
+
+        # Refuse if the LLM hit the ceiling — the page may have had more
+        # atomic topics that the prompt cap silently swallowed (the model
+        # voluntarily stops at "emit at most N", no SynthesisPartialError
+        # fires). Better to report skipped and let the user split by hand
+        # than to delete the original after losing topic N+1 onwards.
+        if len(pages) >= _MAX_CHILDREN_CEILING:
+            logger.info(
+                "non_atomic_page split for %s refused: LLM emitted %d "
+                "children at the prompt cap — possible topic loss, "
+                "split by hand and re-run",
+                issue.path,
+                len(pages),
+            )
             return None
 
         children = dedup_pages_by_slug(pages, strategy="merge_body")

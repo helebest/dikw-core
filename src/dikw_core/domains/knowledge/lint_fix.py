@@ -48,7 +48,7 @@ from .synthesize import (
     SynthesisPartialError,
     synthesize_pages_from_text,
 )
-from .wiki import WikiPage, build_page, write_page
+from .wiki import WikiPage, build_page, path_slug_title, write_page
 
 logger = logging.getLogger(__name__)
 
@@ -395,8 +395,8 @@ def _op_title(op: FixOperation) -> str:
     fm = op.new_frontmatter or {}
     raw = fm.get("title")
     if isinstance(raw, str) and raw.strip():
-        return raw
-    return Path(op.path).stem.replace("-", " ").title()
+        return raw.strip()
+    return path_slug_title(op.path)
 
 
 def _build_page_from_op(op: FixOperation) -> WikiPage:

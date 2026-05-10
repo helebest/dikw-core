@@ -90,6 +90,7 @@ from .domains.knowledge.lint_fix import (
 )
 from .domains.knowledge.log import render_log
 from .domains.knowledge.synthesize import (
+    DEFAULT_SYNTH_SYSTEM,
     SynthesisError,
     SynthesisPartialError,
     dedup_pages_by_slug,
@@ -2832,7 +2833,7 @@ async def _synth_pages_from_source(
             group.token_count,
         )
         response = await llm.complete(
-            system="You synthesise K-layer wiki pages for dikw-core.",
+            system=DEFAULT_SYNTH_SYSTEM,
             user=user_prompt,
             model=cfg.provider.llm_model,
             max_tokens=cfg.provider.llm_max_tokens_synth,

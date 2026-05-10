@@ -27,6 +27,16 @@ Choose exactly one `type` for each page from `{allowed_types}`:
 3. Link to any entity, concept, or other wiki page referenced — use `[[Wikilink Title]]`. If the target page does not yet exist, still write the wikilink; it will be flagged by `dikw lint`.
 4. Pick 2–5 short tags per page.
 
+## Output language
+
+Detect the dominant language of the SOURCE DOCUMENT (and the current section). Emit page titles, the body H1, body paragraphs, tags, and **new** wikilink titles in that same language.
+
+- If the source is primarily Chinese, do **not** translate concepts, entities, or notes into English. Keep the Chinese term verbatim (e.g. `[[神经网络]]`, not `[[Neural Network]]`).
+- If the source is primarily English, emit pages in English.
+- For mixed-language sources, follow the language of the chunk you are summarising; a single page should not switch languages mid-paragraph.
+- When linking to a page that already exists in the wiki (see the existing-pages section below, when present), use that page's title **verbatim** — never translate or paraphrase it.
+- `path` and `slug` must remain lowercase ASCII kebab-case regardless of title language. For non-ASCII titles, use a short pinyin or English-equivalent slug (e.g. title `神经网络` → slug `neural-network` or `shen-jing-wang-luo`); the page title itself stays in the source language.
+
 ## Existing pages
 
 {existing_pages_section}

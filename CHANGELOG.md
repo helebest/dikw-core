@@ -7,6 +7,32 @@ on each entry call out exactly what shape changes break.
 
 ## Unreleased
 
+### `synth` — preserve dominant source language in K-layer pages
+
+* **Changed**: synth prompt (`prompts/synthesize.md`) gains an `## Output
+  language` section that instructs the LLM to detect the dominant language
+  of the SOURCE DOCUMENT and emit page titles, body H1, body paragraphs,
+  tags, and **new** wikilink titles in that same language. Chinese sources
+  no longer get translated into English K-pages by default; English sources
+  remain unchanged.
+* **Changed**: `DEFAULT_SYNTH_SYSTEM` (`domains/knowledge/synthesize.py`)
+  now reinforces the same rule as a second-line defence — keeps the
+  directive in scope when the user prompt is later truncated under
+  context-window pressure. The split `non_atomic_page` lint fixer reuses
+  this constant, so its in-place page splits inherit the language rule
+  for free.
+* **Invariant kept**: `path` and `slug` remain lowercase ASCII kebab-case
+  regardless of title language — Obsidian / cross-OS portability of the
+  on-disk wiki tree depends on it. For non-ASCII titles the LLM is
+  instructed to use a short pinyin or English-equivalent slug; the title
+  itself stays in the source language.
+* **Tests**: new `test_synth_prompt_preserves_source_language` in
+  `tests/test_synthesize_pipeline.py` asserts both the user-prompt template
+  and the `DEFAULT_SYNTH_SYSTEM` system prompt carry the rule end-to-end.
+* **Out of scope**: `distill` and `query` prompts are NOT yet language-aware
+  — Chinese K-pages still risk producing English wisdom and English answers.
+  Tracked separately.
+
 ### `lint propose` / `lint apply` — repair closure for broken_wikilink
 
 * **Added**: `dikw client lint propose [--rule <kind>] [--limit N]` runs lint

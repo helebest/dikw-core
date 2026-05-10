@@ -170,6 +170,31 @@ async def test_synth_counts_parse_failure_as_error(
     assert report.sources_processed == 3
 
 
+@pytest.mark.asyncio
+async def test_synth_prompt_preserves_source_language(
+    wiki_with_fixtures: Path,
+) -> None:
+    """Both the user prompt template (`prompts/synthesize.md`) and the
+    hardcoded system prompt must instruct the LLM to preserve the source's
+    dominant language. Without the rule the LLM defaults to English even
+    on Chinese sources; the system prompt is a second-line defence in case
+    the user prompt is later truncated under context-window pressure.
+    """
+    embedder = FakeEmbeddings()
+    await api.ingest(wiki_with_fixtures, embedder=embedder)
+
+    llm = FakeLLM(response_text="(no page worth writing)")
+    await api.synthesize(wiki_with_fixtures, llm=llm, embedder=embedder)
+
+    assert llm.last_user is not None, "synth must invoke the LLM at least once"
+    assert "## Output language" in llm.last_user
+    assert "dominant language" in llm.last_user
+    assert "ASCII" in llm.last_user
+
+    assert llm.last_system is not None
+    assert "Preserve the dominant language" in llm.last_system
+
+
 def _long_fixture_body() -> str:
     """A markdown body big enough to land across multiple ChunkGroups.
 

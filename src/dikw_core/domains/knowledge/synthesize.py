@@ -252,7 +252,11 @@ def touch(page: WikiPage) -> WikiPage:
     return replace(page, updated=now_iso())
 
 
-DEFAULT_SYNTH_SYSTEM = "You synthesise K-layer wiki pages for dikw-core."
+DEFAULT_SYNTH_SYSTEM = (
+    "You synthesise K-layer wiki pages for dikw-core. "
+    "Preserve the dominant language of the source section in generated "
+    "page titles, body text, tags, and new wikilink titles."
+)
 # Underscore alias for legacy callers; new code should use the public name.
 _DEFAULT_SYNTH_SYSTEM = DEFAULT_SYNTH_SYSTEM
 

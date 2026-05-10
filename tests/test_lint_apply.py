@@ -1141,3 +1141,64 @@ async def test_apply_uses_path_slug_title_when_op_frontmatter_missing(
         "Topic B's [[Topic A]] failed to resolve — phase 0 didn't seed "
         "the path-slug fallback title for op A"
     )
+
+
+@pytest.mark.asyncio
+async def test_apply_strips_whitespace_in_op_title_for_resolver_index(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """A fixer that writes a title with leading/trailing whitespace
+    must not break sibling cross-link resolution. Phase 0 strips the
+    raw title before seeding title_to_path so a sibling [[Topic A]]
+    resolves regardless of how the surrounding op spelled the title."""
+    storage = parametrized_storage
+
+    proposal = FixProposal(
+        proposal_id="p-strip",
+        issue_kind="non_atomic_page",
+        issue_path="wiki/source.md",
+        issue_detail="split",
+        operations=[
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-a.md",
+                new_frontmatter={
+                    "id": "K-a", "type": "concept",
+                    "title": "  Topic A  ",  # leading + trailing whitespace
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic A\n\nbody.\n",
+                expected_hash=None,
+            ),
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-b.md",
+                new_frontmatter={
+                    "id": "K-b", "type": "concept", "title": "Topic B",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic B\n\nSee [[Topic A]] for context.\n",
+                expected_hash=None,
+            ),
+        ],
+        rationale="split", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    b_id = _wiki_doc_id("wiki/concepts/topic-b.md")
+    b_links = [
+        link for link in await storage.links_from(b_id)
+        if link.link_type == LinkType.WIKILINK
+    ]
+    assert any(
+        link.dst_path == "wiki/concepts/topic-a.md" for link in b_links
+    ), (
+        "Topic B's [[Topic A]] did not resolve — _op_title left "
+        "whitespace in the phase-0 dict key"
+    )

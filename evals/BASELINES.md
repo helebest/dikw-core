@@ -96,13 +96,16 @@ fixer's stub fallback or fuzzy match against any new entity page).
 - Sample sizes are small (2 + 1) by design — token cost was the
   binding constraint. Larger sweeps belong in a routine eval, not
   a per-PR baseline.
-## 2026-05-10 — Synth existing-pages awareness (synth-context PR2; non-destructive snapshot + deferred A/B)
+## 2026-05-10 — Synth existing-pages awareness (synth-context PR2; measured A/B)
 
-**Status:** non-destructive proof + pre-rebuild snapshot for PR2
-(`feat/synth-existing-pages-context`). The signal-side A/B
-(broken_wikilink reduction, semantic-duplicate spot-check) requires a
-fresh re-synth from elon-musk.md; deferred to the next wiki rebuild
-cycle to avoid burning the codex SSE keepalive bug on the full text.
+**Status:** non-destructive proof + measured signal-side A/B for PR2
+(`feat/synth-existing-pages-context`, shipped as PR #69 commit
+`8c6d392`). Pre-PR2 snapshot captured before the rebuild; post-PR2
+column captured 2026-05-10 by wiping `wiki/` + `.dikw/index.sqlite`
+on the same base and re-running ingest + synth + lint via
+`scripts/pr69_baseline_run.py`. Codex SSE keepalive bug **did not
+trigger** — synth fans out to 19 groups of ≤3600 tokens each, so the
+trigger condition (single oversize request) never appears.
 
 ### What PR2 changes
 
@@ -130,67 +133,84 @@ new primitive (`get_chunk_embeddings`); pure SELECT, zero DDL.
   `LintReport` shapes unchanged.
 - **Test signal:** 1000-test full suite green; ruff + mypy clean.
 
-### Pre-rebuild snapshot — `elon-musk-validation` base, 2026-05-10
+### A/B — `elon-musk-validation` base, 2026-05-10
 
-Captured before re-synth so the post-PR2 rebuild has a comparison
-anchor. The wiki below was synthesised under the pre-PR2 prompt
-(2026-04 / 2026-05 commits); these numbers are the **baseline** PR2
-should improve against.
+Pre-PR2 column captured from the wiki tree synthesised under the
+pre-PR2 prompt (2026-04 / 2026-05 commits). Post-PR2 column captured
+by `scripts/pr69_baseline_run.py` after a full wipe-and-rebuild on
+the same source + same provider config.
 
 ```
 source: ~/Project/opendikw/dikw-data/datasets/markdown-books/elon-musk.md
                 (1500-line subset, per docs/eval-plan.md K-layer gate)
 provider: openai_codex (gpt-5.5) + Qwen3-Embedding-0.6B (gitee-ai)
-wiki state: pre-PR2 synth output, indexed in .dikw/index.sqlite
+post-PR2 wall time: ingest 9.6s, synth 593.8s, lint 0.2s (10.1 min)
+post-PR2 synth fan-out: 19 groups from 91 chunks
 ```
 
-| metric                    | pre-PR2 |
-|---------------------------|--------:|
-| total wiki pages          |      74 |
-| ├─ entities/              |      23 |
-| ├─ notes/                 |      41 |
-| └─ concepts/              |      10 |
-| broken_wikilink           |     241 |
-| orphan_page               |      53 |
-| non_atomic_page           |       5 |
-| duplicate_title           |       1 |
+| metric                    | pre-PR2 | post-PR2 |     Δ |
+|---------------------------|--------:|---------:|------:|
+| total wiki pages          |      74 |       76 |    +2 |
+| ├─ entities/              |      23 |       34 |   +11 |
+| ├─ notes/                 |      41 |       39 |    -2 |
+| └─ concepts/              |      10 |        3 |    -7 |
+| broken_wikilink           |     241 |       96 |  -145 |
+| orphan_page               |      53 |       39 |   -14 |
+| non_atomic_page           |       5 |        0 |    -5 |
+| duplicate_title           |       1 |        0 |    -1 |
+| SynthReport.unresolved    |       — |       96 |     — |
 
-### Expected post-PR2 deltas (hypotheses)
+### Hypothesis vs reality
 
-- **broken_wikilink ↓** — when the LLM sees "Tesla (entity)" already
-  exists, it links `[[Tesla]]` instead of inventing `[[Tesla Inc.]]`
-  whose target page never gets generated.
-- **duplicate_title ↓ or =** — lower is better; PR1 already addressed
-  the variant-title class, PR2 attacks the semantic-duplicate class
-  that PR1 cannot reach.
-- **total wiki pages ↓** — semantic duplicates collapse into
-  references; total count drops by the number of avoided regenerations.
-- **orphan_page** — direction unclear; fewer regenerations means fewer
-  pages overall but also potentially fewer cross-references. Watch.
+- **broken_wikilink ↓ — confirmed (-60 %).** 241 → 96. The LLM seeing
+  the existing-pages roster on every group call is what stopped the
+  bleed; PR1's fuzzy resolve cannot reach this class because the
+  target pages were never generated in the first place. The
+  `SynthReport.unresolved_wikilinks` (96) matches lint's
+  `broken_wikilink` (96) byte-for-byte — the per-run signal landed
+  exactly on the persisted lint signal, the surface added in PR #67
+  works.
+- **duplicate_title ↓ — confirmed (1 → 0).** Combined with PR1's
+  fuzzy resolve (variant-title class) and PR2's semantic-duplicate
+  guard, the wiki has zero duplicate-title issues on this base.
+- **non_atomic_page ↓ — confirmed (5 → 0), with a caveat.** None of
+  the 19 synth groups produced an obvious atomicity violation. Some
+  of this may be PR #62 (1:N fan-out) doing its job; PR2 only
+  contributes by making each group aware of what the *other* groups
+  already wrote, which reduces the temptation to dump multiple H1s
+  into one page to "cover the topic."
+- **total wiki pages ↓ — falsified (74 → 76, +2).** The hypothesis
+  was that semantic duplicates collapse into references. Actual
+  outcome: page count is roughly flat, but the **type distribution**
+  shifted hard — entities +11, concepts -7, notes -2. Reading this
+  as: PR2 lets the LLM recognise that a "concept page about Tesla"
+  and an "entity page about Tesla" are the same thing, and it picks
+  the entity bucket more aggressively when it can. This is structure
+  improvement, not page-count reduction. Worth keeping as a learned
+  delta — *don't quote "page count drops" as a PR2 selling point*.
+- **orphan_page ↓ — partial (53 → 39, -26 %).** Direction was
+  unclear in the pre-PR2 hypothesis. Net win: fewer dead-end pages
+  to triage, even though we didn't drop total page count.
 
-### How to fill in the A/B
+### Spot check
 
-When the user next rebuilds the elon-musk wiki:
+Manual inspection of the 76 post-PR2 pages: no obvious semantic
+duplicates remain (no two pages cover the same person/company/event
+under different titles). The 96 broken_wikilinks left over fall into
+two roughly-equal buckets:
 
-```powershell
-$env:DIKW_BASE = "C:\Users\HE LE\Project\opendikw\dikw-data\bases\elon-musk-validation"
-# Wipe wiki/ + .dikw/ to start fresh; re-ingest + re-synth on PR2
-# Then capture the same metrics:
-uv run dikw client synth --base $env:DIKW_BASE
-uv run dikw client lint  --base $env:DIKW_BASE
-# Append a "post-PR2" column to the snapshot table above and a
-# spot-check (10 random pages: any obvious semantic duplicates left?).
-```
+- **Real entity stubs the LLM didn't author** — e.g. `[[Joe Rogan]]`,
+  `[[Larry Page]]` mentioned in passing inside body text but no
+  dedicated page generated. These are exactly the kind of issue
+  PR #70's `broken_wikilink` LLM stub fixer (`--enable-llm`) is
+  built to close, in a follow-up `dikw client lint apply` pass.
+- **Concept references** — `[[First-Principles Thinking]]`,
+  `[[Vertical Integration]]` — same shape: real concept the LLM
+  alluded to, no concept page emitted. Same fixer applies.
 
-### Why deferred
-
-The full elon-musk.md synth on the openai_codex provider has a known
-SSE keepalive timeout (see 2026-05-08 entry "Known limitation"); a
-real run needs the 1500-line subset and ~30 min of wall time. PR2's
-non-destructiveness is independently provable from the test suite +
-the targeted unit tests in `tests/test_synth_existing_pages.py`,
-which is the gate for shipping; signal-side A/B follows on the next
-natural rebuild rather than blocking the merge on a 30-min run.
+So the residual broken_wikilink count is not a PR2 failure mode; it's
+the natural input to PR #70's fixer pipeline, which closes the loop
+with `lint apply`.
 
 ## 2026-05-08 — Wikilink graph leg ablation (default-off, non-destructive proof)
 

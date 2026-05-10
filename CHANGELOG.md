@@ -7,6 +7,57 @@ on each entry call out exactly what shape changes break.
 
 ## Unreleased
 
+### `lint apply` — storage-sync closure + CJK / cross-link correctness
+
+* **Fixed**: `dikw lint apply` for `create_page` ops now registers the
+  new K page in storage (document row + chunks + outgoing links)
+  instead of just writing the file to disk. Before this fix, a
+  freshly-created stub showed up on disk but was invisible to the
+  next `run_lint` (which builds its title map from
+  `storage.list_documents`) — so users saw the same `broken_wikilink`
+  reported again and assumed apply did nothing. There is no separate
+  ingest path that closes the gap; lint apply has to do it itself.
+* **Fixed**: `lint apply` now reconciles outgoing wikilinks on the
+  *referrer* page (the source page that contained the broken
+  `[[Title]]`), not just on the page the proposal mutated. Without
+  this, a `broken_wikilink → create_page` LLM stub fix would land a
+  new K page that `run_lint` immediately reported as `orphan_page`
+  because `storage.links_from(source)` was stale.
+* **Fixed**: intra-batch cross-links resolve in a single apply pass.
+  `non_atomic_page` splits that emit Topic A + Topic B (where A's
+  body links to `[[Topic B]]`) used to silently drop A→B because
+  `paths_changed` iterated alphabetically — A persisted before B's
+  title entered the resolver index. Phase 0 now pre-populates
+  `title_to_path` from `op.new_frontmatter` before any persist call
+  runs.
+* **Fixed**: `BrokenWikilinkFixer` now lets short CJK targets
+  (`[[秦朝]]`, `[[疫苗]]`, `[[抗体]]`) reach the LLM stub fallback
+  when `--enable-llm` is set. The 4-char heuristic gate (a guard
+  against 3-char ASCII substring noise) was applied at the top of
+  `propose()` instead of inside the heuristic branch, so 2-3 char
+  Chinese entity titles were silently dropped before the LLM path
+  could fire — exactly the case Chinese wiki users hit most.
+* **Fixed**: `lint apply` now threads the configured
+  `retrieval.cjk_tokenizer` (default `jieba`) through to the
+  K-layer indexer. Before, lint-apply chunks were always split with
+  the no-op `none` tokenizer, diverging from the `doc.hash`
+  lint-apply itself wrote and breaking the next embedding backfill
+  on Chinese content.
+* **Refactored**: K-layer page indexing (document upsert + chunks +
+  embeddings + outgoing-link reconciliation) now lives in a single
+  `domains/knowledge/page_index.persist_wiki_page` shared by synth
+  and lint apply. The function takes `(path, title=None)` and reads
+  title fallbacks from disk, so callers don't double-parse the file.
+  `wiki.path_slug_title` centralises the path-stem-to-title
+  convention previously duplicated in three places.
+* **Apply contract**: `_op_title` is the single source of truth for
+  "what title should this op produce" — phase 0's resolver index and
+  `_build_page_from_op`'s `WikiPage` construction now compute the
+  same value (raw frontmatter title stripped of leading/trailing
+  whitespace, falling back to `path_slug_title` when missing or
+  non-string), so a fixer that omits `title` in `new_frontmatter`
+  still gets sibling links resolved correctly.
+
 ### `lint propose` / `lint apply` — repair closure for broken_wikilink
 
 * **Added**: `dikw client lint propose [--rule <kind>] [--limit N]` runs lint

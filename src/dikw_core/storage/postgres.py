@@ -372,6 +372,56 @@ class PostgresStorage:
         # Cross-backend byte-exact contract: see storage/_vec_codec.py.
         return {str(r[0]): deserialize_vec(bytes(r[2]), int(r[1])) for r in rows}
 
+    async def get_chunk_embeddings(
+        self,
+        chunk_ids: Sequence[int],
+        *,
+        version_id: int | None = None,
+    ) -> dict[int, list[float]]:
+        ids = list(chunk_ids)
+        if not ids:
+            return {}
+        async with self._acquire() as conn:
+            resolved = version_id
+            if resolved is None:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT version_id FROM embed_versions "
+                        "WHERE modality = 'text' AND is_active = TRUE "
+                        "ORDER BY version_id DESC LIMIT 1"
+                    )
+                    row = await cur.fetchone()
+                if row is None:
+                    return {}
+                resolved = int(row[0])
+            else:
+                version = await _fetch_version_pg(conn, resolved)
+                if version is None:
+                    return {}
+            vec_table = f"vec_chunks_v{resolved}"
+            # Per-version vec table is created lazily on first
+            # ``upsert_embeddings``. Returning ``{}`` lets callers
+            # (synth's retrieval-gated branch) degrade rather than
+            # crash on a version with zero indexed chunks.
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT to_regclass(%s)", (vec_table,))
+                exists_row = await cur.fetchone()
+            if exists_row is None or exists_row[0] is None:
+                return {}
+
+            # ``embedding::real[]`` casts pgvector's ``vector`` to a
+            # PostgreSQL real array; psycopg deserialises that as a
+            # Python ``list[float]`` without needing pgvector type
+            # registration on the connection.
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT chunk_id, embedding::real[] AS vec "
+                    f"FROM {vec_table} WHERE chunk_id = ANY(%s)",
+                    (ids,),
+                )
+                rows = await cur.fetchall()
+        return {int(r[0]): [float(x) for x in r[1]] for r in rows}
+
     async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
         if not rows:
             return

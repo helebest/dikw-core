@@ -393,6 +393,57 @@ class SQLiteStorage:
 
         return await asyncio.to_thread(_run)
 
+    async def get_chunk_embeddings(
+        self,
+        chunk_ids: Sequence[int],
+        *,
+        version_id: int | None = None,
+    ) -> dict[int, list[float]]:
+        ids = list(chunk_ids)
+        if not ids:
+            return {}
+
+        def _run() -> dict[int, list[float]]:
+            conn = self._require_conn()
+            resolved = version_id
+            if resolved is None:
+                row = conn.execute(
+                    "SELECT version_id FROM embed_versions "
+                    "WHERE modality = 'text' AND is_active = 1 "
+                    "ORDER BY version_id DESC LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return {}
+                resolved = int(row["version_id"])
+            version = _fetch_version(conn, resolved)
+            if version is None:
+                return {}
+            vec_table = f"vec_chunks_v{resolved}"
+            # Per-version vec table is created lazily on first
+            # ``upsert_embeddings`` for that version. Returning ``{}``
+            # mirrors the "no rows" path so callers (synth's
+            # retrieval-gated branch) degrade rather than crash on a
+            # version that has zero indexed chunks.
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = ?",
+                (vec_table,),
+            ).fetchone()
+            if exists is None:
+                return {}
+            placeholders = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT rowid AS chunk_id, embedding FROM {vec_table} "
+                f"WHERE rowid IN ({placeholders})",
+                ids,
+            ).fetchall()
+            return {
+                int(r["chunk_id"]): _deserialize_vec(r["embedding"], version.dim)
+                for r in rows
+            }
+
+        return await asyncio.to_thread(_run)
+
     async def cache_embeddings(self, rows: Sequence[CachedEmbeddingRow]) -> None:
         if not rows:
             return

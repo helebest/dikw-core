@@ -561,20 +561,32 @@ async def run_lint_apply(
                 skipped.append(skip_reason)
                 proposal_aborted = True
 
+    # Phase 0: pre-populate ``title_to_path`` with every changed page
+    # BEFORE phase 1 reconciles any of their outgoing links.
+    # ``paths_changed`` iterates alphabetically, not topologically, so a
+    # ``non_atomic_page`` split that creates "Topic A" + "Topic B"
+    # (where Topic A's body links to ``[[Topic B]]``) would otherwise
+    # see A persisted before B's title entered the resolver — A's edge
+    # to B would silently drop, and phase 2 explicitly skips
+    # ``paths_changed`` so the gap would never recover until the next
+    # ingest. Pulling titles from ``op.new_frontmatter`` avoids any
+    # extra disk reads: every applied create/update op carries a title.
+    for op in applied:
+        if op.kind not in ("create_page", "update_page"):
+            continue
+        fm = op.new_frontmatter or {}
+        op_title = fm.get("title")
+        if isinstance(op_title, str) and op_title and op_title not in title_to_path:
+            title_to_path[op_title] = op.path
+
     # Phase 1: persist each still-extant changed page into storage:
     # upsert document + replace_chunks + reconcile outgoing links.
     # ``embedder=None`` keeps apply provider-free — the next ``dikw
     # ingest`` will detect ``doc.hash`` drift and re-embed.
-    #
-    # We grow ``title_to_path`` incrementally as we persist. A proposal
-    # that creates pages A and B where B's body links to ``[[A]]`` would
-    # otherwise see B's wikilink unresolved (A enters storage AFTER B's
-    # persist call started against the pre-apply snapshot). Updating
-    # the dict between calls makes intra-batch cross-links resolve.
     for path in sorted(paths_changed):
         if not (wiki_root / path).resolve().is_file():
             continue
-        _, page_title = await persist_wiki_page(
+        await persist_wiki_page(
             storage=storage,
             root=wiki_root,
             path=path,
@@ -583,8 +595,6 @@ async def run_lint_apply(
             text_version_id=None,
             title_to_path=title_to_path,
         )
-        if page_title and page_title not in title_to_path:
-            title_to_path[page_title] = path
 
     # Phase 2: re-reconcile referrers — every proposal's ``issue.path``
     # whose body references a page this batch may have just created.

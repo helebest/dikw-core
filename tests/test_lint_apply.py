@@ -962,3 +962,68 @@ async def test_apply_create_page_reconciles_referrer_outgoing_links(
         "freshly-created page should not be reported as orphan when the "
         "referrer's [[Title]] now resolves to it"
     )
+
+
+@pytest.mark.asyncio
+async def test_apply_sibling_cross_links_resolve_in_one_pass(
+    parametrized_storage: Storage, wiki_root: Path,
+) -> None:
+    """When a single apply batch creates two pages where the
+    earlier-sorted page links to the later-sorted page (common for
+    ``non_atomic_page`` splits with sibling ``[[Title]]`` cross-links),
+    BOTH outgoing edges must land in storage in this pass — otherwise
+    the source page's link to a still-not-persisted sibling silently
+    drops, and phase 2's referrer reconcile skips ``paths_changed`` so
+    the gap is never recovered until the next ingest."""
+    storage = parametrized_storage
+
+    proposal = FixProposal(
+        proposal_id="p-split",
+        issue_kind="non_atomic_page",
+        issue_path="wiki/source.md",
+        issue_detail="splitting fat page into two atomic children",
+        operations=[
+            FixOperation(
+                kind="create_page",
+                # alpha-sorts before topic-b — body links to topic-b
+                # whose title only exists in this same batch.
+                path="wiki/concepts/topic-a.md",
+                new_frontmatter={
+                    "id": "K-a", "type": "concept", "title": "Topic A",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic A\n\nSee also [[Topic B]].\n",
+                expected_hash=None,
+            ),
+            FixOperation(
+                kind="create_page",
+                path="wiki/concepts/topic-b.md",
+                new_frontmatter={
+                    "id": "K-b", "type": "concept", "title": "Topic B",
+                    "created": "2026-05-10T00:00:00+00:00",
+                    "updated": "2026-05-10T00:00:00+00:00",
+                },
+                new_body="# Topic B\n\nbody.\n",
+                expected_hash=None,
+            ),
+        ],
+        rationale="split", source="llm",
+    )
+    await run_lint_apply(
+        proposal_report=FixProposalReport(proposals=[proposal]),
+        storage=storage, wiki_root=wiki_root,
+        reporter=_NullReporter(),
+    )
+
+    a_id = _wiki_doc_id("wiki/concepts/topic-a.md")
+    a_links = [
+        link for link in await storage.links_from(a_id)
+        if link.link_type == LinkType.WIKILINK
+    ]
+    assert any(
+        link.dst_path == "wiki/concepts/topic-b.md" for link in a_links
+    ), (
+        "Topic A's outgoing wikilink to Topic B was lost — phase 1 "
+        "persisted A before B's title entered the resolver index"
+    )

@@ -43,6 +43,31 @@ def type_to_folder(type_: str) -> str:
     return _TYPE_FOLDERS.get(type_, f"{type_}s")
 
 
+_FOLDER_TYPES: dict[str, str] = {v: k for k, v in _TYPE_FOLDERS.items()}
+
+
+def type_from_path(path: str) -> str:
+    """Reverse-derive a page ``type`` from its wiki-relative ``path``.
+
+    Used by callers (e.g. the synth existing-pages section) that have a
+    ``DocumentRecord`` — which doesn't carry ``type`` — and need the
+    type label without paying frontmatter I/O. Irregular folders
+    declared in ``_TYPE_FOLDERS`` (``entities`` → ``entity``) come from
+    the inverse table; custom types declared via ``SchemaConfig.page_types``
+    use the regular plural rule (``topics`` → ``topic``); anything not
+    recognised collapses to ``"page"``.
+    """
+    parts = path.split("/")
+    if len(parts) >= 3 and parts[0] == "wiki":
+        bucket = parts[1]
+        if bucket in _FOLDER_TYPES:
+            return _FOLDER_TYPES[bucket]
+        if bucket.endswith("s") and not bucket.endswith("ss") and len(bucket) > 1:
+            return bucket[:-1]
+        return bucket
+    return "page"
+
+
 @dataclass(frozen=True)
 class WikiPage:
     """In-memory representation of a K-layer wiki page."""

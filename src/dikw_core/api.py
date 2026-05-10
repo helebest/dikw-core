@@ -95,7 +95,7 @@ from .domains.knowledge.synthesize import (
     dedup_pages_by_slug,
     parse_synthesis_response,
 )
-from .domains.knowledge.wiki import WikiPage, now_iso, write_page
+from .domains.knowledge.wiki import WikiPage, now_iso, type_from_path, write_page
 from .domains.wisdom.apply import ApplicableWisdom, pick_applicable
 from .domains.wisdom.distill import WisdomCandidate, parse_distill_response
 from .domains.wisdom.io import write_candidate_file
@@ -2161,6 +2161,9 @@ async def synthesize(
                 source_body=body,
                 chunks=src_chunks,
                 cancel=_reporter.cancel_token(),
+                storage=storage,
+                text_version_id=text_version_id,
+                force_all=force_all,
                 reporter=_reporter,
             )
             report = _sr_replace(
@@ -2517,6 +2520,151 @@ async def _persist_wiki_page(
 _LEGACY_BACKFILL_SENTINEL = "__dikw_legacy_backfill_complete__"
 
 
+# Header strings for the two prompt sections in `_synth_pages_from_source`.
+# Pinned as module constants so tests, code, and any future docs stay
+# aligned — drift between assertion strings and rendered prompts has
+# bitten us before.
+_BATCH_SECTION_HEADER = (
+    "Already created in this batch (MUST reference, do NOT regenerate)"
+)
+_EXISTING_SECTION_HEADER = (
+    "Existing wiki pages (reference via [[Title]] when relevant)"
+)
+_NO_EXISTING_PAGES_SENTINEL = "(no existing pages — this is a fresh wiki)"
+
+
+@dataclass(frozen=True)
+class _ExistingPagesSnapshot:
+    """Per-source snapshot of the K-layer for the synth prompt.
+
+    Hoisted out of the per-group loop because the base K-layer is
+    invariant within a single source (persist runs only after all of
+    that source's groups complete). Without this hoist, a source with
+    G groups against a base of W pages paid G x W storage round-trips
+    per synth call.
+    """
+
+    pages: list[DocumentRecord]   # already filtered to title-bearing
+    full_render_bytes: int
+
+    @classmethod
+    async def load(cls, storage: Storage) -> _ExistingPagesSnapshot:
+        pages = [
+            d for d in await storage.list_documents(
+                layer=Layer.WIKI, active=True
+            )
+            if d.title
+        ]
+        full_render_bytes = sum(
+            len(f"- {d.title} ({type_from_path(d.path)})\n".encode())
+            for d in pages
+        )
+        return cls(pages=pages, full_render_bytes=full_render_bytes)
+
+    def full_pages(self) -> list[tuple[str, str]]:
+        return [(t, type_from_path(d.path)) for d in self.pages if (t := d.title)]
+
+
+async def _existing_pages_for_prompt(
+    storage: Storage,
+    *,
+    snapshot: _ExistingPagesSnapshot,
+    group_chunks: list[ChunkRecord],
+    max_bytes: int,
+    top_k: int,
+    version_id: int | None,
+) -> list[tuple[str, str]]:
+    """Return ``[(title, type), ...]`` for the synth prompt's existing-pages section.
+
+    Full render up to ``max_bytes`` of the rendered ``- Title (type)``
+    bullets; above the threshold, switches to a vec_search-gated top-K
+    driven by the group's chunk embeddings (per-chunk vec_search →
+    union by doc_id → score sort → top-K). The retrieval branch keeps
+    the prompt size bounded as the wiki grows; without it a base with
+    thousands of pages would eventually overflow the model's context
+    window.
+
+    Returns ``[]`` (empty section) for a fresh wiki or a base with no
+    embedded source chunks — the caller renders the falsy section as
+    ``(no existing pages …)`` so the LLM sees a clear signal rather
+    than a missing block.
+    """
+    if not snapshot.pages:
+        return []
+    if snapshot.full_render_bytes <= max_bytes:
+        return snapshot.full_pages()
+
+    # Over the byte threshold → retrieval-gated top-K. Per-chunk
+    # vec_search against the WIKI layer is what the locked design
+    # specifies; union by doc_id, keep best (smallest) distance per
+    # doc, sort, take top-K. Distance is cosine (smaller = closer).
+    #
+    # ``_truncated_fallback`` is the safety net for "many pages but the
+    # WIKI layer has no vectors" (``--no-embed`` wikis, version mismatch,
+    # or chunks the source-side embedder hasn't reached). Returning ``[]``
+    # would render the "(no existing pages — fresh wiki)" sentinel and
+    # drop ALL duplicate-avoidance context exactly when the wiki has
+    # the most to offer it. Bounded prefix is a worse signal than
+    # vec-ranked top-K but a better one than "fresh wiki, generate
+    # freely". Order matches the snapshot, which mirrors
+    # ``list_documents`` order — stable across runs.
+    def _truncated_fallback() -> list[tuple[str, str]]:
+        return snapshot.full_pages()[:top_k]
+
+    embs = await storage.get_chunk_embeddings(
+        [c.chunk_id for c in group_chunks if c.chunk_id is not None],
+        version_id=version_id,
+    )
+    if not embs:
+        return _truncated_fallback()
+    best_dist: dict[str, float] = {}
+    for emb in embs.values():
+        try:
+            # Pin the lookup to the SAME version we fetched embeddings
+            # under — without this, vec_search re-resolves the active
+            # version and could pick a different per-version table
+            # (mid-synth ingest activating a new version, or a direct
+            # caller passing a non-active version_id), producing dim
+            # mismatches or rankings against the wrong index.
+            hits = await storage.vec_search(
+                emb, layer=Layer.WIKI, limit=top_k, version_id=version_id
+            )
+        except NotSupported:
+            return _truncated_fallback()
+        for hit in hits:
+            prior = best_dist.get(hit.doc_id)
+            if prior is None or hit.distance < prior:
+                best_dist[hit.doc_id] = hit.distance
+    if not best_dist:
+        return _truncated_fallback()
+    ordered_doc_ids = [
+        doc_id for doc_id, _ in sorted(best_dist.items(), key=lambda kv: kv[1])
+    ][:top_k]
+    docs = await storage.get_documents(ordered_doc_ids)
+    by_id = {d.doc_id: d for d in docs}
+    out: list[tuple[str, str]] = []
+    for doc_id in ordered_doc_ids:
+        d = by_id.get(doc_id)
+        if d is not None and d.title:
+            out.append((d.title, type_from_path(d.path)))
+    return out
+
+
+def _render_existing_section(
+    pages: list[tuple[str, str]], header: str
+) -> str:
+    """Render a list of ``(title, type)`` tuples as a markdown section.
+
+    Empty input returns ``""`` so callers can concatenate two sections
+    (batch accumulator + base snapshot) and fall back to a single
+    "(no existing pages …)" sentinel only when both are empty.
+    """
+    if not pages:
+        return ""
+    lines = [f"## {header}", ""] + [f"- {t} ({tp})" for t, tp in pages]
+    return "\n".join(lines) + "\n"
+
+
 @dataclass(frozen=True)
 class _SourceSynthOutcome:
     """Per-source aggregate of all the LLM calls Stage A made for that source."""
@@ -2536,6 +2684,9 @@ async def _synth_pages_from_source(
     source_body: str,
     chunks: list[ChunkRecord],
     cancel: CancelToken,
+    storage: Storage | None = None,
+    text_version_id: int | None = None,
+    force_all: bool = False,
     reporter: ProgressReporter | None = None,
 ) -> _SourceSynthOutcome:
     """Fan a single source out into ChunkGroups and call the LLM per group.
@@ -2545,6 +2696,15 @@ async def _synth_pages_from_source(
     receives a ``synth_llm`` ``calling`` / ``returned`` event pair per
     group so server clients can render group-level progress instead of
     freezing on the per-source counter while a multi-group LLM call runs.
+
+    ``storage`` + ``text_version_id`` drive the per-group existing-pages
+    section: each group's prompt receives a ``## Already created in
+    this batch`` accumulator (per-source state, lifecycle = this call)
+    plus a ``## Existing wiki pages`` snapshot of the base K-layer
+    (full list under ``synth.existing_pages_max_bytes``, retrieval-gated
+    top-K above). Without this awareness the LLM regenerates pages it
+    cannot see, polluting the wiki with semantic duplicates that PR1's
+    fuzzy resolver cannot absorb.
     """
     _reporter: ProgressReporter = reporter or NoopReporter()
     sections = derive_sections_from_chunks(
@@ -2564,9 +2724,59 @@ async def _synth_pages_from_source(
     notes: list[str] = []
     errors = 0
     total_groups = len(groups)
+    # Per-source batch accumulator: each group's prompt sees the titles
+    # emitted by groups 0..N-1 of the SAME source, so group N can
+    # reference [[Title]] instead of regenerating. Lifecycle scoped
+    # tightly to this function — a new source starts empty.
+    # ``seen_titles`` mirrors the accumulator titles for O(1) dedup
+    # without rebuilding a set every group.
+    batch_accumulator: list[tuple[str, str]] = []
+    seen_titles: set[str] = set()
+    # Map section-start → chunk so we can recover per-group chunks for
+    # the retrieval-gated existing-pages branch. ``derive_sections_from_chunks``
+    # builds sections 1:1 from chunks, so ``section.start == chunk.start``.
+    start_to_chunk = {c.start: c for c in chunks}
+    # The base K-layer is invariant within a single source's group loop
+    # (persist runs only after this function returns), so we hoist the
+    # snapshot out of the loop. Without this, a source with G groups
+    # against a base of W pages paid G x W storage round-trips per call.
+    #
+    # ``force_all`` skips the snapshot: ``dikw synth --all`` is the
+    # documented "regenerate everything after a prompt/model change"
+    # path. Showing the LLM the OLD output of the same source plus the
+    # zero-block-on-duplicate instruction would cause the model to skip
+    # the regeneration the user explicitly requested. The in-batch
+    # accumulator still runs so groups within the same source coordinate.
+    snapshot = (
+        await _ExistingPagesSnapshot.load(storage)
+        if storage is not None and not force_all
+        else None
+    )
     for group in groups:
         cancel.raise_if_cancelled()
         group_pos = group.index + 1
+        if storage is not None and snapshot is not None:
+            group_chunks = [
+                start_to_chunk[s] for s in group.section_starts
+                if s in start_to_chunk
+            ]
+            existing_pages = await _existing_pages_for_prompt(
+                storage,
+                snapshot=snapshot,
+                group_chunks=group_chunks,
+                max_bytes=cfg.synth.existing_pages_max_bytes,
+                top_k=cfg.synth.existing_pages_top_k,
+                version_id=text_version_id,
+            )
+        else:
+            # Storage-less callers (narrow unit tests of LLM event shape)
+            # render the no-pages sentinel — they exercise the prompt
+            # plumbing, not the existing-pages contract itself.
+            existing_pages = []
+        existing_pages_section = (
+            _render_existing_section(batch_accumulator, _BATCH_SECTION_HEADER)
+            + _render_existing_section(existing_pages, _EXISTING_SECTION_HEADER)
+        ).strip() or _NO_EXISTING_PAGES_SENTINEL
         user_prompt = template.format(
             source_path=source_path,
             source_body=group.text,
@@ -2577,6 +2787,7 @@ async def _synth_pages_from_source(
             group_total=total_groups,
             max_pages=cfg.synth.max_pages_per_group,
             allowed_types=allowed_types_str,
+            existing_pages_section=existing_pages_section,
         )
         # `current` reports groups COMPLETED — Rich's TaskProgressRenderer
         # passes it as `completed`, so a `calling` event must show one
@@ -2689,6 +2900,14 @@ async def _synth_pages_from_source(
             )
             continue
         pages.extend(new_pages)
+        # Feed group N's emitted page titles into the per-source
+        # accumulator so group N+1's prompt sees them. ``seen_titles``
+        # is maintained incrementally above so dedup is O(1) per page
+        # without rebuilding a set every group.
+        for p in new_pages:
+            if p.title and p.title not in seen_titles:
+                batch_accumulator.append((p.title, p.type or "page"))
+                seen_titles.add(p.title)
 
     return _SourceSynthOutcome(
         pages=pages,

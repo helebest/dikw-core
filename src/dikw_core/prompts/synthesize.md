@@ -27,6 +27,16 @@ Choose exactly one `type` for each page from `{allowed_types}`:
 3. Link to any entity, concept, or other wiki page referenced — use `[[Wikilink Title]]`. If the target page does not yet exist, still write the wikilink; it will be flagged by `dikw lint`.
 4. Pick 2–5 short tags per page.
 
+## Existing pages
+
+{existing_pages_section}
+
+If a candidate page would semantically duplicate one of the pages listed above, **emit ZERO `<page>` blocks for that candidate**. In your other pages' bodies, reference the existing one via `[[Title]]` instead. Do not regenerate it.
+
+This applies to BOTH:
+- pages already in the wiki (titles may not match exactly — use judgement; prefer reference over regeneration on ambiguity)
+- pages just created earlier in this same batch (MUST reference, not regenerate)
+
 ## Output format
 
 For each page, emit exactly one `<page>` block, wrapped verbatim. Do **not** emit prose outside the blocks.

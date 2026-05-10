@@ -231,6 +231,14 @@ class SynthConfig(BaseModel):
     target_tokens_per_group: int = 3600
     max_pages_per_group: int = 4
     slug_dedup: Literal["merge_body", "keep_first"] = "merge_body"
+    # Per-group prompt awareness of existing K-layer pages. Below the
+    # byte threshold the prompt enumerates every page; above it,
+    # truncation switches to a vec_search-gated top-K driven by the
+    # group's own chunk embeddings. 16384 B ≈ 500 ``Title (type)``
+    # bullets at ~25 B/line — a base much larger than that needs
+    # retrieval to stay within the model's context window.
+    existing_pages_max_bytes: int = 16384
+    existing_pages_top_k: int = 50
 
 
 class MultimodalEmbedConfig(BaseModel):

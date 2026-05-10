@@ -784,3 +784,77 @@ async def test_non_atomic_page_skips_when_llm_disabled(tmp_path: Path) -> None:
     )
     assert proposal is None
     assert fake.last_user is None  # no LLM call
+
+
+# --- CJK short-target regression --------------------------------------------
+#
+# ``_MIN_TARGET_LEN = 4`` is a fuzzy-match guardrail (3-char ASCII
+# substrings hit 0.85 against too many titles by chance). The early
+# version of the fixer enforced it at the top of ``propose()``, before
+# the LLM-stub branch — which silently dropped 2-3 char CJK targets
+# like ``[[秦朝]]`` even when ``--enable-llm`` was set. The fix moves
+# the gate to the heuristic branch only; the LLM path stays gated by
+# ``enable_llm`` alone.
+
+_CJK_STUB_LLM_RESPONSE = (
+    "<page path=\"wiki/concepts/qin-dynasty.md\" type=\"concept\">\n"
+    "---\n"
+    "tags: [stub]\n"
+    "---\n"
+    "\n"
+    "# 秦朝\n"
+    "\n"
+    "TODO: stub page for the broken `[[秦朝]]` reference. "
+    "Replace this body with real content.\n"
+    "</page>\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_short_cjk_target_enters_llm_when_enabled(
+    tmp_path: Path,
+) -> None:
+    """``[[秦朝]]`` is 2 CJK chars — below the 4-char heuristic gate.
+    With ``enable_llm=True`` the LLM stub fallback MUST still fire; the
+    gate guards heuristic fuzzy match, not the LLM path."""
+    wiki_root, src_page, issue = _make_broken_link_setup(
+        tmp_path, broken_target="秦朝"
+    )
+    fake = FakeLLM(response_text=_CJK_STUB_LLM_RESPONSE)
+    fixer = BrokenWikilinkFixer()
+    proposal = await fixer.propose(
+        issue,
+        _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=True),
+        reporter=_NullReporter(),
+    )
+
+    assert proposal is not None, (
+        "LLM stub fallback must fire for short CJK targets when enabled"
+    )
+    assert proposal.source == "llm"
+    assert proposal.operations[0].kind == "create_page"
+    # FakeLLM captured the prompt — the broken target was injected.
+    assert fake.last_user is not None
+    assert "秦朝" in fake.last_user
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_short_cjk_target_skipped_when_llm_disabled(
+    tmp_path: Path,
+) -> None:
+    """Same short CJK target with ``enable_llm=False``: propose returns
+    None and the LLM is NEVER called — confirms the relaxed gate didn't
+    accidentally enable the LLM path unconditionally."""
+    wiki_root, src_page, issue = _make_broken_link_setup(
+        tmp_path, broken_target="秦朝"
+    )
+    fake = FakeLLM(response_text=_CJK_STUB_LLM_RESPONSE)
+    fixer = BrokenWikilinkFixer()
+    proposal = await fixer.propose(
+        issue,
+        _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=False),
+        reporter=_NullReporter(),
+    )
+
+    assert proposal is None
+    assert fake.last_user is None

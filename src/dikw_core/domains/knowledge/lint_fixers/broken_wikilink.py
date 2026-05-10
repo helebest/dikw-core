@@ -83,26 +83,33 @@ class BrokenWikilinkFixer:
         reporter: Any,
     ) -> FixProposal | None:
         target = extract_broken_target(issue.detail)
-        if not target or len(_normalize_title(target)) < _MIN_TARGET_LEN:
+        if not target:
             return None
-
-        # Rank candidate titles by similarity, excluding the source page itself
-        # so a self-referential broken link doesn't collapse onto its own title.
         target_norm = _normalize_title(target)
+
+        # Heuristic fuzzy match only runs above the length gate — short
+        # targets (e.g. 2-3 char CJK like ``[[秦朝]]``) yield too many
+        # spurious 0.85 ratios. Below the gate we skip heuristic and
+        # fall straight through to the LLM stub, which is still gated
+        # by ``enable_llm`` so heuristic-only users pay no LLM cost.
         best_title: str | None = None
         best_ratio = 0.0
-        for page in ctx.all_pages:
-            if page.path == issue.path:
-                continue
-            title = page.title
-            if not title:
-                continue
-            ratio = SequenceMatcher(
-                None, target_norm, _normalize_title(title)
-            ).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_title = title
+        if len(target_norm) >= _MIN_TARGET_LEN:
+            # Rank candidate titles by similarity, excluding the source
+            # page itself so a self-referential broken link doesn't
+            # collapse onto its own title.
+            for page in ctx.all_pages:
+                if page.path == issue.path:
+                    continue
+                title = page.title
+                if not title:
+                    continue
+                ratio = SequenceMatcher(
+                    None, target_norm, _normalize_title(title)
+                ).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_title = title
 
         if best_title is None or best_ratio < HEURISTIC_RATIO_THRESHOLD:
             return await _propose_llm_stub(issue, ctx, target)

@@ -233,10 +233,20 @@ async def safe_synthesize_pages(
     """LLM call + parse, with the soft-failure contract every fixer needs.
 
     Returns the parsed pages on success, partial-parse pages when the
-    LLM truncated mid-block (so apply still gets *something*), or
-    ``None`` to signal "fixer should skip this issue":
+    LLM hit a deterministic mid-block error (we got everything we'd
+    get on retry), or ``None`` to signal "fixer should skip this issue":
 
-    * ``SynthesisError`` (no usable ``<page>`` block) → ``None``
+    * ``SynthesisError`` (no usable ``<page>`` block) → ``None``.
+    * ``SynthesisPartialError`` with ``retry=True`` (max_tokens
+      truncation — re-running with a bigger budget would yield more
+      pages) → ``None``. **Critical for destructive callers**:
+      ``non_atomic_page`` deletes the source after a successful split,
+      so accepting a truncated 3-page split as "2 children, good
+      enough" would silently drop the unfinished third child along
+      with the original.
+    * ``SynthesisPartialError`` with ``retry=False`` → ``pe.pages``.
+      The failure was deterministic (e.g. one malformed block among
+      good ones); retrying would just hit the same parse warning.
     * Any other exception (provider outage, network, JSON drift) →
       log at WARNING + ``None``. Cancellation
       (:class:`asyncio.CancelledError`) is a ``BaseException`` and is
@@ -257,6 +267,14 @@ async def safe_synthesize_pages(
             system=system,
         )
     except SynthesisPartialError as pe:
+        if pe.retry:
+            logger.info(
+                "%s LLM response was truncated for %s — refusing partial "
+                "result (retry on next propose pass with a larger budget)",
+                log_label,
+                source_path,
+            )
+            return None
         return pe.pages
     except SynthesisError:
         return None
@@ -446,6 +464,16 @@ async def run_lint_apply(
     op_counter = 0
 
     for proposal in proposals:
+        # Per-proposal atomicity: a proposal is one logical fix (e.g.
+        # "split this page into N children + delete original"), and
+        # half-applying it produces broken state worse than not
+        # applying at all — drop the original after only some of its
+        # children landed on disk and the unfinished split silently
+        # loses content. Once any op in a proposal skips, abandon the
+        # rest of that proposal; the user re-runs propose against the
+        # post-apply tree to retry. Independent fixes still proceed:
+        # a failed proposal does not abort sibling proposals.
+        proposal_aborted = False
         for op in proposal.operations:
             op_counter += 1
             reporter.cancel_token().raise_if_cancelled()
@@ -455,6 +483,15 @@ async def run_lint_apply(
                 total=total_ops,
                 detail={"op": op.kind, "path": op.path},
             )
+            if proposal_aborted:
+                skipped.append(
+                    _skip(
+                        proposal.proposal_id, op,
+                        "skipped — earlier op in the same proposal failed; "
+                        "re-run lint propose to retry this fix as a whole",
+                    )
+                )
+                continue
             if op.path in touched_paths:
                 skipped.append(
                     _skip(
@@ -463,6 +500,7 @@ async def run_lint_apply(
                         "re-run lint propose to refresh remaining fixes",
                     )
                 )
+                proposal_aborted = True
                 continue
             skip_reason = await _apply_one_op(
                 op=op,
@@ -480,6 +518,7 @@ async def run_lint_apply(
                     paths_changed.add(op.path)
             else:
                 skipped.append(skip_reason)
+                proposal_aborted = True
 
     # Reconcile outgoing wikilinks for every still-extant changed page.
     for path in sorted(paths_changed):

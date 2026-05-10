@@ -180,6 +180,15 @@ async def _propose_llm_stub(
         )
         return None
 
+    # Obsidian wikilink syntax allows ``[[Target|alias]]`` and
+    # ``[[Target#anchor]]``; the resolver matches the bare "Target"
+    # title, so the stub page needs the same canonical name. Without
+    # stripping, the LLM would title the page "Target|alias" and the
+    # next lint pass would still flag the wikilink as broken.
+    canonical_target = _strip_alias_anchor(target)
+    if not canonical_target:
+        return None
+
     src_abs = (ctx.wiki_root / issue.path).resolve()
     if not src_abs.is_file():
         return None
@@ -188,7 +197,7 @@ async def _propose_llm_stub(
 
     allowed_types = tuple(ctx.cfg.schema_.page_types) or DEFAULT_ALLOWED_TYPES
     user_prompt = prompts.load("lint_fix_broken_wikilink_stub").format(
-        broken_target=target,
+        broken_target=canonical_target,
         source_path=issue.path,
         source_context=excerpt,
         allowed_types=" | ".join(allowed_types),
@@ -232,9 +241,23 @@ async def _propose_llm_stub(
         issue_detail=issue.detail,
         issue_line=issue.line,
         operations=[op],
-        rationale=f"LLM-generated stub for missing target '[[{target}]]'",
+        rationale=f"LLM-generated stub for missing target '[[{canonical_target}]]'",
         source="llm",
     )
+
+
+def _strip_alias_anchor(target: str) -> str:
+    """Drop Obsidian-style ``|alias`` and ``#anchor`` suffixes from a wikilink target.
+
+    The resolver matches the bare title — both ``[[Target|label]]`` and
+    ``[[Target#section]]`` resolve against a page titled ``Target`` —
+    so the stub the LLM authors must use that bare name. Without this,
+    the LLM would title the stub ``Target|label`` and the next lint
+    pass would still report the wikilink as broken.
+    """
+    base = target.split("|", 1)[0]
+    base = base.split("#", 1)[0]
+    return base.strip()
 
 
 def _excerpt_around_line(

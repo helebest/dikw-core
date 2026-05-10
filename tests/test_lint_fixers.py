@@ -409,6 +409,65 @@ async def test_broken_wikilink_llm_failure_returns_none(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_broken_wikilink_llm_stub_strips_alias_and_anchor(
+    tmp_path: Path,
+) -> None:
+    """``[[Target|label]]`` / ``[[Target#section]]`` resolve against a
+    page titled ``Target``. The LLM stub MUST be built around the
+    bare canonical name; otherwise the LLM titles the page with the
+    suffix (``Target|label``) and the next lint pass keeps reporting
+    the wikilink as broken."""
+    wiki_root, src_page, _ = _make_broken_link_setup(
+        tmp_path, broken_target="Whole New Topic|Custom Label"
+    )
+    fake = FakeLLM(response_text=_STUB_LLM_RESPONSE)
+    issue = LintIssue(
+        kind="broken_wikilink",
+        path=src_page.path,
+        detail="[[Whole New Topic|Custom Label]] has no matching wiki page",
+        line=3,
+    )
+    fixer = BrokenWikilinkFixer()
+    proposal = await fixer.propose(
+        issue,
+        _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=True),
+        reporter=_NullReporter(),
+    )
+    assert proposal is not None
+    # Prompt must instruct the LLM to build the stub around the bare
+    # canonical target — `[[Whole New Topic]]` — even though the
+    # source body the prompt also embeds still contains the raw
+    # `[[Whole New Topic|Custom Label]]` reference.
+    assert fake.last_user is not None
+    assert "[[Whole New Topic]]" in fake.last_user
+    assert "[[Whole New Topic|Custom Label]]" in fake.last_user  # in source_context
+    assert proposal.rationale.endswith("'[[Whole New Topic]]'")
+
+    # Same check for `#anchor` syntax.
+    fake_anchor = FakeLLM(response_text=_STUB_LLM_RESPONSE)
+    issue_anchor = LintIssue(
+        kind="broken_wikilink",
+        path=src_page.path,
+        detail="[[Whole New Topic#background]] has no matching wiki page",
+        line=3,
+    )
+    proposal_anchor = await fixer.propose(
+        issue_anchor,
+        _ctx(
+            pages=[src_page], wiki_root=wiki_root,
+            llm=fake_anchor, enable_llm=True,
+        ),
+        reporter=_NullReporter(),
+    )
+    assert proposal_anchor is not None
+    assert fake_anchor.last_user is not None
+    assert "[[Whole New Topic]]" in fake_anchor.last_user
+    assert "[[Whole New Topic#background]]" not in fake_anchor.last_user.split(
+        "Broken wikilink target:", 1
+    )[1].split("\n", 1)[0]
+
+
+@pytest.mark.asyncio
 async def test_broken_wikilink_llm_unparseable_returns_none(tmp_path: Path) -> None:
     """LLM emits no usable ``<page>`` block (e.g. apologies / refusal):
     fixer must skip rather than synthesise an empty page."""
@@ -573,6 +632,50 @@ async def test_non_atomic_page_skips_on_synth_error(tmp_path: Path) -> None:
         reporter=_NullReporter(),
     )
     assert proposal is None
+
+
+_TRUNCATED_NON_ATOMIC_RESPONSE = (
+    "<page path=\"wiki/concepts/topic-a.md\" type=\"concept\">\n"
+    "---\ntags: [child]\n---\n\n# Topic A\n\nFirst child.\n"
+    "</page>\n\n"
+    "<page path=\"wiki/concepts/topic-b.md\" type=\"concept\">\n"
+    "---\ntags: [child]\n---\n\n# Topic B\n\nSecond child.\n"
+    "</page>\n\n"
+    # Third <page> opener with no </page> — synth marks this retry=True.
+    "<page path=\"wiki/concepts/topic-c.md\" type=\"concept\">\n"
+    "---\ntags: [child]\n---\n\n# Topic C\n\nThird child body keeps "
+    "going but max_tokens cut it off here."
+)
+
+
+@pytest.mark.asyncio
+async def test_non_atomic_page_refuses_truncated_split(tmp_path: Path) -> None:
+    """A response with two complete <page> blocks plus an unclosed third
+    is a SynthesisPartialError(retry=True). The destructive non_atomic_page
+    fixer must NOT accept it — applying would delete the original page
+    and silently drop Topic C's content with it."""
+    from dikw_core.domains.knowledge.lint_fixers.non_atomic_page import (
+        NonAtomicPageFixer,
+    )
+
+    wiki_root, page, issue = _make_fat_page_on_disk(tmp_path)
+    fake = FakeLLM(response_text=_TRUNCATED_NON_ATOMIC_RESPONSE)
+    fixer = NonAtomicPageFixer()
+    proposal = await fixer.propose(
+        issue,
+        _ctx(
+            pages=[page],
+            wiki_root=wiki_root,
+            llm=fake,
+            enable_llm=True,
+            cfg=_default_cfg(),
+        ),
+        reporter=_NullReporter(),
+    )
+    assert proposal is None, (
+        "truncated split must be refused; otherwise apply deletes the "
+        "original after creating only the complete subset"
+    )
 
 
 @pytest.mark.asyncio

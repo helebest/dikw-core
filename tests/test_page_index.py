@@ -14,15 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from dikw_core.domains.data.path_norm import normalize_path
-from dikw_core.domains.knowledge.page_index import persist_wiki_page
+from dikw_core.domains.knowledge.page_index import persist_wiki_page, wiki_doc_id
 from dikw_core.domains.knowledge.wiki import build_page, write_page
 from dikw_core.schemas import DocumentRecord, Layer, LinkType
 from dikw_core.storage.base import Storage
-
-
-def _wiki_doc_id(path: str) -> str:
-    return f"{Layer.WIKI.value}:{normalize_path(path)}"
 
 
 @pytest.mark.asyncio
@@ -37,7 +32,7 @@ async def test_persist_wiki_page_writes_document_chunks_and_links(
     target = build_page(title="Foo", body="# Foo\nbody.\n", type_="concept")
     write_page(tmp_path, target)
     await persist_wiki_page(
-        storage=storage, root=tmp_path, page=target,
+        storage=storage, root=tmp_path, path=target.path, title=target.title,
         embedder=None, embedding_model="", text_version_id=None,
     )
 
@@ -49,7 +44,7 @@ async def test_persist_wiki_page_writes_document_chunks_and_links(
     )
     write_page(tmp_path, src)
     unresolved = await persist_wiki_page(
-        storage=storage, root=tmp_path, page=src,
+        storage=storage, root=tmp_path, path=src.path, title=src.title,
         embedder=None, embedding_model="", text_version_id=None,
     )
 
@@ -58,7 +53,7 @@ async def test_persist_wiki_page_writes_document_chunks_and_links(
     src_doc = next(d for d in docs if d.path == src.path)
     assert src_doc.title == "Source"
 
-    src_id = _wiki_doc_id(src.path)
+    src_id = wiki_doc_id(src.path)
     chunks = await storage.list_chunks(src_id)
     assert len(chunks) >= 1
 
@@ -81,11 +76,11 @@ async def test_persist_wiki_page_skips_embedding_when_embedder_none(
     write_page(tmp_path, page)
 
     await persist_wiki_page(
-        storage=storage, root=tmp_path, page=page,
+        storage=storage, root=tmp_path, path=page.path,
         embedder=None, embedding_model="", text_version_id=None,
     )
 
-    doc_id = _wiki_doc_id(page.path)
+    doc_id = wiki_doc_id(page.path)
     chunks = await storage.list_chunks(doc_id)
     assert len(chunks) >= 1
 
@@ -104,16 +99,18 @@ async def test_persist_wiki_page_reports_unresolved_count(
         path="wiki/concepts/src.md",
     )
     write_page(tmp_path, page)
-    # Seed the document row for the source itself so resolve_links can
-    # exclude self-references — but no target page exists for [[Missing]].
-    src_id = _wiki_doc_id(page.path)
+    # Seed a placeholder document row so resolve_links can self-exclude.
+    # The hash/mtime placeholders below are overwritten by persist_wiki_page
+    # — only the row's existence at this path matters for the test.
+    src_id = wiki_doc_id(page.path)
     await storage.upsert_document(DocumentRecord(
         doc_id=src_id, path=page.path, title=page.title,
-        hash="seed", mtime=0.0, layer=Layer.WIKI, active=True,
+        hash="placeholder-overwritten-by-persist", mtime=0.0,
+        layer=Layer.WIKI, active=True,
     ))
 
     unresolved = await persist_wiki_page(
-        storage=storage, root=tmp_path, page=page,
+        storage=storage, root=tmp_path, path=page.path, title=page.title,
         embedder=None, embedding_model="", text_version_id=None,
     )
 

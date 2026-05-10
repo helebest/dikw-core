@@ -30,14 +30,19 @@ from ..info.chunk import chunk_markdown
 from ..info.embed import ChunkToEmbed, consume_embedding_stream, embed_chunks
 from ..info.tokenize import CjkTokenizer
 from .links import parse_links, resolve_links
-from .wiki import WikiPage
+
+
+def wiki_doc_id(path: str) -> str:
+    """The canonical ``"wiki:<normalized_path>"`` doc-id for a K-layer page."""
+    return f"{Layer.WIKI.value}:{normalize_path(path)}"
 
 
 async def persist_wiki_page(
     *,
     storage: Storage,
     root: Path,
-    page: WikiPage,
+    path: str,
+    title: str | None = None,
     embedder: EmbeddingProvider | None = None,
     embedding_model: str = "",
     text_version_id: int | None = None,
@@ -45,31 +50,37 @@ async def persist_wiki_page(
     title_to_path: dict[str, str] | None = None,
     fuzzy_index: dict[str, list[str]] | None = None,
 ) -> int:
-    """Index ``page`` into the K layer (document, chunks, embeddings, links).
+    """Index a wiki page already on disk into the K layer.
 
-    Returns the count of unresolved outgoing wikilinks so callers can
-    fold it into reports (synth: ``SynthReport.unresolved_wikilinks``;
-    lint-apply: surfaced via ``ApplyReport`` skip records).
+    Re-parses the file via the backend registry so the stored hash and
+    chunk offsets match what ``read_page`` will compute on read —
+    ``frontmatter.dumps`` is not byte-stable on the body, so hashing
+    ``page.body`` directly diverges from the read-back parsed body.
 
-    ``title_to_path`` may be supplied to skip the per-page
-    ``list_documents`` round-trip when persisting many pages in a row
-    (Stage A fan-out persists N deduped pages per source — without this,
-    each call would re-pull the whole K-layer doc list).
+    ``title`` overrides the title inferred from the file's frontmatter
+    when the caller already has a canonical value (synth path, where
+    the LLM's ``<page>`` block names the title). Lint-apply leaves it
+    ``None`` and trusts ``parse_any``.
+
+    ``title_to_path`` lets fan-out callers (Stage A synth) avoid a
+    per-page ``list_documents`` round-trip; when ``None`` we read it
+    once here.
 
     When ``embedder`` is ``None`` (lint-apply) we skip the embedding
-    stream entirely. The document, chunks, and links still land so the
-    next ``run_lint`` sees the page; embeddings reconcile on the next
-    ``dikw ingest`` via ``doc.hash`` drift.
+    stream entirely — apply stays provider-free and embeddings
+    reconcile on the next ``dikw ingest`` via ``doc.hash`` drift.
+
+    Returns the count of unresolved outgoing wikilinks.
     """
-    doc_id = f"{Layer.WIKI.value}:{normalize_path(page.path)}"
-    abs_path = (root / page.path).resolve()
-    parsed = parse_any(abs_path, rel_path=page.path)
+    doc_id = wiki_doc_id(path)
+    abs_path = (root / path).resolve()
+    parsed = parse_any(abs_path, rel_path=path)
 
     await storage.upsert_document(
         DocumentRecord(
             doc_id=doc_id,
-            path=page.path,
-            title=page.title,
+            path=path,
+            title=title if title is not None else parsed.title,
             hash=parsed.hash,
             mtime=parsed.mtime,
             layer=Layer.WIKI,

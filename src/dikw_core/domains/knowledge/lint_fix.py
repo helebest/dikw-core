@@ -38,7 +38,6 @@ from ...providers.base import EmbeddingProvider, LLMProvider
 from ...schemas import Layer
 from ...storage.base import Storage
 from ..data.hashing import hash_bytes, hash_file
-from ..data.path_norm import normalize_path
 from .lint import LintKind
 from .page_index import persist_wiki_page
 from .synthesize import (
@@ -46,7 +45,7 @@ from .synthesize import (
     SynthesisPartialError,
     synthesize_pages_from_text,
 )
-from .wiki import WikiPage, build_page, read_page, write_page
+from .wiki import WikiPage, build_page, write_page
 
 logger = logging.getLogger(__name__)
 
@@ -381,17 +380,6 @@ async def run_lint_propose(
     return FixProposalReport(proposals=proposals, skipped=skipped)
 
 
-def _wiki_doc_id(path: str) -> str:
-    """Mirror of ``api._doc_id_for(Layer.WIKI, path)`` without the cycle.
-
-    The on-disk format uses ``"<layer>:<normalized_path>"`` as the
-    canonical id; we re-implement here so :mod:`lint_fix` doesn't need
-    to import from :mod:`api` (the dependency arrow points the other
-    way: ``api`` may import knowledge, not the reverse).
-    """
-    return f"{Layer.WIKI.value}:{normalize_path(path)}"
-
-
 def _build_page_from_op(op: FixOperation) -> WikiPage:
     """Materialise a :class:`WikiPage` from an op's frontmatter + body.
 
@@ -586,14 +574,12 @@ async def run_lint_apply(
     # fixers that author cross-links would need to update title_to_path
     # incrementally between persist calls.
     for path in sorted(paths_changed):
-        abs_path = (wiki_root / path).resolve()
-        if not abs_path.is_file():
+        if not (wiki_root / path).resolve().is_file():
             continue
-        page = read_page(wiki_root, path)
         await persist_wiki_page(
             storage=storage,
             root=wiki_root,
-            page=page,
+            path=path,
             embedder=None,
             embedding_model="",
             text_version_id=None,

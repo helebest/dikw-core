@@ -32,7 +32,7 @@ import os
 import struct
 import time
 import zlib
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -67,6 +67,7 @@ from .domains.data.sources import iter_source_files
 from .domains.info.chunk import chunk_markdown
 from .domains.info.embed import (
     ChunkToEmbed,
+    consume_embedding_stream,
     embed_assets,
     embed_chunks,
     is_unembeddable_asset_mime,
@@ -119,7 +120,6 @@ from .schemas import (
     ChunkAssetRef,
     ChunkRecord,
     DocumentRecord,
-    EmbeddingRow,
     EmbeddingVersion,
     Hit,
     ImageContent,
@@ -273,26 +273,6 @@ def _embedding_progress(
     ) as progress:
         task = progress.add_task(description, total=total)
         yield lambda: progress.update(task, advance=1)
-
-
-async def _consume_embedding_stream(
-    stream: AsyncIterator[list[EmbeddingRow]],
-    storage: Storage,
-    *,
-    on_batch: Callable[[], None] | None = None,
-    reporter: ProgressReporter | None = None,
-    phase: str = "embed",
-    total: int = 0,
-) -> int:
-    """Thin delegate — implementation lives in
-    :mod:`dikw_core.domains.info.embed` so K-layer indexing
-    (``persist_wiki_page``) can reuse the same drain-and-upsert loop
-    without depending on api.py internals."""
-    from .domains.info.embed import consume_embedding_stream
-    return await consume_embedding_stream(
-        stream, storage,
-        on_batch=on_batch, reporter=reporter, phase=phase, total=total,
-    )
 
 
 def _qualified_provider(protocol: str, base_url: str) -> str:
@@ -1303,7 +1283,7 @@ async def ingest(
             with _embedding_progress(
                 "embedding chunks", total=chunk_total
             ) as advance_chunk:
-                embedded = await _consume_embedding_stream(
+                embedded = await consume_embedding_stream(
                     embed_chunks(
                         embedder,
                         to_embed,
@@ -1381,7 +1361,7 @@ async def ingest(
             # Per-batch upsert: a mid-flight provider failure leaves
             # prior batches' vectors on disk so the next retry's
             # backfill scan sees only the truly-missing tail. Symmetric
-            # with the chunk side's ``_consume_embedding_stream``.
+            # with the chunk side's ``consume_embedding_stream``.
             with _embedding_progress(
                 "embedding assets", total=asset_total_batches
             ) as advance_asset:
@@ -2454,7 +2434,8 @@ async def _persist_wiki_page(
     return await persist_wiki_page(
         storage=storage,
         root=root,
-        page=page,
+        path=page.path,
+        title=page.title,
         embedder=embedder,
         embedding_model=embedding_model,
         text_version_id=text_version_id,

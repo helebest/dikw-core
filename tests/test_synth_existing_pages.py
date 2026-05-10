@@ -250,3 +250,84 @@ async def test_synth_existing_pages_truncates_to_retrieval_top_k(
         f"expected retrieval-gated truncation to <=3 bullets, "
         f"got {bullet_count} (full render had 12 pages)"
     )
+
+
+@pytest.mark.asyncio
+async def test_synth_force_all_skips_existing_pages_section(tmp_path: Path) -> None:
+    """``dikw synth --all`` is the documented "regenerate after a
+    prompt/model change" path. Showing the LLM the OLD output of the
+    SAME source would, combined with the zero-block-on-duplicate rule,
+    cause the model to skip the regeneration the user explicitly
+    requested. force_all must NOT render the base existing-pages
+    section. (The in-batch accumulator still runs so groups within the
+    same source coordinate.)"""
+    wiki = tmp_path / "wiki"
+    init_test_wiki(wiki)
+    await _seed_wiki_page(wiki, title="Tesla", type_="entity")
+
+    _write_source(
+        wiki,
+        "fresh.md",
+        "# Fresh source\n\nA short note that mentions Tesla in passing.\n",
+    )
+
+    embedder = FakeEmbeddings()
+    await api.ingest(wiki, embedder=embedder)
+
+    llm = CapturingLLM()
+    await api.synthesize(wiki, llm=llm, embedder=embedder, force_all=True)
+
+    assert llm.calls
+    prompt = llm.calls[0]
+    assert "## Existing wiki pages" not in prompt, (
+        "force_all=True must not surface the existing-pages section; "
+        "regeneration would otherwise be suppressed by the duplicate rule"
+    )
+    assert "- Tesla (entity)" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_synth_existing_pages_falls_back_when_wiki_unembedded(
+    tmp_path: Path,
+) -> None:
+    """``--no-embed`` wikis (or wikis whose K-layer pages predate the
+    active text version) have no WIKI vectors. Above the byte threshold
+    the retrieval-gated branch's vec_search returns nothing for every
+    chunk — without a fallback the LLM would see ``(no existing pages
+    — fresh wiki)`` and be told to generate freely, dropping all
+    duplicate-avoidance signal exactly when the wiki has the most to
+    offer it. We fall back to a bounded prefix of the snapshot."""
+    wiki = tmp_path / "wiki"
+    init_test_wiki(wiki)
+    _override_synth_cfg(
+        wiki, existing_pages_max_bytes=200, existing_pages_top_k=3
+    )
+
+    # Seed enough pages that the full render exceeds 200 B; ``embedder=None``
+    # in ``_seed_wiki_page`` means these pages have NO WIKI vectors.
+    for i in range(12):
+        await _seed_wiki_page(
+            wiki, title=f"Seeded page {i}", type_="concept"
+        )
+
+    _write_source(wiki, "fresh.md", "# Fresh\n\nSource body.\n")
+
+    embedder = FakeEmbeddings()
+    await api.ingest(wiki, embedder=embedder)
+
+    llm = CapturingLLM()
+    await api.synthesize(wiki, llm=llm, embedder=embedder)
+
+    prompt = llm.calls[0]
+    assert "## Existing wiki pages" in prompt, (
+        "fallback must surface the existing-pages section, not the "
+        "fresh-wiki sentinel"
+    )
+    bullet_count = sum(
+        1 for line in prompt.splitlines()
+        if line.startswith("- Seeded page ")
+    )
+    assert 0 < bullet_count <= 3, (
+        f"unembedded-wiki fallback should emit <=top_k=3 bullets, "
+        f"got {bullet_count}"
+    )

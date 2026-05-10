@@ -2163,6 +2163,7 @@ async def synthesize(
                 cancel=_reporter.cancel_token(),
                 storage=storage,
                 text_version_id=text_version_id,
+                force_all=force_all,
                 reporter=_reporter,
             )
             report = _sr_replace(
@@ -2597,28 +2598,45 @@ async def _existing_pages_for_prompt(
     # vec_search against the WIKI layer is what the locked design
     # specifies; union by doc_id, keep best (smallest) distance per
     # doc, sort, take top-K. Distance is cosine (smaller = closer).
+    #
+    # ``_truncated_fallback`` is the safety net for "many pages but the
+    # WIKI layer has no vectors" (``--no-embed`` wikis, version mismatch,
+    # or chunks the source-side embedder hasn't reached). Returning ``[]``
+    # would render the "(no existing pages — fresh wiki)" sentinel and
+    # drop ALL duplicate-avoidance context exactly when the wiki has
+    # the most to offer it. Bounded prefix is a worse signal than
+    # vec-ranked top-K but a better one than "fresh wiki, generate
+    # freely". Order matches the snapshot, which mirrors
+    # ``list_documents`` order — stable across runs.
+    def _truncated_fallback() -> list[tuple[str, str]]:
+        return snapshot.full_pages()[:top_k]
+
     embs = await storage.get_chunk_embeddings(
         [c.chunk_id for c in group_chunks if c.chunk_id is not None],
         version_id=version_id,
     )
     if not embs:
-        # No embeddings available (fresh wiki, fake-embed run, or
-        # version mismatch). Falling back to "no pages" is safer than
-        # spilling the full overflow list — the caller still gets a
-        # clear `(no existing pages …)` signal in the prompt.
-        return []
+        return _truncated_fallback()
     best_dist: dict[str, float] = {}
     for emb in embs.values():
         try:
-            hits = await storage.vec_search(emb, layer=Layer.WIKI, limit=top_k)
+            # Pin the lookup to the SAME version we fetched embeddings
+            # under — without this, vec_search re-resolves the active
+            # version and could pick a different per-version table
+            # (mid-synth ingest activating a new version, or a direct
+            # caller passing a non-active version_id), producing dim
+            # mismatches or rankings against the wrong index.
+            hits = await storage.vec_search(
+                emb, layer=Layer.WIKI, limit=top_k, version_id=version_id
+            )
         except NotSupported:
-            return []
+            return _truncated_fallback()
         for hit in hits:
             prior = best_dist.get(hit.doc_id)
             if prior is None or hit.distance < prior:
                 best_dist[hit.doc_id] = hit.distance
     if not best_dist:
-        return []
+        return _truncated_fallback()
     ordered_doc_ids = [
         doc_id for doc_id, _ in sorted(best_dist.items(), key=lambda kv: kv[1])
     ][:top_k]
@@ -2668,6 +2686,7 @@ async def _synth_pages_from_source(
     cancel: CancelToken,
     storage: Storage | None = None,
     text_version_id: int | None = None,
+    force_all: bool = False,
     reporter: ProgressReporter | None = None,
 ) -> _SourceSynthOutcome:
     """Fan a single source out into ChunkGroups and call the LLM per group.
@@ -2721,9 +2740,16 @@ async def _synth_pages_from_source(
     # (persist runs only after this function returns), so we hoist the
     # snapshot out of the loop. Without this, a source with G groups
     # against a base of W pages paid G x W storage round-trips per call.
+    #
+    # ``force_all`` skips the snapshot: ``dikw synth --all`` is the
+    # documented "regenerate everything after a prompt/model change"
+    # path. Showing the LLM the OLD output of the same source plus the
+    # zero-block-on-duplicate instruction would cause the model to skip
+    # the regeneration the user explicitly requested. The in-batch
+    # accumulator still runs so groups within the same source coordinate.
     snapshot = (
         await _ExistingPagesSnapshot.load(storage)
-        if storage is not None
+        if storage is not None and not force_all
         else None
     )
     for group in groups:

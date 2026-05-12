@@ -1,10 +1,10 @@
 """Dataset loading — convention-over-configuration.
 
-A dataset is a directory with up to **four** entries:
+A dataset is a directory with up to **five** entries:
 
   <dataset>/
     dataset.yaml     — name, description, thresholds (optionally namespaced
-                       as ``<view>/<metric>``)
+                       as ``<view>/<metric>``), modes, synth + judge config.
     corpus/*.md      — documents to ingest; image files referenced via
                        ``![](path)`` live in ``corpus/`` too (any
                        sub-directory layout is fine).
@@ -13,6 +13,10 @@ A dataset is a directory with up to **four** entries:
                        ground truth via ``expect_chunk_any`` /
                        ``expect_asset_any``. Absent → only doc-level eval.
     queries.yaml     — list of {q, expect_*_any | expect_none} entries.
+    expected.yaml    — *(optional, synth mode only)* per-source expected
+                       page titles + informational keywords for
+                       ``expected_coverage`` / report enrichment. Absent →
+                       ``expected_coverage`` metric not computed.
 
 ``load_dataset(name_or_path)`` accepts either a registered name (looked up
 under ``datasets_root()``) or a directory path (user-provided). No registry
@@ -31,15 +35,40 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 # Metric keys accepted under ``thresholds:``. Mirrors what runner.py computes.
 # nDCG@10 and Recall@100 are added for public-benchmark calibration (BEIR /
 # CMTEB report nDCG@10 and Recall@100 as defaults); the dogfood mvp dataset
-# does not have to set them.
+# does not have to set them. K-layer (synth) metrics use the
+# ``synth/<metric>`` namespace; ``duplicate_ratio_max`` carries the ``_max``
+# suffix to signal that lower is better (reverse-direction threshold).
 SUPPORTED_METRICS = frozenset(
-    {"hit_at_3", "hit_at_10", "mrr", "ndcg_at_10", "recall_at_100"}
+    {
+        # Retrieval (unchanged)
+        "hit_at_3",
+        "hit_at_10",
+        "mrr",
+        "ndcg_at_10",
+        "recall_at_100",
+        # K-layer (synth) — six hard-gate metrics + one informational
+        "fact_grounding_ratio",
+        "atomicity_score",
+        "duplicate_ratio_max",
+        "wikilink_resolved_ratio",
+        "expected_coverage",
+        "language_fidelity",
+        "page_density",
+    }
 )
 
-# Granularity views the runner can score. ``doc`` is always available;
-# ``chunk`` and ``asset`` require ``targets.yaml`` to define the named-id
-# catalog and queries to opt in via ``expect_chunk_any`` / ``expect_asset_any``.
-SUPPORTED_VIEWS = frozenset({"doc", "chunk", "asset"})
+# Granularity / scoring views the runner can score. ``doc`` is always
+# available; ``chunk`` and ``asset`` require ``targets.yaml`` + queries
+# opting in via ``expect_chunk_any`` / ``expect_asset_any``. ``synth`` is
+# the K-layer view — orthogonal to retrieval granularity.
+SUPPORTED_VIEWS = frozenset({"doc", "chunk", "asset", "synth"})
+
+# Which eval mode(s) a dataset advertises. ``run_synth_eval`` only fires
+# when ``synth`` is declared; ``run_eval`` only when ``retrieval`` is
+# declared. Datasets that omit the ``modes:`` field default to
+# ``[retrieval]`` for back-compat with the pre-synth contract.
+EvalMode = Literal["retrieval", "synth"]
+SUPPORTED_MODES = frozenset({"retrieval", "synth"})
 
 QueryType = Literal["doc", "text_chunk", "asset", "mixed"]
 
@@ -185,6 +214,71 @@ class Query(BaseModel):
         return list(self.expect_any) + list(self.expect_doc_any)
 
 
+class SynthSection(BaseModel):
+    """K-layer eval knobs declared in ``dataset.yaml``'s ``synth:`` block.
+
+    Defaults match the spec (``grounding_threshold=0.65``,
+    ``duplicate_threshold=0.85``) so retrieval-only datasets that don't
+    declare synth still parse and ``run_synth_eval`` (if invoked) gets
+    sensible numbers. ``page_types`` is dataset-local and written into
+    the throwaway wiki's ``dikw.yml`` at eval time, so a synth-eval
+    dataset can pin a tighter type set than the user's production wiki.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    grounding_threshold: float = 0.65
+    duplicate_threshold: float = 0.85
+    page_types: list[str] = Field(
+        default_factory=lambda: ["entity", "concept", "note"]
+    )
+
+    @model_validator(mode="after")
+    def _validate_page_types(self) -> Self:
+        if not self.page_types:
+            raise ValueError("synth.page_types must not be empty")
+        for t in self.page_types:
+            if not isinstance(t, str) or not t.strip():
+                raise ValueError(
+                    f"synth.page_types entries must be non-empty strings, got {t!r}"
+                )
+        return self
+
+
+class JudgeSection(BaseModel):
+    """LLM-judge provider override declared in ``dataset.yaml``'s ``judge:``
+    block. ``None`` falls back to the wiki's configured LLM at eval time."""
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: str | None = None
+    model: str | None = None
+
+
+class ExpectedSource(BaseModel):
+    """One source's expected synth output, used by ``expected_coverage``.
+
+    ``path`` is corpus-relative (matches the file under ``<dataset>/corpus/``).
+    ``expected_titles`` feed the coverage metric via fuzzy match (same
+    normalize rules as wikilink resolution). ``expected_keywords`` are
+    informational only — they enrich reports but don't gate metrics.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    expected_titles: list[str] = Field(default_factory=list)
+    expected_keywords: list[str] = Field(default_factory=list)
+
+
+class ExpectedSpec(BaseModel):
+    """Parsed ``expected.yaml`` — list of per-source expectations."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sources: list[ExpectedSource] = Field(default_factory=list)
+
+
 class DatasetSpec(BaseModel):
     """Validated view of a dataset directory on disk."""
 
@@ -196,6 +290,12 @@ class DatasetSpec(BaseModel):
     corpus_dir: Path
     queries: list[Query]
     targets: TargetsSpec = Field(default_factory=TargetsSpec)
+    modes: list[EvalMode] = Field(
+        default_factory=lambda: ["retrieval"]  # type: ignore[arg-type]
+    )
+    synth: SynthSection = Field(default_factory=SynthSection)
+    judge: JudgeSection = Field(default_factory=JudgeSection)
+    expected: ExpectedSpec | None = None
 
 
 def datasets_root() -> Path:
@@ -259,6 +359,13 @@ def load_dataset(name_or_path: str | Path) -> DatasetSpec:
     _validate_query_targets(queries, targets)
 
     thresholds = _parse_thresholds(meta.get("thresholds") or {})
+    modes = _parse_modes(meta.get("modes"))
+    synth = _parse_synth_section(meta.get("synth"))
+    judge = _parse_judge_section(meta.get("judge"))
+    expected = _load_expected(path)
+    if expected is not None:
+        _validate_expected_against_corpus(expected, corpus_dir)
+
     try:
         return DatasetSpec(
             name=str(meta.get("name") or path.name),
@@ -267,9 +374,92 @@ def load_dataset(name_or_path: str | Path) -> DatasetSpec:
             corpus_dir=corpus_dir,
             queries=queries,
             targets=targets,
+            modes=modes,
+            synth=synth,
+            judge=judge,
+            expected=expected,
         )
     except ValidationError as e:  # pragma: no cover — caught by earlier guards
         raise DatasetError(f"invalid dataset spec at {path}: {e}") from e
+
+
+def _parse_modes(raw: Any) -> list[EvalMode]:
+    """Parse the optional ``modes:`` list. Missing/None → ``["retrieval"]``."""
+    if raw is None:
+        return ["retrieval"]
+    if not isinstance(raw, list) or not raw:
+        raise DatasetError(
+            f"modes must be a non-empty list, got {raw!r}; "
+            f"supported: {sorted(SUPPORTED_MODES)}"
+        )
+    out: list[EvalMode] = []
+    for entry in raw:
+        if entry not in SUPPORTED_MODES:
+            raise DatasetError(
+                f"unknown mode {entry!r}; supported: {sorted(SUPPORTED_MODES)}"
+            )
+        out.append(entry)
+    return out
+
+
+def _parse_synth_section(raw: Any) -> SynthSection:
+    """Parse the optional ``synth:`` block; missing → defaults."""
+    if raw is None:
+        return SynthSection()
+    if not isinstance(raw, dict):
+        raise DatasetError(f"synth: must be a mapping, got {type(raw).__name__}")
+    try:
+        return SynthSection.model_validate(raw)
+    except ValidationError as e:
+        # Surface a cleaner message: pydantic stacks "Value error, ..." onto
+        # each violation; the first one is the most actionable.
+        first = e.errors()[0]
+        msg = first.get("msg", str(e))
+        raise DatasetError(f"invalid synth section: {msg}") from e
+
+
+def _parse_judge_section(raw: Any) -> JudgeSection:
+    """Parse the optional ``judge:`` block; missing → defaults (no pin)."""
+    if raw is None:
+        return JudgeSection()
+    if not isinstance(raw, dict):
+        raise DatasetError(f"judge: must be a mapping, got {type(raw).__name__}")
+    try:
+        return JudgeSection.model_validate(raw)
+    except ValidationError as e:
+        raise DatasetError(f"invalid judge section: {e}") from e
+
+
+def _load_expected(path: Path) -> ExpectedSpec | None:
+    """Load ``expected.yaml`` if present; absent → None (metric skipped)."""
+    e_path = path / "expected.yaml"
+    if not e_path.is_file():
+        return None
+    raw = yaml.safe_load(e_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise DatasetError(f"{e_path}: top-level YAML must be a mapping")
+    try:
+        return ExpectedSpec.model_validate(raw)
+    except ValidationError as e:
+        raise DatasetError(f"{e_path}: invalid expected spec: {e}") from e
+
+
+def _validate_expected_against_corpus(
+    expected: ExpectedSpec, corpus_dir: Path
+) -> None:
+    """Cross-check ``expected.yaml`` source paths against ``corpus/``.
+
+    A typo here would silently drop ``expected_coverage`` for that source
+    (or, worse, count it as zero coverage). Surface at load time, same
+    pattern as ``_validate_query_targets``.
+    """
+    for entry in expected.sources:
+        candidate = corpus_dir / entry.path
+        if not candidate.is_file():
+            raise DatasetError(
+                f"expected.yaml references unknown source {entry.path!r}; "
+                f"no such file under {corpus_dir}"
+            )
 
 
 def _validate_query_targets(

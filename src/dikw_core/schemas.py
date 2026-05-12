@@ -179,14 +179,13 @@ class PageRef(BaseModel):
 class RetrieveResult(BaseModel):
     """Final payload for ``POST /v1/retrieve``.
 
-    The caller (typically an AI agent) is expected to assemble its own
-    answer from ``chunks`` + ``page_refs`` using its own LLM — dikw-core
-    does not synthesize answers. ``chunks`` is the same hits set
-    emitted earlier on the ``retrieval_done`` partial (same ``text``
-    too — PR-2 made the partial carry full chunk bodies), so a
-    streaming agent can prompt off ``retrieval_done`` and treat
-    ``final`` as a checkpoint; a non-streaming caller can ignore the
-    partial and read ``final.result.chunks`` directly.
+    The caller (typically an AI agent) assembles its own answer from
+    ``chunks`` + ``page_refs`` using its own LLM — dikw-core does not
+    synthesize. ``chunks`` repeats the hits emitted on the
+    ``retrieval_done`` partial (full ``Hit`` dump on both events), so a
+    streaming agent can prompt off the partial and treat ``final`` as a
+    checkpoint, while a non-streaming caller can ignore the partial and
+    read ``final.result.chunks`` directly.
     """
 
     chunks: list[Hit] = Field(default_factory=list)

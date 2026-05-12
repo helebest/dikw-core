@@ -1545,13 +1545,10 @@ async def _retrieve_inner(
             multimodal=mm_search,
         )
         hits = await searcher.search(q, limit=limit)
-        # PR-2: include full ``text`` on the partial event. Agents that
-        # consume the intermediate ``retrieval_done`` event can prompt
-        # off it directly instead of waiting for ``final`` (or paying a
-        # second round-trip for chunk bodies). Cost is duplicated text
-        # on the wire — at limit=100 with ~1 KB chunks the payload
-        # roughly doubles; agents that don't need the partial can stop
-        # reading the stream after ``final``.
+        # Include full ``text`` so a streaming agent can prompt off the
+        # partial without waiting for ``final``. Cost: chunk bodies
+        # duplicate on ``final.result.chunks`` — clients that don't
+        # need the partial can stop reading after ``final``.
         await _reporter.partial(
             "retrieval_done",
             {"hits": [h.model_dump(mode="json") for h in hits]},

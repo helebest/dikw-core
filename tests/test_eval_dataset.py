@@ -409,7 +409,6 @@ def _write_synth_dataset(root: Path, *, name: str = "synth-toy") -> Path:
         "  duplicate_threshold: 0.9\n"
         "  page_types: [entity, concept]\n"
         "judge:\n"
-        "  provider: anthropic\n"
         "  model: claude-sonnet\n",
         encoding="utf-8",
     )
@@ -455,8 +454,22 @@ def test_load_dataset_synth_section_parsed(tmp_path: Path) -> None:
 def test_load_dataset_judge_section_parsed(tmp_path: Path) -> None:
     ds = _write_synth_dataset(tmp_path)
     spec = load_dataset(ds)
-    assert spec.judge.provider == "anthropic"
     assert spec.judge.model == "claude-sonnet"
+
+
+def test_load_dataset_judge_rejects_unknown_field(tmp_path: Path) -> None:
+    """``judge.provider`` was rejected post-review — a typo or stale
+    field shouldn't silently disappear with no judge override applied."""
+    ds = _write_synth_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        (ds / "dataset.yaml").read_text(encoding="utf-8").replace(
+            "judge:\n  model: claude-sonnet\n",
+            "judge:\n  provider: anthropic\n  model: claude-sonnet\n",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError):
+        load_dataset(ds)
 
 
 def test_load_dataset_synth_section_defaults(tmp_path: Path) -> None:
@@ -472,7 +485,6 @@ def test_load_dataset_synth_section_defaults(tmp_path: Path) -> None:
 def test_load_dataset_judge_section_defaults(tmp_path: Path) -> None:
     ds = _write_valid_dataset(tmp_path)
     spec = load_dataset(ds)
-    assert spec.judge.provider is None
     assert spec.judge.model is None
 
 

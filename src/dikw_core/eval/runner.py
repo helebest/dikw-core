@@ -1194,12 +1194,17 @@ async def run_synth_eval(
                 total=len(bundle.pages),
             )
 
+        synth_thresholds = {
+            name: thr
+            for name, thr in spec.thresholds.items()
+            if name.startswith("synth/")
+        }
         return SynthEvalReport(
             dataset_name=spec.name,
             n_sources=bundle.n_sources,
             n_pages=len(bundle.pages),
             metrics=bundle.metrics,
-            threshold_results=check_thresholds(bundle.metrics, spec.thresholds),
+            threshold_results=check_thresholds(bundle.metrics, synth_thresholds),
             pages_per_source=bundle.pages_per_source,
             informational=bundle.informational,
             judge_summary=judge_summary,

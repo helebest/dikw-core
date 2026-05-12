@@ -170,6 +170,46 @@ async def test_run_synth_eval_rejects_non_synth_dataset(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_synth_eval_ignores_retrieval_thresholds(
+    tmp_path: Path,
+) -> None:
+    """Mixed thresholds — retrieval keys must NOT make synth ``passed``
+    flip to False. ``run_synth_eval`` only sees synth metrics, so the
+    retrieval thresholds would otherwise show up as ``missing →
+    passed=False`` and the gate would always fail on mvp-style datasets.
+    """
+    ds = tmp_path / "mixed"
+    (ds / "corpus").mkdir(parents=True)
+    (ds / "corpus" / "alpha.md").write_text(
+        "# Alpha\n\nAlpha is a concept described in the corpus.\n",
+        encoding="utf-8",
+    )
+    (ds / "dataset.yaml").write_text(
+        "name: mixed\n"
+        "modes: [retrieval, synth]\n"
+        "thresholds:\n"
+        "  hit_at_3: 0.5\n"
+        "  hit_at_10: 0.5\n"
+        "  mrr: 0.3\n"
+        "  synth/fact_grounding_ratio: 0.0\n"
+        "synth:\n"
+        "  page_types: [concept]\n",
+        encoding="utf-8",
+    )
+    (ds / "queries.yaml").write_text(
+        "queries:\n  - q: alpha\n    expect_any: [alpha]\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    llm = FakeLLM(response_text=_SYNTH_PAGE_RESPONSE)
+    report = await run_synth_eval(spec, llm=llm, embedder=FakeEmbeddings())
+    assert {r.name for r in report.threshold_results} == {
+        "synth/fact_grounding_ratio"
+    }
+    assert report.passed is True
+
+
+@pytest.mark.asyncio
 async def test_run_synth_eval_threshold_failure_blocks_passed(
     tmp_path: Path,
 ) -> None:

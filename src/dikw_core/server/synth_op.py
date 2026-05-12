@@ -123,10 +123,13 @@ def make_eval_runner(
     ``dikw eval`` (no-arg) workflow that the in-process CLI shipped with.
 
     ``eval_modes`` (optional) restricts which families run per dataset.
-    ``None`` falls back to each dataset's ``spec.modes`` declaration —
-    so a retrieval-only dataset still runs retrieval, and a synth-
-    capable dataset runs whatever it declared. Synth eval also drives
-    the LLM judge layer when ``judge=True``.
+    ``None`` keeps the legacy contract — retrieval-only, even on
+    datasets that declare ``synth`` (synth opt-in is explicit). An
+    explicit list like ``["synth"]`` runs that family on every dataset
+    that declares it; if no selected dataset declares any requested
+    mode, the run fails loud (``eval_mode_unavailable``) rather than
+    returning a vacuous ``passed=True``. Synth eval also drives the
+    LLM judge layer when ``judge=True``.
     """
 
     async def _runner(reporter: ProgressReporter) -> dict[str, Any]:
@@ -208,9 +211,11 @@ def make_eval_runner(
 
         reports: list[dict[str, Any]] = []
         all_passed = True
+        modes_actually_run: set[str] = set()
         for spec in specs:
             modes_to_run = _resolve_eval_modes(spec, eval_modes)
             for em in modes_to_run:
+                modes_actually_run.add(em)
                 if em == "retrieval":
                     try:
                         report = await run_eval(
@@ -261,6 +266,14 @@ def make_eval_runner(
                     reports.append(dumped)
 
         _ = wiki_root  # eval owns its own throwaway wiki tree
+        if eval_modes is not None:
+            missing = [m for m in eval_modes if m not in modes_actually_run]
+            if missing:
+                raise BadRequest(
+                    f"requested eval modes {missing} not declared by any "
+                    f"selected dataset; nothing ran",
+                    code="eval_mode_unavailable",
+                )
         # Single-report runs keep the legacy result shape so existing
         # client renderers (``render_eval_report``) Just Work; everything
         # else returns a ``{datasets: [...], passed: bool}`` envelope.
@@ -274,15 +287,21 @@ def make_eval_runner(
 def _resolve_eval_modes(
     spec: Any, requested: list[str] | None
 ) -> list[str]:
-    """Intersect requested eval_modes with the dataset's declared modes.
+    """Pick which eval modes to run for ``spec``.
 
-    ``None`` → use dataset's full ``spec.modes``; explicit list → keep
-    only the modes the dataset also declares (silently drops mismatches
-    so a multi-dataset ``--eval synth`` run can still cover the synth-
-    capable ones without erroring on retrieval-only datasets)."""
+    ``requested is None`` → retrieval-only (back-compat for legacy
+    ``/v1/eval`` bodies that pre-date ``eval_modes``). A dataset that
+    declares ``synth`` still needs an explicit ``--eval synth`` opt-in;
+    otherwise a default-shape request would silently invoke LLM synth
+    and change cost / failure semantics.
+
+    Explicit ``requested`` returns the intersection with ``spec.modes``;
+    empty intersection is left for the caller to surface (multi-dataset
+    runs skip silently per-spec, then fail at the end if some requested
+    mode never ran on any dataset)."""
     declared = list(spec.modes)
     if requested is None:
-        return declared
+        return ["retrieval"] if "retrieval" in declared else []
     return [m for m in requested if m in declared]
 
 

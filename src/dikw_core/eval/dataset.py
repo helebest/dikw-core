@@ -246,12 +246,19 @@ class SynthSection(BaseModel):
 
 
 class JudgeSection(BaseModel):
-    """LLM-judge provider override declared in ``dataset.yaml``'s ``judge:``
-    block. ``None`` falls back to the wiki's configured LLM at eval time."""
+    """LLM-judge override declared in ``dataset.yaml``'s ``judge:`` block.
 
-    model_config = ConfigDict(frozen=True)
+    ``model`` lets a dataset pin a specific model id (handy when the
+    wiki's configured LLM is a small / fast model unsuitable for
+    judging); ``None`` falls back to ``cfg.provider.llm_model``. Judge
+    runs use the wiki's configured provider — a separate provider per
+    dataset would mean a separate auth / billing path and isn't needed
+    yet. ``extra="forbid"`` ensures a ``provider:`` typo isn't silently
+    ignored.
+    """
 
-    provider: str | None = None
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     model: str | None = None
 
 

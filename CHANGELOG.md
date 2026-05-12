@@ -37,6 +37,14 @@ on each entry call out exactly what shape changes break.
   `docs/getting-started.md`, `AGENTS.md`, `INSTALL_FOR_AGENTS.md` all
   rewritten to reflect "dikw-core is a knowledge kernel; agents compose
   answers" as the new product invariant.
+* **Wire (additive)**: `retrieval_done.hits[].text` now carries the
+  **full chunk body** instead of being stripped. Agents consuming the
+  intermediate partial event can now prompt directly off it without
+  waiting for `final` (or paying a second round-trip for chunk bodies).
+  Cost: payload roughly doubles at `limit=100` since chunks duplicate
+  on `final.result.chunks`; clients that only need the final result can
+  stop reading the stream after `final`. Clients ignoring unknown fields
+  are unaffected.
 
 ### `upload` → `import` — rename the source-import verb top-to-bottom
 

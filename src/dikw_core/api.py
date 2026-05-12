@@ -1545,14 +1545,16 @@ async def _retrieve_inner(
             multimodal=mm_search,
         )
         hits = await searcher.search(q, limit=limit)
-        # Strip ``text`` from the partial event — clients consuming
-        # ``retrieval_done`` for live citation rendering only need
-        # snippet/path/score; the full chunk body lives on
-        # ``final.result.chunks`` for retrieve callers that actually need
-        # it. Halves the wire payload at limit=100 with ~1 KB chunks.
+        # PR-2: include full ``text`` on the partial event. Agents that
+        # consume the intermediate ``retrieval_done`` event can prompt
+        # off it directly instead of waiting for ``final`` (or paying a
+        # second round-trip for chunk bodies). Cost is duplicated text
+        # on the wire — at limit=100 with ~1 KB chunks the payload
+        # roughly doubles; agents that don't need the partial can stop
+        # reading the stream after ``final``.
         await _reporter.partial(
             "retrieval_done",
-            {"hits": [h.model_dump(mode="json", exclude={"text"}) for h in hits]},
+            {"hits": [h.model_dump(mode="json") for h in hits]},
         )
         return hits, owned_mm
     except BaseException:

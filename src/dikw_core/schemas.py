@@ -181,11 +181,12 @@ class RetrieveResult(BaseModel):
 
     The caller (typically an AI agent) is expected to assemble its own
     answer from ``chunks`` + ``page_refs`` using its own LLM — dikw-core
-    does not synthesize answers. ``chunks`` is a superset of the same
-    hits emitted earlier on the ``retrieval_done`` partial; that
-    intermediate event omits ``text`` to keep the streaming preview
-    light, so callers needing the full chunk body must read
-    ``final.result.chunks`` (here).
+    does not synthesize answers. ``chunks`` is the same hits set
+    emitted earlier on the ``retrieval_done`` partial (same ``text``
+    too — PR-2 made the partial carry full chunk bodies), so a
+    streaming agent can prompt off ``retrieval_done`` and treat
+    ``final`` as a checkpoint; a non-streaming caller can ignore the
+    partial and read ``final.result.chunks`` directly.
     """
 
     chunks: list[Hit] = Field(default_factory=list)

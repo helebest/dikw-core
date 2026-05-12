@@ -74,7 +74,10 @@ talk to `POST /v1/retrieve` over HTTP directly.
    know which base the user pointed it at.
 2. `POST /v1/retrieve` with the question + a `limit`. Each chunk hit
    carries a `path`, `layer`, `anchor`, `start_off`/`end_off`, plus
-   `page_refs` listing the parent pages.
+   full chunk `text` (on both the intermediate `retrieval_done` partial
+   *and* `final.result.chunks`), plus `page_refs` listing the parent
+   pages. A streaming agent can prompt off the partial without waiting
+   for `final`.
 3. If you want full pages instead of just chunks, follow the page refs
    with `GET /v1/base/pages/{path}` — that returns the parsed body plus
    anchors so you can re-locate every chunk hit inside the page body.

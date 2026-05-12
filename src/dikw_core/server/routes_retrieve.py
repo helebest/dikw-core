@@ -7,7 +7,7 @@ page-level refs and assemble their own answer with their own LLM. Wire
 shape:
 
   {"type":"retrieve_started","q":"...","limit":5}
-  {"type":"retrieval_done","hits":[...]}
+  {"type":"retrieval_done","hits":[...]}      # PR-2: hits carry full ``text``
   {"type":"final","status":"succeeded","result":{...RetrieveResult...}}
 
 Validation errors (empty ``q``, out-of-range ``limit``) return HTTP 4xx

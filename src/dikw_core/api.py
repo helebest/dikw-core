@@ -125,9 +125,13 @@ from .schemas import (
     EmbeddingVersion,
     Hit,
     ImageContent,
+    IncomingLink,
     Layer,
+    LinkDirection,
     MultimodalInput,
+    OutgoingLink,
     PageAnchor,
+    PageLinksResult,
     PageReadResult,
     PageRef,
     RetrieveResult,
@@ -148,13 +152,16 @@ __all__ = [
     "DistillReport",
     "EmbeddingInfo",
     "HealthReport",
+    "IncomingLink",
     "IngestError",
     "IngestErrorKind",
     "IngestReport",
     "LayerCounts",
     "LlmInfo",
     "MultimodalInfo",
+    "OutgoingLink",
     "PageAnchor",
+    "PageLinksResult",
     "PageNotFound",
     "PageReadResult",
     "PageRef",
@@ -173,6 +180,7 @@ __all__ = [
     "init_wiki",
     "lint",
     "list_candidates",
+    "list_links",
     "list_pages",
     "load_wiki",
     "read_page",
@@ -1749,6 +1757,122 @@ async def read_page(
         body=body,
         anchors=anchors,
     )
+
+
+async def list_links(
+    root: str | Path | None,
+    path: str,
+    *,
+    direction: LinkDirection = "both",
+    limit: int | None = None,
+) -> PageLinksResult:
+    """Return the page's K-layer link neighbourhood without reading body.
+
+    Companion to :func:`read_page` for graph traversal: lets an agent ask
+    "which pages does this page link to" / "which pages link to this
+    page" without scanning the body for ``[[wikilink]]`` syntax. The
+    answers come from the ``links`` table that ``_persist_wiki_page``
+    keeps in sync on every synth — so an outgoing edge here is exactly
+    the edge that survived resolve_links (fuzzy match, anchor
+    preservation, collision-refuse). ``direction`` filters which lists
+    are populated; ``limit`` caps each list independently so a hub page
+    with many edges on both sides doesn't see one side starved.
+
+    Index-driven path safety, same as ``read_page``: only paths present
+    in the ``documents`` table are reachable, and inbound src_doc_ids
+    that don't resolve to a current document row are dropped (defence
+    against orphan edges left by a deactivated doc).
+    """
+    if limit is not None and limit < 0:
+        raise ValueError(f"limit must be >= 0, got {limit}")
+    if not path or not path.strip() or "\x00" in path:
+        raise PageNotFound(path)
+
+    cfg, _root, storage = await _with_storage(root)
+    del cfg
+    try:
+        match: DocumentRecord | None = None
+        for layer in (Layer.SOURCE, Layer.WIKI):
+            candidate = await storage.get_document(_doc_id_for(layer, path))
+            if candidate is not None and candidate.active:
+                match = candidate
+                break
+        if match is None:
+            raise PageNotFound(path)
+
+        outgoing: list[OutgoingLink] = []
+        incoming: list[IncomingLink] = []
+
+        if direction in ("out", "both"):
+            edges_out = await storage.links_from(match.doc_id)
+            # Filter to dst paths that resolve to an active document.
+            # Without this, bare URLs, markdown links to non-indexed
+            # files, and pages-deactivated-since-synth leak into
+            # ``outgoing[]`` and the graph-hop contract breaks — the
+            # caller would 404 trying to follow ``dst_path`` back into
+            # ``GET /v1/base/pages/{path}``. dst_path doesn't carry its
+            # layer so we probe both candidate doc_ids in one batch.
+            candidate_ids: list[str] = []
+            for e in edges_out:
+                candidate_ids.append(_doc_id_for(Layer.SOURCE, e.dst_path))
+                candidate_ids.append(_doc_id_for(Layer.WIKI, e.dst_path))
+            dst_docs = {
+                d.doc_id: d
+                for d in await storage.get_documents(candidate_ids)
+            }
+            resolved_out: list[OutgoingLink] = []
+            for e in edges_out:
+                dst = dst_docs.get(
+                    _doc_id_for(Layer.SOURCE, e.dst_path)
+                ) or dst_docs.get(_doc_id_for(Layer.WIKI, e.dst_path))
+                if dst is None or not dst.active:
+                    continue
+                resolved_out.append(
+                    OutgoingLink(
+                        dst_path=e.dst_path,
+                        link_type=e.link_type,
+                        anchor=e.anchor,
+                        line=e.line,
+                    )
+                )
+            if limit is not None:
+                resolved_out = resolved_out[:limit]
+            outgoing = resolved_out
+
+        if direction in ("in", "both"):
+            edges_in = await storage.links_to(match.path)
+            # Batch-fetch src docs in one round trip — without this a
+            # hub page with N inbound edges costs N sequential
+            # ``get_document`` calls. Orphan inbound edges (src doc
+            # deactivated / deleted) are dropped: agents can't follow
+            # them anyway.
+            src_docs = {
+                d.doc_id: d
+                for d in await storage.get_documents(
+                    e.src_doc_id for e in edges_in
+                )
+            }
+            resolved_inc: list[IncomingLink] = []
+            for edge in edges_in:
+                src_doc = src_docs.get(edge.src_doc_id)
+                if src_doc is None or not src_doc.active:
+                    continue
+                resolved_inc.append(
+                    IncomingLink(
+                        src_doc_id=edge.src_doc_id,
+                        src_path=src_doc.path,
+                        link_type=edge.link_type,
+                        anchor=edge.anchor,
+                        line=edge.line,
+                    )
+                )
+            if limit is not None:
+                resolved_inc = resolved_inc[:limit]
+            incoming = resolved_inc
+    finally:
+        await storage.close()
+
+    return PageLinksResult(path=match.path, outgoing=outgoing, incoming=incoming)
 
 
 async def retrieve(

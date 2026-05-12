@@ -4,6 +4,9 @@ Companion to ``POST /v1/retrieve``: an agent that hits a chunk via
 retrieve calls ``GET /v1/base/pages/{path}`` to read the full page body
 plus per-chunk ``anchors[]`` so it can join hit chunks back onto the
 unchunked body for prompt assembly or rendering.
+``GET /v1/base/pages/{path}/links`` is the K-layer graph hop: returns
+outgoing / incoming edges so an agent can walk neighbours without
+re-parsing wiki bodies.
 
 Path safety is index-driven — paths absent from the ``documents`` table
 return 404, which transparently covers ``..`` traversal and unindexed
@@ -12,12 +15,18 @@ files (``dikw.yml``, etc.) without a separate sandbox check.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 
 from .. import api
-from ..schemas import DocumentRecord, Layer, PageReadResult
+from ..schemas import (
+    DocumentRecord,
+    Layer,
+    LinkDirection,
+    PageLinksResult,
+    PageReadResult,
+)
 from .errors import NotFoundError
 from .runtime import ServerRuntime, get_runtime
 
@@ -36,6 +45,28 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         return await api.list_pages(
             rt.root, layer=layer, active=active, since_ts=since_ts
         )
+
+    # Order matters: the ``/links`` sub-route must be declared BEFORE the
+    # catch-all ``{path:path}`` get_page handler so FastAPI doesn't greedily
+    # match e.g. ``wiki/foo.md/links`` against ``{path:path}``.
+    @router.get(
+        "/base/pages/{path:path}/links", response_model=PageLinksResult
+    )
+    async def get_page_links(
+        request: Request,
+        path: str,
+        direction: Annotated[LinkDirection, Query()] = "both",
+        limit: Annotated[int | None, Query(ge=0)] = None,
+    ) -> PageLinksResult:
+        rt: ServerRuntime = get_runtime(request.app)
+        try:
+            return await api.list_links(
+                rt.root, path, direction=direction, limit=limit
+            )
+        except api.PageNotFound as e:
+            raise NotFoundError(
+                f"page not found: {path!r}", code="page_not_found"
+            ) from e
 
     @router.get("/base/pages/{path:path}", response_model=PageReadResult)
     async def get_page(request: Request, path: str) -> PageReadResult:

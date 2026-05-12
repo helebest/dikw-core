@@ -231,6 +231,60 @@ class LinkRecord(BaseModel):
     line: int
 
 
+class OutgoingLink(BaseModel):
+    """One outgoing edge from a page (page → ``dst_path``).
+
+    Mirrors ``LinkRecord`` minus ``src_doc_id`` — the source is the page
+    being queried, so repeating its id on every entry is pure bloat over
+    the wire. ``anchor`` carries the ``#section`` fragment for wikilinks
+    that target a specific heading.
+    """
+
+    dst_path: str
+    link_type: LinkType
+    anchor: str | None = None
+    line: int
+
+
+class IncomingLink(BaseModel):
+    """One incoming edge to a page (``src_path`` → page).
+
+    Includes both ``src_doc_id`` (storage primary key, useful when the
+    agent already has a chunk hit and wants to cross-reference) and
+    ``src_path`` (the on-disk path the agent will read next), resolved
+    via the documents table so callers don't need a second round trip.
+    """
+
+    src_doc_id: str
+    src_path: str
+    link_type: LinkType
+    anchor: str | None = None
+    line: int
+
+
+class PageLinksResult(BaseModel):
+    """Final payload for ``GET /v1/base/pages/{path}/links``.
+
+    Splits the K-layer link graph at a page boundary: ``outgoing`` is
+    every edge whose source is this page, ``incoming`` every edge whose
+    destination is this page. ``direction=in|out|both`` on the request
+    filters which lists are populated; ``limit`` caps each list
+    independently (a hub page with many inbound and outbound edges sees
+    both halves trimmed, not a per-total split).
+    """
+
+    path: str
+    outgoing: list[OutgoingLink] = Field(default_factory=list)
+    incoming: list[IncomingLink] = Field(default_factory=list)
+
+
+# Shared closed-set type for the page-links direction parameter. Engine,
+# server route, and CLI all import this so the allowed values live in
+# one place — bumping it (e.g. adding a hypothetical "diagonal") only
+# touches one site.
+LinkDirection = Literal["in", "out", "both"]
+
+
 class ChunkNeighborRecord(BaseModel):
     """A chunk reachable from a seed chunk via the K-layer link graph.
 

@@ -58,6 +58,26 @@ on each entry call out exactly what shape changes break.
   `console.print(json.dumps(...))`. The old path let rich's soft-wrap
   inject newlines mid-string at long paths, URLs, or error messages,
   breaking `jq` / `json.loads` on agent stdout.
+* **Wire (additive)**: `GET /v1/base/pages/{path}/links` exposes the
+  K-layer link graph at a page boundary. Query params: `direction=in|out|both`
+  (default `both`), `limit=N` (`ge=0`; caps each list independently — a
+  hub page with many edges on both sides sees both halves trimmed, not a
+  total split, and `limit=0` symmetrically returns empty lists on both
+  sides). Response shape: `{path, outgoing[{dst_path, link_type, anchor,
+  line}], incoming[{src_doc_id, src_path, link_type, anchor, line}]}`.
+  **Graph-hop contract**: every returned edge resolves to an active
+  document — bare URLs, markdown links to non-indexed files, and edges
+  pointing to deactivated docs are filtered on both sides so the caller
+  can always feed `dst_path` / `src_path` back into
+  `GET /v1/base/pages/{path}` without 404. Path safety is index-driven,
+  same as `GET /v1/base/pages/{path}` — unindexed lookup paths return
+  404 with `error.code = page_not_found`.
+* **New (CLI)**: `dikw client pages links <path> [--direction in|out|both]
+  [--limit N] [--format json|table]` mirrors the new HTTP endpoint.
+  Default `--format json` (agent contract); `--format table` renders two
+  stacked tables (outgoing / incoming) for humans. Used together with
+  `dikw client pages get`, an agent can walk neighbours from a retrieve
+  hit without re-parsing wiki bodies for `[[wikilinks]]`.
 
 ### `upload` → `import` — rename the source-import verb top-to-bottom
 

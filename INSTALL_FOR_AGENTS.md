@@ -204,6 +204,22 @@ Returns the parsed body plus chunk anchors aligned to the same
 coordinate space, so you can re-locate every chunk hit inside the page.
 Use `dikw client pages list` to enumerate registered paths.
 
+## 11. Walk the wiki graph one hop
+
+```bash
+uv run dikw client pages links wiki/Foo.md
+uv run dikw client pages links wiki/Foo.md --direction out --limit 20
+uv run dikw client pages links wiki/Foo.md --format table
+```
+
+Returns `{path, outgoing, incoming}` — `outgoing` is edges *from* this
+page (`dst_path`, `link_type`, `line`, `anchor`), `incoming` is edges
+*to* this page (`src_doc_id`, `src_path`, `link_type`, `line`,
+`anchor`). `--direction in|out|both` filters which lists are populated;
+`--limit N` caps each list independently. Combine with `pages get` to
+hop from a retrieve hit to neighbour pages without re-parsing wiki
+bodies for `[[wikilinks]]`.
+
 ## Common failure modes
 
 - **404 from `/v1/base/pages/{path}`** — the path exists on disk but

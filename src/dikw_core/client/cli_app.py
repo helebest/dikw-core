@@ -1251,6 +1251,116 @@ def pages_get_cmd(
     _run(_go())
 
 
+@pages_app.command(
+    "links",
+    epilog=(
+        "Examples:\n\n"
+        "  dikw client pages links wiki/Some-Page.md\n\n"
+        "  dikw client pages links wiki/Some-Page.md --direction out\n\n"
+        "  dikw client pages links wiki/Hub.md --limit 20 --format table"
+    ),
+)
+def pages_links_cmd(
+    path: Annotated[
+        str,
+        typer.Argument(help="Page path under the base (e.g. wiki/foo.md)."),
+    ],
+    direction: Annotated[
+        str,
+        typer.Option(
+            "--direction",
+            help="Edge direction: 'in', 'out', or 'both' (default).",
+        ),
+    ] = "both",
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            help="Cap each list (outgoing AND incoming) at N entries.",
+        ),
+    ] = None,
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'json' (default, agent-friendly) or 'table' (human).",
+        ),
+    ] = "json",
+    server: Annotated[str | None, _server_option()] = None,
+    token: Annotated[str | None, _token_option()] = None,
+) -> None:
+    """List the K-layer link graph neighbours of a page.
+
+    Returns ``outgoing`` (edges from this page) and ``incoming`` (edges
+    to this page). The path must already exist as a ``DocumentRecord``
+    in the server's base — paths that aren't indexed return 404. Use
+    ``dikw client pages list`` first to discover registered paths."""
+    _validate_format(fmt)
+    if direction not in ("in", "out", "both"):
+        console.print(
+            f"[red]error[/red]: --direction must be 'in', 'out', or 'both', "
+            f"got {direction!r}"
+        )
+        raise typer.Exit(code=2)
+
+    encoded = quote(path, safe="/")
+
+    async def _go() -> None:
+        params: dict[str, Any] = {"direction": direction}
+        if limit is not None:
+            params["limit"] = limit
+        async with Transport.from_config(_resolve(server, token)) as t:
+            payload = await t.get_json(
+                f"/v1/base/pages/{encoded}/links", params=params
+            )
+        if fmt == "json":
+            console.print_json(json.dumps(payload, ensure_ascii=False))
+            return
+        # ``table`` mode: two stacked tables — outgoing on top, incoming
+        # below — labelled so the section boundary is obvious in a tty.
+        out_table = Table(
+            title=f"outgoing ({len(payload.get('outgoing', []))})",
+            show_header=True,
+            header_style="bold",
+        )
+        out_table.add_column("dst_path")
+        out_table.add_column("link_type")
+        out_table.add_column("line")
+        out_table.add_column("anchor")
+        for edge in payload.get("outgoing", []):
+            if not isinstance(edge, dict):
+                continue
+            out_table.add_row(
+                str(edge.get("dst_path") or ""),
+                str(edge.get("link_type") or ""),
+                str(edge.get("line") or ""),
+                str(edge.get("anchor") or ""),
+            )
+        console.print(out_table)
+
+        in_table = Table(
+            title=f"incoming ({len(payload.get('incoming', []))})",
+            show_header=True,
+            header_style="bold",
+        )
+        in_table.add_column("src_path")
+        in_table.add_column("link_type")
+        in_table.add_column("line")
+        in_table.add_column("anchor")
+        for edge in payload.get("incoming", []):
+            if not isinstance(edge, dict):
+                continue
+            in_table.add_row(
+                str(edge.get("src_path") or ""),
+                str(edge.get("link_type") or ""),
+                str(edge.get("line") or ""),
+                str(edge.get("anchor") or ""),
+            )
+        console.print(in_table)
+
+    _run(_go())
+
+
 # ---- tasks subcommands ------------------------------------------------
 
 tasks_app = typer.Typer(

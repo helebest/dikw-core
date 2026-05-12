@@ -36,21 +36,31 @@ def test_status_routes_through_client(
     asgi_client: tuple[Any, ServerRuntime],
     patch_transport_factory: Callable[[], None],
 ) -> None:
+    """Top-level ``dikw status`` aliases to ``dikw client status`` and
+    emits parseable JSON by default (agent-first contract, PR-3)."""
+    import json as _json
+
     patch_transport_factory()
     result = _run(["status"])  # top-level alias → client.status
     assert result.exit_code == 0, result.stdout
-    assert "source" in result.stdout
-    assert "chunks" in result.stdout
+    payload = _json.loads(result.stdout)
+    assert "chunks" in payload
+    assert "documents_by_layer" in payload
 
 
 def test_client_status_explicit_subcommand(
     asgi_client: tuple[Any, ServerRuntime],
     patch_transport_factory: Callable[[], None],
 ) -> None:
+    """``dikw client status`` (explicit subcommand) is the same JSON
+    payload as the top-level alias."""
+    import json as _json
+
     patch_transport_factory()
     result = _run(["client", "status"])
     assert result.exit_code == 0, result.stdout
-    assert "source" in result.stdout
+    payload = _json.loads(result.stdout)
+    assert "chunks" in payload
 
 
 def test_lint_clean_on_fresh_wiki(
@@ -356,6 +366,106 @@ def test_check_unavailable_provider_exits_one(
     # incidentally on the test image; in both cases the CLI must not
     # crash with a traceback.
     assert result.exit_code in (0, 1), result.stdout
+
+
+def test_status_default_emits_json(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    """Agent-first default: ``dikw client status`` (no flags) must emit
+    JSON parseable by ``json.loads``. Human-readable rendering moves
+    behind ``--format table``."""
+    import json as _json
+
+    patch_transport_factory()
+    result = _run(["client", "status"])
+    assert result.exit_code == 0, result.stdout
+    payload = _json.loads(result.stdout)
+    assert isinstance(payload, dict)
+    # ``/v1/status`` returns layer-keyed counts; check the structural
+    # contract instead of any specific value.
+    assert payload, "status JSON payload must not be empty"
+
+
+def test_status_table_mode_renders(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    """``--format table`` keeps the rich-rendered output for humans —
+    asserts the renderer is still wired up after the default flip."""
+    patch_transport_factory()
+    result = _run(["client", "status", "--format", "table"])
+    assert result.exit_code == 0, result.stdout
+    # ``render_status`` prints layer labels; "chunks" is one of them.
+    assert "chunks" in result.stdout
+
+
+def test_check_default_emits_json(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent-first default: ``dikw client check`` (no flags) must emit
+    JSON parseable by ``json.loads`` regardless of probe outcome.
+    Adding the ``--format`` flag is the PR-3 behavior change."""
+    import json as _json
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("DIKW_EMBEDDING_API_KEY", raising=False)
+    patch_transport_factory()
+    result = _run(["client", "check"])
+    assert result.exit_code in (0, 1), result.stdout
+    payload = _json.loads(result.stdout)
+    assert isinstance(payload, dict)
+    # ``CheckReport`` has ``llm`` and ``embed`` per-leg keys; at least
+    # one must be present in every probe outcome.
+    assert "llm" in payload or "embed" in payload
+
+
+def test_check_table_mode_renders(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--format table`` keeps the rich rendering for human operators."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("DIKW_EMBEDDING_API_KEY", raising=False)
+    patch_transport_factory()
+    result = _run(["client", "check", "--format", "table"])
+    assert result.exit_code in (0, 1), result.stdout
+    # ``render_check_report`` prints per-leg labels.
+    out = result.stdout.lower()
+    assert "llm" in out or "embed" in out
+
+
+def test_check_rejects_invalid_format(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    patch_transport_factory()
+    result = _run(["client", "check", "--format", "csv"])
+    assert result.exit_code == 2
+    assert "must be 'json' or 'table'" in result.stdout
+
+
+def test_info_default_emits_parseable_json(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    """``dikw client info`` happy path must emit parseable JSON.
+    The command is JSON-only (no ``--format`` flag) — agents call it
+    as a bootstrap probe and need the openapi / docs hints inline.
+    Error-path JSON is a separate follow-up (the global ``_on_error``
+    still emits rich text)."""
+    import json as _json
+
+    patch_transport_factory()
+    result = _run(["client", "info"])
+    assert result.exit_code == 0, result.stdout
+    payload = _json.loads(result.stdout)
+    assert isinstance(payload, dict)
 
 
 def test_distill_runs_through_task_pipeline(

@@ -30,11 +30,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -48,28 +49,40 @@ from ..config import (
     MultimodalEmbedConfig,
     ProviderConfig,
     RetrievalConfig,
+    SchemaConfig,
     dump_config_yaml,
+    load_config,
 )
 from ..domains.data.backends import parse_any
 from ..domains.data.hashing import hash_file
 from ..domains.info.search import HybridSearcher, MultimodalSearch, RetrievalMode
+from ..domains.knowledge.links import parse_links
+from ..domains.knowledge.wiki import WikiPage, read_page
 from ..progress import NoopReporter, ProgressReporter
 from ..providers import (
     EmbeddingProvider,
     MultimodalEmbeddingProvider,
     build_multimodal_embedder,
 )
-from ..schemas import ChunkRecord, DocumentRecord, Hit
+from ..providers.base import LLMProvider
+from ..schemas import ChunkRecord, DocumentRecord, Hit, Layer, LinkType
 from ..storage import Storage, build_storage
 from ..storage._schema import SCHEMA_VERSION
 from ..storage.base import NotSupported
 from .dataset import DatasetSpec
 from .fake_embedder import FakeEmbeddings
 from .metrics import (
+    atomicity_score,
+    duplicate_ratio_max,
+    expected_coverage,
+    fact_grounding_ratio,
+    language_fidelity,
     mean_hit_at_k,
     mean_ndcg_at_k,
     mean_recall_at_k,
     mean_reciprocal_rank,
+    page_density,
+    wikilink_resolved_ratio,
 )
 
 # Limit per query — large enough to compute recall@100. The same ranked
@@ -568,6 +581,7 @@ def _materialise_wiki(
     provider_cfg: ProviderConfig,
     retrieval_cfg: RetrievalConfig,
     assets_cfg: AssetsConfig,
+    schema_cfg: SchemaConfig | None = None,
 ) -> Path:
     """Scaffold a throwaway wiki + dikw.yml that matches ``spec``.
 
@@ -577,6 +591,10 @@ def _materialise_wiki(
     whole file to build ``HybridSearcher``, which picks up the retrieval
     + multimodal blocks. This means eval reproducibly measures whatever
     fusion knobs the caller passed, including the asset-vector leg.
+
+    ``schema_cfg`` is optional and only used by ``run_synth_eval`` so a
+    synth-mode dataset can pin its own ``page_types`` whitelist into the
+    throwaway wiki (separate from the user's production page_types).
     """
     wiki = tmp_root / "wiki"
     api.init_wiki(wiki, description=f"eval/{spec.name}")
@@ -587,6 +605,8 @@ def _materialise_wiki(
     cfg.provider = provider_cfg
     cfg.retrieval = retrieval_cfg
     cfg.assets = assets_cfg
+    if schema_cfg is not None:
+        cfg.schema_ = schema_cfg
     (wiki / CONFIG_FILENAME).write_text(dump_config_yaml(cfg), encoding="utf-8")
     return wiki
 
@@ -957,3 +977,308 @@ async def _run_queries(
         return results
     finally:
         await storage.close()
+
+
+# ===========================================================================
+# K-layer (synth) eval — Step 4: run_synth_eval + SynthEvalReport
+# ===========================================================================
+
+
+class SynthEvalError(EvalError):
+    """``run_synth_eval`` couldn't produce a valid report.
+
+    Distinct subclass of ``EvalError`` so the CLI / server can present a
+    K-layer-specific diagnostic (e.g. ``allowed page_types: X, observed
+    types in raw responses: Y`` when zero pages came back)."""
+
+
+def _threshold_direction(metric_name: str) -> Literal["min", "max"]:
+    """Metric names ending in ``_max`` are reverse-direction (lower is
+    better); everything else is min-direction (higher is better).
+
+    Strips a leading ``<view>/`` prefix so ``synth/duplicate_ratio_max``
+    classifies the same as ``duplicate_ratio_max``.
+    """
+    bare = metric_name.rpartition("/")[-1] or metric_name
+    return "max" if bare.endswith("_max") else "min"
+
+
+@dataclass(frozen=True)
+class ThresholdResult:
+    name: str
+    observed: float
+    threshold: float
+    direction: Literal["min", "max"]
+    passed: bool
+
+
+def check_thresholds(
+    metrics: Mapping[str, float], thresholds: Mapping[str, float]
+) -> list[ThresholdResult]:
+    """Direction-aware threshold comparison.
+
+    Missing observation → ``passed=False`` with ``NaN`` for ``observed``
+    so renderers can surface the gap without crashing on ``None``.
+    """
+    out: list[ThresholdResult] = []
+    for name, thr in thresholds.items():
+        direction = _threshold_direction(name)
+        value = metrics.get(name)
+        if value is None:
+            out.append(ThresholdResult(name, math.nan, thr, direction, False))
+            continue
+        passed = value <= thr if direction == "max" else value >= thr
+        out.append(ThresholdResult(name, value, thr, direction, passed))
+    return out
+
+
+class SynthEvalReport(BaseModel):
+    """Result of a single ``run_synth_eval`` invocation."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    dataset_name: str
+    mode: Literal["synth"] = "synth"
+    n_sources: int
+    n_pages: int
+    metrics: dict[str, float] = Field(default_factory=dict)
+    threshold_results: list[ThresholdResult] = Field(default_factory=list)
+    pages_per_source: dict[str, int] = Field(default_factory=dict)
+    informational: dict[str, float] = Field(default_factory=dict)
+    # ``judge_summary`` is wired in Step 5 once judge.py lands; until
+    # then ``--judge`` is a no-op and this stays ``None``.
+    judge_summary: Any | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return all(r.passed for r in self.threshold_results)
+
+
+async def run_synth_eval(
+    spec: DatasetSpec,
+    *,
+    llm: LLMProvider,
+    embedder: EmbeddingProvider | None = None,
+    provider_config: ProviderConfig | None = None,
+    retrieval_config: RetrievalConfig | None = None,
+    judge: bool = False,
+    judge_sample: int | None = None,
+    reporter: ProgressReporter | None = None,
+) -> SynthEvalReport:
+    """End-to-end K-layer eval: ingest → synth → metrics + optional judge.
+
+    The runner spins up a throwaway wiki under ``tempfile.TemporaryDirectory``,
+    ingests the dataset's corpus, runs ``api.synthesize`` with the provided
+    LLM, then computes the seven K-layer metrics off the resulting pages
+    and source chunks. The synth pass writes through ``spec.synth.page_types``
+    so the dataset's whitelist (rather than the production wiki's) gates
+    which page types ``parse_synthesis_response`` accepts.
+
+    Empty page output raises ``SynthEvalError`` rather than letting a
+    ``0 / 0`` metric mask a hard failure. Pass ``judge=True`` to layer an
+    LLM judge soft score on top once Step 5 wires ``judge.py`` in.
+    """
+    if "synth" not in spec.modes:
+        raise SynthEvalError(
+            f"dataset {spec.name!r} does not declare 'synth' mode "
+            f"(modes: {spec.modes}); add 'synth' to modes: in dataset.yaml"
+        )
+    if not spec.corpus_dir.is_dir():
+        raise SynthEvalError(f"corpus directory not found: {spec.corpus_dir}")
+
+    _reporter: ProgressReporter = reporter or NoopReporter()
+    effective_embedder: EmbeddingProvider = embedder or FakeEmbeddings()
+    effective_provider_cfg = provider_config or ProviderConfig(
+        embedding_model="fake",
+        embedding_dim=64,
+        embedding_revision="",
+        embedding_normalize=True,
+        embedding_distance="cosine",
+    )
+    effective_retrieval_cfg = retrieval_config or RetrievalConfig()
+    schema_cfg = SchemaConfig(page_types=list(spec.synth.page_types))
+
+    warnings: list[str] = []
+    if spec.expected is None:
+        warnings.append(
+            "expected.yaml absent — expected_coverage metric skipped"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="dikw-synth-eval-") as tmpdir:
+        wiki = _materialise_wiki(
+            Path(tmpdir),
+            spec,
+            provider_cfg=effective_provider_cfg,
+            retrieval_cfg=effective_retrieval_cfg,
+            assets_cfg=AssetsConfig(),
+            schema_cfg=schema_cfg,
+        )
+        _copy_corpus(spec.corpus_dir, wiki / "sources")
+
+        await _reporter.progress(
+            phase="synth_eval/ingest", current=0, total=1
+        )
+        await api.ingest(wiki, embedder=effective_embedder, reporter=_reporter)
+        await _reporter.progress(
+            phase="synth_eval/ingest", current=1, total=1
+        )
+
+        await _reporter.progress(
+            phase="synth_eval/synth", current=0, total=1
+        )
+        synth_report = await api.synthesize(
+            wiki,
+            force_all=True,
+            llm=llm,
+            embedder=effective_embedder,
+            reporter=_reporter,
+        )
+        await _reporter.progress(
+            phase="synth_eval/synth",
+            current=1,
+            total=1,
+            detail={
+                "pages_created": synth_report.created,
+                "unresolved_wikilinks": synth_report.unresolved_wikilinks,
+            },
+        )
+
+        return await _compute_synth_metrics(
+            spec=spec,
+            wiki=wiki,
+            synth_report=synth_report,
+            embedder=effective_embedder,
+            embedding_model=effective_provider_cfg.embedding_model,
+            warnings=warnings,
+        )
+
+
+async def _compute_synth_metrics(
+    *,
+    spec: DatasetSpec,
+    wiki: Path,
+    synth_report: api.SynthReport,
+    embedder: EmbeddingProvider,
+    embedding_model: str,
+    warnings: list[str],
+) -> SynthEvalReport:
+    """Load the synth output from storage + disk, compute all metrics,
+    check thresholds, return a populated ``SynthEvalReport``."""
+    cfg = load_config(wiki)
+    storage = build_storage(cfg.storage, root=wiki)
+    try:
+        wiki_docs = list(
+            await storage.list_documents(layer=Layer.WIKI, active=True)
+        )
+        source_docs = list(
+            await storage.list_documents(layer=Layer.SOURCE, active=True)
+        )
+
+        pages: list[WikiPage] = []
+        for doc in wiki_docs:
+            try:
+                pages.append(read_page(wiki, doc.path))
+            except FileNotFoundError:
+                continue
+
+        if not pages:
+            raise SynthEvalError(
+                f"synth produced zero pages from {len(source_docs)} "
+                f"sources (allowed page_types: {list(spec.synth.page_types)})"
+                f"; check LLM responses and dataset.yaml synth.page_types"
+            )
+
+        chunks_by_source: dict[str, list[ChunkRecord]] = {}
+        n_chunks = 0
+        source_text_by_path: dict[str, str] = {}
+        for doc in source_docs:
+            chunks = await storage.list_chunks(doc.doc_id)
+            chunks_by_source[doc.path] = chunks
+            n_chunks += len(chunks)
+            source_file = wiki / "sources" / doc.path
+            if source_file.is_file():
+                source_text_by_path[doc.path] = source_file.read_text(
+                    encoding="utf-8"
+                )
+    finally:
+        await storage.close()
+
+    # Page → primary source. ``WikiPage.sources`` is wiki-relative
+    # (``sources/foo.md``); the storage doc path for the same file is
+    # ``sources/foo.md`` too, but the dataset chunks_by_source we built
+    # is keyed by storage doc path. Strip the ``sources/`` prefix where
+    # present so both sides line up.
+    def _source_key(page_source: str) -> str:
+        if page_source.startswith("sources/"):
+            return page_source[len("sources/") :]
+        return page_source
+
+    pages_with_source_keys: list[tuple[WikiPage, str]] = []
+    pages_with_source_texts: list[tuple[WikiPage, str]] = []
+    pages_per_source: dict[str, int] = {}
+    for page in pages:
+        if not page.sources:
+            continue
+        key = _source_key(page.sources[0])
+        pages_with_source_keys.append((page, key))
+        pages_per_source[key] = pages_per_source.get(key, 0) + 1
+        text = source_text_by_path.get(key)
+        if text is not None:
+            pages_with_source_texts.append((page, text))
+
+    total_wikilinks = sum(
+        1
+        for page in pages
+        for link in parse_links(page.body)
+        if link.kind is LinkType.WIKILINK
+    )
+
+    metrics: dict[str, float] = {
+        "synth/atomicity_score": atomicity_score(pages),
+        "synth/wikilink_resolved_ratio": wikilink_resolved_ratio(
+            total=total_wikilinks,
+            unresolved=synth_report.unresolved_wikilinks,
+        ),
+        "synth/language_fidelity": language_fidelity(pages_with_source_texts),
+        "synth/fact_grounding_ratio": await fact_grounding_ratio(
+            pages_with_sources=pages_with_source_keys,
+            chunks_by_source=chunks_by_source,
+            embedder=embedder,
+            embedding_model=embedding_model,
+            tau=spec.synth.grounding_threshold,
+        ),
+        "synth/duplicate_ratio_max": await duplicate_ratio_max(
+            pages=pages,
+            embedder=embedder,
+            embedding_model=embedding_model,
+            tau=spec.synth.duplicate_threshold,
+        ),
+    }
+    if spec.expected is not None:
+        expected_titles: list[str] = []
+        for entry in spec.expected.sources:
+            expected_titles.extend(entry.expected_titles)
+        metrics["synth/expected_coverage"] = expected_coverage(
+            page_titles=[p.title for p in pages],
+            expected_titles=expected_titles,
+        )
+
+    informational: dict[str, float] = {
+        "synth/page_density": page_density(
+            n_pages=len(pages), n_chunks=n_chunks
+        ),
+    }
+
+    threshold_results = check_thresholds(metrics, spec.thresholds)
+
+    return SynthEvalReport(
+        dataset_name=spec.name,
+        n_sources=len(source_docs),
+        n_pages=len(pages),
+        metrics=metrics,
+        threshold_results=threshold_results,
+        pages_per_source=pages_per_source,
+        informational=informational,
+        warnings=warnings,
+    )

@@ -71,6 +71,7 @@ from ..storage._schema import SCHEMA_VERSION
 from ..storage.base import NotSupported
 from .dataset import DatasetSpec
 from .fake_embedder import FakeEmbeddings
+from .judge import JudgeSummary, judge_synthesis
 from .metrics import (
     atomicity_score,
     duplicate_ratio_max,
@@ -1045,9 +1046,7 @@ class SynthEvalReport(BaseModel):
     threshold_results: list[ThresholdResult] = Field(default_factory=list)
     pages_per_source: dict[str, int] = Field(default_factory=dict)
     informational: dict[str, float] = Field(default_factory=dict)
-    # ``judge_summary`` is wired in Step 5 once judge.py lands; until
-    # then ``--judge`` is a no-op and this stays ``None``.
-    judge_summary: Any | None = None
+    judge_summary: JudgeSummary | None = None
     warnings: list[str] = Field(default_factory=list)
 
     @property
@@ -1144,7 +1143,7 @@ async def run_synth_eval(
             },
         )
 
-        return await _compute_synth_metrics(
+        report = await _compute_synth_metrics(
             spec=spec,
             wiki=wiki,
             synth_report=synth_report,
@@ -1152,6 +1151,64 @@ async def run_synth_eval(
             embedding_model=effective_provider_cfg.embedding_model,
             warnings=warnings,
         )
+
+        if judge:
+            judge_model = (
+                spec.judge.model or effective_provider_cfg.llm_model
+            )
+            judge_pages, judge_sources = _load_pages_and_sources(wiki)
+            await _reporter.progress(
+                phase="synth_eval/judge",
+                current=0,
+                total=len(judge_pages),
+            )
+            summary = await judge_synthesis(
+                judge_pages,
+                sources=judge_sources,
+                llm=llm,
+                model=judge_model,
+                sample=judge_sample,
+                reporter=_reporter,
+                seed=spec.name,
+            )
+            await _reporter.progress(
+                phase="synth_eval/judge",
+                current=summary.n_judged + summary.n_errors,
+                total=len(judge_pages),
+            )
+            # Replace the immutable report — pydantic BaseModel doesn't
+            # support attribute mutation by default; model_copy is the
+            # idiomatic way to set ``judge_summary`` post-construction.
+            report = report.model_copy(update={"judge_summary": summary})
+
+        return report
+
+
+def _load_pages_and_sources(
+    wiki: Path,
+) -> tuple[list[WikiPage], dict[str, str]]:
+    """Re-load wiki pages from disk and the source texts they cite.
+
+    Used by ``run_synth_eval`` when ``judge=True``: judge_synthesis needs
+    the same in-memory bundle that ``_compute_synth_metrics`` already
+    computed, but plumbing the data out without coupling the two phases
+    is messier than re-reading from the throwaway wiki (which is still
+    materialised at this point).
+    """
+    pages: list[WikiPage] = []
+    for md in sorted((wiki / "wiki").rglob("*.md")):
+        rel = md.relative_to(wiki).as_posix()
+        try:
+            pages.append(read_page(wiki, rel))
+        except FileNotFoundError:
+            continue
+    sources: dict[str, str] = {}
+    sources_dir = wiki / "sources"
+    if sources_dir.is_dir():
+        for src in sources_dir.rglob("*.md"):
+            rel = src.relative_to(wiki).as_posix()  # ``sources/foo.md``
+            sources[rel] = src.read_text(encoding="utf-8")
+    return pages, sources
 
 
 async def _compute_synth_metrics(

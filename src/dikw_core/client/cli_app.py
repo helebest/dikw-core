@@ -31,7 +31,6 @@ from . import serve_and_run as _sar
 from .config import ClientConfig, resolve
 from .importer import SourceImportError, build_import
 from .progress import (
-    QueryStreamRenderer,
     RetrieveStreamRenderer,
     TaskProgressRenderer,
     render_check_report,
@@ -612,64 +611,6 @@ def retrieve_cmd(
             console.print_json(json.dumps(final.result, ensure_ascii=False))
         else:
             render_retrieve_table(console, final.result)
-
-    _run(_go())
-
-
-# ---- query (NDJSON stream) --------------------------------------------
-
-
-@app.command(
-    "query",
-    epilog=(
-        "Examples:\n\n"
-        "  dikw client query \"What is X?\"\n\n"
-        "  dikw client query \"...\" --limit 10 --show-hits\n\n"
-        "  dikw client query \"...\" --plain"
-    ),
-)
-def query_cmd(
-    question: Annotated[str, typer.Argument(help="Natural-language question.")],
-    limit: Annotated[
-        int, typer.Option("--limit", "-k", help="Excerpts to retrieve.")
-    ] = 5,
-    show_hits: Annotated[
-        bool,
-        typer.Option(
-            "--show-hits",
-            help="Also dump raw retrieval hits after the citations table.",
-        ),
-    ] = False,
-    plain: Annotated[
-        bool,
-        typer.Option(
-            "--plain",
-            help="Disable rich rendering (useful for piping into other tools).",
-        ),
-    ] = False,
-    server: Annotated[str | None, _server_option()] = None,
-    token: Annotated[str | None, _token_option()] = None,
-) -> None:
-    """Answer ``question`` via streaming NDJSON."""
-
-    async def _go() -> None:
-        renderer = QueryStreamRenderer(
-            console, plain=plain, show_hits=show_hits
-        )
-        async with (
-            Transport.from_config(_resolve(server, token)) as t,
-            t.stream_ndjson(
-                "POST",
-                "/v1/query",
-                json_body={"q": question, "limit": limit},
-            ) as events,
-        ):
-            final = await renderer.run(events)
-        if final.status != "succeeded":
-            console.print(f"[red]query {final.status}[/red]")
-            if final.error:
-                console.print(f"[dim]{final.error}[/dim]")
-            raise typer.Exit(code=1)
 
     _run(_go())
 

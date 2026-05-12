@@ -206,3 +206,37 @@ def test_staging_cleaned_up_on_failure(tmp_path: Path) -> None:
         if p.name.startswith("dikw-import-")
     }
     assert after.issubset(before)
+
+
+def test_input_stem_collides_with_sources_dir_name(tmp_path: Path) -> None:
+    """An input literally named ``sources.fake`` must still land at
+    ``sources/sources/sources.md`` — without proper staging the
+    base-style-tree heuristic in ``_resolve_input`` would collapse the
+    per-source namespace and clobber the top of the sources tree."""
+    fake = tmp_path / "sources.fake"
+    fake.write_bytes(b"sources-fake-bytes")
+    converter = _FakeConverter()
+
+    bundle = build_import(fake, converter_for=_resolver(converter))
+    try:
+        names = _tar_names(bundle.payload)
+    finally:
+        bundle.close()
+
+    assert "sources/sources/sources.md" in names
+    assert "sources/sources/assets/sources.fake" in names
+
+
+def test_hidden_stem_rejected(tmp_path: Path) -> None:
+    """Hidden-stem files (``.hidden.fake``) get rejected at pre-flight
+    rather than producing a silently-empty staging tree (the eventual
+    ``.hidden.md`` plugin output would be skipped by ``_discover_files``
+    and surface as a confusing "no markdown files found" error)."""
+    fake = tmp_path / ".hidden.fake"
+    fake.write_bytes(b"hidden-fake-bytes")
+    converter = _FakeConverter()
+
+    with pytest.raises(SourceImportError) as exc:
+        build_import(fake, converter_for=_resolver(converter))
+    assert "hidden-stem" in str(exc.value)
+    assert ".hidden.fake" in str(exc.value)

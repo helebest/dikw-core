@@ -230,6 +230,16 @@ def _normalize_input(
     if converter_for is None:
         raise SourceImportError(str(no_converter_error(ext)))
 
+    # Reject hidden-stem inputs (``.hidden.pdf``) early — the eventual
+    # ``<stem>.md`` plugin output would be a hidden file that
+    # ``_discover_files`` silently skips. Cleaner to refuse the input
+    # than to silently mangle it.
+    if resolved.stem.startswith("."):
+        raise SourceImportError(
+            f"refusing to import hidden-stem file: {resolved.name} "
+            f"(rename without the leading dot first)"
+        )
+
     try:
         converter = converter_for(ext)
     except ConverterError as e:
@@ -240,7 +250,16 @@ def _normalize_input(
 
     with tempfile.TemporaryDirectory(prefix="dikw-import-") as staging_str:
         staging = Path(staging_str)
-        output_dir = staging / resolved.stem
+        # Plant a ``sources/`` directory at the staging root so
+        # ``_resolve_input`` treats the tree as base-style and routes
+        # archive paths through the deduped ``sources/...`` prefix
+        # logic in ``_archive_path``. Without this, an input named
+        # ``sources.pdf`` would create ``staging/sources/`` as the
+        # plugin's output and trip the base-style heuristic
+        # incorrectly, collapsing the per-source namespace.
+        sources_dir = staging / "sources"
+        sources_dir.mkdir()
+        output_dir = sources_dir / resolved.stem
         try:
             converter.convert(resolved, output_dir)
         except Exception as e:

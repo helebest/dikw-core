@@ -210,3 +210,62 @@ def test_discover_rejects_plugin_missing_protocol_attributes(
     with pytest.raises(ConverterError) as exc:
         discover()
     assert "BrokenConverter" in str(exc.value)
+
+
+def test_discover_skips_plugin_that_fails_to_load(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One broken plugin (missing optional dep → ImportError, bad
+    constructor → TypeError, …) must not block dispatch for every
+    other extension. ``discover()`` logs a warning and continues."""
+
+    class _ExplodingEP:
+        name = "broken"
+
+        def load(self) -> type:
+            raise ImportError("optional dep 'torch' not installed")
+
+    working_cls = _make_converter_class("marker", (".pdf",))
+
+    monkeypatch.setattr(
+        "dikw_core.client.converters.entry_points",
+        lambda *, group: [_ExplodingEP(), _FakeEP(working_cls)],
+    )
+    with caplog.at_level("WARNING", logger="dikw_core.client.converters"):
+        registry = discover()
+
+    # The working plugin survived; the broken one was skipped + logged.
+    assert sorted(c.name for c in registry[".pdf"]) == ["marker"]
+    assert any("broken" in rec.message and "ImportError" in rec.message for rec in caplog.records)
+
+
+def test_discover_skips_plugin_with_broken_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A plugin whose ``__init__`` raises (e.g. requires args we don't
+    pass) is skipped the same way as a load failure."""
+
+    def _bad_init(self: object) -> None:
+        raise TypeError("MarkerConverter.__init__ requires model_path")
+
+    bad_cls = type(
+        "BadInitConverter",
+        (),
+        {
+            "name": "bad",
+            "extensions": (".pdf",),
+            "convert": lambda self, ip, od: None,
+            "__init__": _bad_init,
+        },
+    )
+    monkeypatch.setattr(
+        "dikw_core.client.converters.entry_points",
+        lambda *, group: [_FakeEP(bad_cls)],
+    )
+    with caplog.at_level("WARNING", logger="dikw_core.client.converters"):
+        registry = discover()
+
+    assert registry == {}
+    assert any("TypeError" in rec.message for rec in caplog.records)

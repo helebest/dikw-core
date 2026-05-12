@@ -26,10 +26,13 @@ rich`` client weight class.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+log = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "dikw.client.converters"
 
@@ -125,11 +128,25 @@ def _load_entry_points() -> list[Converter]:
 
     Called only when dispatch on a non-md extension is needed — keeps
     ML-heavy plugin imports off the common CLI startup path.
+
+    Plugins whose import or ``__init__`` raises (missing optional
+    dependency, broken constructor, …) are skipped with a warning so
+    one broken plugin doesn't block dispatch for every other
+    extension. Plugins whose metadata is malformed (missing ``name`` /
+    ``extensions``) still raise :class:`ConverterError` — those are
+    author bugs that should surface loudly at install time.
     """
     out: list[Converter] = []
     for ep in entry_points(group=ENTRY_POINT_GROUP):
-        klass = ep.load()
-        instance = klass()
+        try:
+            klass = ep.load()
+            instance = klass()
+        except Exception as e:
+            log.warning(
+                "converter plugin %r failed to load (%s: %s); skipping",
+                ep.name, type(e).__name__, e,
+            )
+            continue
         _validate(klass, instance)
         out.append(instance)
     return out

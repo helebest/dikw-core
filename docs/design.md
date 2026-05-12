@@ -426,7 +426,7 @@ re-ask many times.
 **Surfacing to agents** (`wisdom/apply.py`):
 - Exposes `pick_applicable(q, limit)` as a pure function over approved wisdom items: lexical overlap + a cheap semantic pass against the question.
 - Server publishes this via `GET /v1/wisdom/applicable?q=...` so agents can preview which wisdom would shape an answer **before** burning any of their own LLM calls.
-- Agents decide whether to inject the returned items into their own prompt. dikw-core does not perform the synthesis itself — `retrieve` returns the wisdom refs alongside chunk hits and stops there.
+- Agents decide whether to inject the returned items into their own prompt. dikw-core does not perform the synthesis itself — `retrieve` returns chunk hits, the wisdom endpoint above returns wisdom refs, and the agent stitches them together client-side.
 
 **Why this design pulls its weight**:
 - Evidence is required → reduces hallucinated "axioms."
@@ -523,8 +523,8 @@ Prompt caching: when the provider is Anthropic, use the `cache_control` param on
 - `dikw client synth [--all]` — K synthesis
 - `dikw client distill` — propose W-layer candidates
 - `dikw client review {list,approve,reject}` — drive the W review state machine
-- `dikw client retrieve "<q>"` — streamed retrieval (ranked chunks + applicable wisdom refs, no LLM call); agent supplies its own LLM synthesis on the result
-- `dikw client wisdom applicable "<q>"` — list approved wisdom items applicable to a question (preview before agent constructs its own prompt)
+- `dikw client retrieve "<q>"` — streamed retrieval (ranked chunks + page refs, no LLM call); agent supplies its own LLM synthesis on the result
+- `dikw client wisdom applicable "<q>"` — _(PR-5)_ list approved wisdom items applicable to a question; until then use `GET /v1/wisdom?status=approved` over HTTP
 - `dikw client lint` — hygiene report
 - `dikw client eval [--dataset]` — run retrieval-quality evaluation
 - `dikw client tasks {list,show,follow,cancel}` — inspect the server's async task queue
@@ -532,7 +532,7 @@ Prompt caching: when the provider is Anthropic, use the `cache_control` param on
 **HTTP surface** (the server is the canonical wire contract):
 - Sync RPC under `/v1/` — `status`, `check`, `lint`, `init`, wiki page list/read, doc search, chunk fetch, wisdom list/approve/reject.
 - Async tasks under `/v1/{ingest,synth,distill,eval}` — submit returns `task_id`; `GET /v1/tasks/{id}/events` streams NDJSON progress; `/result` and `/cancel` complete the lifecycle.
-- Streaming retrieve — `POST /v1/retrieve` returns NDJSON: `retrieve_started → retrieval_done → final{succeeded|failed|cancelled}`. The final event payload carries ranked chunks (with full text) plus applicable wisdom refs. **No LLM tokens stream from the server** — synthesis is the agent's job.
+- Streaming retrieve — `POST /v1/retrieve` returns NDJSON: `retrieve_started → retrieval_done → final{succeeded|failed|cancelled}`. The final event payload carries ranked chunks (with full text) plus page refs. **No LLM tokens stream from the server** — synthesis is the agent's job. Applicable-wisdom surfacing lands in PR-5 via a separate `GET /v1/wisdom/applicable?q=...` endpoint, not on the retrieve payload.
 - Sources import — `POST /v1/import` accepts a manifest + tar.gz (multipart upload at the transport layer), validates sha256, stages atomically, then commits per-package into `<base>/sources/` before ingest reads from disk.
 
 ## Phasing

@@ -32,21 +32,18 @@ from typing import Any, Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-# Metric keys accepted under ``thresholds:``. Mirrors what runner.py computes.
-# nDCG@10 and Recall@100 are added for public-benchmark calibration (BEIR /
-# CMTEB report nDCG@10 and Recall@100 as defaults); the dogfood mvp dataset
-# does not have to set them. K-layer (synth) metrics use the
-# ``synth/<metric>`` namespace; ``duplicate_ratio_max`` carries the ``_max``
-# suffix to signal that lower is better (reverse-direction threshold).
-SUPPORTED_METRICS = frozenset(
+# Retrieval metrics — gated by ``run_eval``. ``ndcg_at_10`` / ``recall_at_100``
+# are added for public-benchmark calibration (BEIR / CMTEB report these as
+# defaults); the dogfood mvp dataset does not have to set them.
+_RETRIEVAL_METRICS = frozenset(
+    {"hit_at_3", "hit_at_10", "mrr", "ndcg_at_10", "recall_at_100"}
+)
+# K-layer (synth) metrics — gated by ``run_synth_eval``. Threshold keys
+# MUST be namespaced (``synth/atomicity_score``); the bare form is rejected
+# at load time so a typo can't bypass the gate. ``duplicate_ratio_max``
+# carries the ``_max`` suffix to signal lower-is-better (reverse-direction).
+_SYNTH_METRICS = frozenset(
     {
-        # Retrieval (unchanged)
-        "hit_at_3",
-        "hit_at_10",
-        "mrr",
-        "ndcg_at_10",
-        "recall_at_100",
-        # K-layer (synth) — six hard-gate metrics + one informational
         "fact_grounding_ratio",
         "atomicity_score",
         "duplicate_ratio_max",
@@ -56,6 +53,7 @@ SUPPORTED_METRICS = frozenset(
         "page_density",
     }
 )
+SUPPORTED_METRICS = _RETRIEVAL_METRICS | _SYNTH_METRICS
 
 # Granularity / scoring views the runner can score. ``doc`` is always
 # available; ``chunk`` and ``asset`` require ``targets.yaml`` + queries
@@ -574,11 +572,20 @@ def _load_targets(path: Path) -> TargetsSpec:
 def _parse_thresholds(raw: Mapping[str, Any]) -> dict[str, float]:
     """Parse threshold dict; supports plain and ``<view>/<metric>`` keys.
 
-    Plain keys (``hit_at_3``) gate on the canonical doc view (back-compat).
-    Namespaced keys (``chunk/hit_at_3``, ``asset/hit_at_10``) gate on the
-    corresponding granularity view; the runner mirrors the canonical doc
-    view's plain key for both ``hit_at_3`` and ``doc/hit_at_3`` so existing
-    dataset.yaml files keep gating without modification.
+    Plain retrieval keys (``hit_at_3``) gate on the canonical doc view
+    (back-compat). Namespaced keys (``chunk/hit_at_3``, ``asset/hit_at_10``)
+    gate on the corresponding granularity view; the runner mirrors the
+    canonical doc view's plain key for both ``hit_at_3`` and
+    ``doc/hit_at_3`` so existing dataset.yaml files keep gating without
+    modification.
+
+    K-layer metrics MUST use the ``synth/<metric>`` namespace; bare
+    synth metric names and retrieval metrics under ``synth/`` are both
+    rejected here so the load is the single source of "which family
+    this gate belongs to". Otherwise ``run_synth_eval`` would silently
+    drop bare synth thresholds (its filter only keeps ``synth/*``) and
+    ``check_thresholds`` would record a never-computable miss for keys
+    like ``synth/hit_at_3``.
     """
     out: dict[str, float] = {}
     for raw_key, value in raw.items():
@@ -590,18 +597,28 @@ def _parse_thresholds(raw: Mapping[str, Any]) -> dict[str, float]:
                     f"unknown threshold view {view!r} in key {key!r}; "
                     f"supported: {sorted(SUPPORTED_VIEWS)}"
                 )
-            if metric not in SUPPORTED_METRICS:
+            if view == "synth" and metric not in _SYNTH_METRICS:
                 raise DatasetError(
-                    f"unknown threshold metric {metric!r} in key {key!r}; "
-                    f"supported: {sorted(SUPPORTED_METRICS)}"
+                    f"threshold {key!r}: {metric!r} is not a synth metric; "
+                    f"available synth metrics: {sorted(_SYNTH_METRICS)}"
                 )
-        else:
-            if key not in SUPPORTED_METRICS:
+            if view != "synth" and metric not in _RETRIEVAL_METRICS:
                 raise DatasetError(
-                    f"unknown threshold key {key!r}; supported: "
-                    f"{sorted(SUPPORTED_METRICS)} or "
-                    f"<view>/<metric> with view in {sorted(SUPPORTED_VIEWS)}"
+                    f"threshold {key!r}: {metric!r} is not a retrieval "
+                    f"metric (the {view!r} view only gates retrieval); "
+                    f"K-layer thresholds must use the 'synth/' prefix"
                 )
+        elif key in _SYNTH_METRICS:
+            raise DatasetError(
+                f"threshold {key!r}: K-layer metrics must use the "
+                f"'synth/' prefix (got bare {key!r}, expected 'synth/{key}')"
+            )
+        elif key not in _RETRIEVAL_METRICS:
+            raise DatasetError(
+                f"unknown threshold key {key!r}; supported: "
+                f"{sorted(SUPPORTED_METRICS)} or "
+                f"<view>/<metric> with view in {sorted(SUPPORTED_VIEWS)}"
+            )
         try:
             out[key] = float(value)
         except (TypeError, ValueError) as e:

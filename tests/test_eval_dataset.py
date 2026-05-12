@@ -331,7 +331,40 @@ def test_thresholds_namespaced_view_unknown_metric_raises(tmp_path: Path) -> Non
     (ds / "dataset.yaml").write_text(
         "name: toy\nthresholds:\n  chunk/bogus_metric: 0.5\n", encoding="utf-8"
     )
-    with pytest.raises(DatasetError, match="threshold metric"):
+    with pytest.raises(DatasetError, match="not a retrieval metric"):
+        load_dataset(ds)
+
+
+def test_thresholds_synth_view_with_retrieval_metric_raises(tmp_path: Path) -> None:
+    """``synth/hit_at_3`` is rejected — retrieval metrics under the synth
+    view would silently become a never-computable miss."""
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  synth/hit_at_3: 0.5\n", encoding="utf-8"
+    )
+    with pytest.raises(DatasetError, match="not a synth metric"):
+        load_dataset(ds)
+
+
+def test_thresholds_bare_synth_metric_raises(tmp_path: Path) -> None:
+    """``atomicity_score`` (bare) is rejected — without the ``synth/``
+    prefix the synth runner's threshold filter would silently drop it."""
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  atomicity_score: 0.9\n", encoding="utf-8"
+    )
+    with pytest.raises(DatasetError, match="must use the 'synth/' prefix"):
+        load_dataset(ds)
+
+
+def test_thresholds_retrieval_view_with_synth_metric_raises(tmp_path: Path) -> None:
+    """``chunk/atomicity_score`` is rejected — synth metrics belong only
+    to the ``synth`` view."""
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  chunk/atomicity_score: 0.9\n", encoding="utf-8"
+    )
+    with pytest.raises(DatasetError, match="not a retrieval metric"):
         load_dataset(ds)
 
 
@@ -506,7 +539,7 @@ def test_load_dataset_rejects_unknown_synth_metric(tmp_path: Path) -> None:
         "  synth/bogus_metric: 0.5\n",
         encoding="utf-8",
     )
-    with pytest.raises(DatasetError, match="threshold metric"):
+    with pytest.raises(DatasetError, match="not a synth metric"):
         load_dataset(ds)
 
 

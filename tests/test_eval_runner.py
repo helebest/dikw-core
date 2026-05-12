@@ -1007,15 +1007,16 @@ def test_check_thresholds_max_direction_fail() -> None:
     assert results[0].passed is False
 
 
-def test_check_thresholds_missing_metric_fails_with_nan() -> None:
-    import math
-
+def test_check_thresholds_missing_metric_marks_observed_none() -> None:
+    """Missing observation must use ``None``, not ``NaN`` — NaN serialises
+    as the literal token ``NaN`` in JSON, which strict parsers reject
+    and Postgres JSONB refuses to store."""
     results = check_thresholds(
         metrics={},
         thresholds={'synth/atomicity_score': 0.90},
     )
     r = results[0]
-    assert math.isnan(r.observed)
+    assert r.observed is None
     assert r.passed is False
 
 

@@ -170,6 +170,83 @@ async def test_run_synth_eval_rejects_non_synth_dataset(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_synth_eval_without_synth_thresholds_is_ungated(
+    tmp_path: Path,
+) -> None:
+    """A dataset that declares synth mode but no synth thresholds runs
+    as informational — ``gated=False`` so aggregate callers can tell
+    "no checks declared" apart from "all checks passed". ``passed``
+    stays ``True`` (vacuously) for back-compat with renderers that
+    treat it as a bool, but ``gated`` is the load-bearing signal."""
+    ds = tmp_path / "ungated"
+    (ds / "corpus").mkdir(parents=True)
+    (ds / "corpus" / "alpha.md").write_text(
+        "# Alpha\n\nAlpha content.\n", encoding="utf-8"
+    )
+    (ds / "dataset.yaml").write_text(
+        "name: ungated\n"
+        "modes: [synth]\n"
+        "synth:\n"
+        "  page_types: [concept]\n",
+        encoding="utf-8",
+    )
+    (ds / "queries.yaml").write_text(
+        "queries:\n  - q: a\n    expect_any: [alpha]\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    llm = FakeLLM(response_text=_SYNTH_PAGE_RESPONSE)
+    report = await run_synth_eval(spec, llm=llm, embedder=FakeEmbeddings())
+    assert report.threshold_results == []
+    assert report.gated is False
+    assert report.passed is True  # vacuous all([]) — guarded by ``gated``
+
+
+@pytest.mark.asyncio
+async def test_run_synth_eval_missing_metric_serialises_to_null(
+    tmp_path: Path,
+) -> None:
+    """A threshold whose metric was not computed (e.g. ``expected_coverage``
+    declared without an ``expected.yaml``) lands as ``observed=None`` so
+    ``model_dump(mode="json")`` emits ``null`` instead of the invalid
+    JSON token ``NaN`` (which Postgres JSONB and strict parsers reject)."""
+    ds = tmp_path / "missing"
+    (ds / "corpus").mkdir(parents=True)
+    (ds / "corpus" / "alpha.md").write_text(
+        "# Alpha\n\nAlpha content.\n", encoding="utf-8"
+    )
+    (ds / "dataset.yaml").write_text(
+        "name: missing\n"
+        "modes: [synth]\n"
+        "thresholds:\n"
+        # expected_coverage requires expected.yaml; we don't provide
+        # one, so the metric is never computed → check_thresholds
+        # records a miss with observed=None.
+        "  synth/expected_coverage: 0.5\n"
+        "synth:\n"
+        "  page_types: [concept]\n",
+        encoding="utf-8",
+    )
+    (ds / "queries.yaml").write_text(
+        "queries:\n  - q: a\n    expect_any: [alpha]\n",
+        encoding="utf-8",
+    )
+    spec = load_dataset(ds)
+    llm = FakeLLM(response_text=_SYNTH_PAGE_RESPONSE)
+    report = await run_synth_eval(spec, llm=llm, embedder=FakeEmbeddings())
+    miss = next(
+        r for r in report.threshold_results
+        if r.name == "synth/expected_coverage"
+    )
+    assert miss.observed is None
+    assert miss.passed is False
+    # Round-trip through JSON-mode dump must not crash on NaN.
+    import json
+    payload = json.dumps(report.model_dump(mode="json"))
+    assert '"observed":null' in payload or '"observed": null' in payload
+
+
+@pytest.mark.asyncio
 async def test_run_synth_eval_ignores_retrieval_thresholds(
     tmp_path: Path,
 ) -> None:

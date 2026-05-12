@@ -262,7 +262,14 @@ def make_eval_runner(
                         ) from e
                     dumped = synth_rep.model_dump(mode="json")
                     dumped["passed"] = synth_rep.passed
-                    all_passed = all_passed and synth_rep.passed
+                    dumped["gated"] = synth_rep.gated
+                    dumped["mode"] = "synth"
+                    # An ungated synth report (no thresholds declared) is
+                    # informational — don't fold its vacuous ``passed=True``
+                    # into the aggregate so it can't mask a real failure
+                    # elsewhere.
+                    if synth_rep.gated:
+                        all_passed = all_passed and synth_rep.passed
                     reports.append(dumped)
 
         _ = wiki_root  # eval owns its own throwaway wiki tree
@@ -274,6 +281,19 @@ def make_eval_runner(
                     f"selected dataset; nothing ran",
                     code="eval_mode_unavailable",
                 )
+        if not reports:
+            # Synth-only dataset with omitted ``eval_modes`` (defaults
+            # to retrieval-only, which the dataset doesn't declare) is
+            # the canonical case — surface it instead of returning a
+            # vacuous ``passed=True`` over an empty datasets list.
+            declared = sorted({m for spec in specs for m in spec.modes})
+            raise BadRequest(
+                f"no eval modes selected for any dataset (selected "
+                f"datasets declare {declared}; "
+                f"omitted ``eval_modes`` defaults to retrieval-only — "
+                f"pass --eval synth to opt in)",
+                code="eval_mode_unavailable",
+            )
         # Single-report runs keep the legacy result shape so existing
         # client renderers (``render_eval_report``) Just Work; everything
         # else returns a ``{datasets: [...], passed: bool}`` envelope.

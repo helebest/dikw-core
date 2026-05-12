@@ -30,7 +30,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import shutil
 import tempfile
@@ -269,20 +268,20 @@ class EvalReport(BaseModel):
 
     @property
     def passed(self) -> bool:
-        """True iff every threshold the runner observed is met.
+        """True iff every retrieval-family threshold met its floor.
 
-        Thresholds whose metric wasn't computed (e.g. ``synth/*`` keys
-        on a retrieval-only run) are skipped — those gates belong to
-        the corresponding ``run_synth_eval`` call, not this one. Typos
-        in metric names get caught at ``load_dataset`` time via
-        ``SUPPORTED_METRICS``, so a ``None`` here is always "wrong
-        family", never "user wrote it wrong".
+        Synth thresholds (``synth/*``) are gated by ``run_synth_eval``,
+        not here — drop them before checking. Any *remaining* missing
+        observation is a real failure (e.g. ``chunk/hit_at_3`` declared
+        but no chunk-positive queries opted in via ``expect_chunk_any``);
+        previously this branch ``continue``-d which silently passed
+        misconfigured retrieval gates.
         """
         for key, floor in self.thresholds.items():
-            value = self.metrics.get(key)
-            if value is None:
+            if key.startswith("synth/"):
                 continue
-            if value < floor:
+            value = self.metrics.get(key)
+            if value is None or value < floor:
                 return False
         return True
 
@@ -1012,7 +1011,7 @@ def _threshold_direction(metric_name: str) -> Literal["min", "max"]:
 @dataclass(frozen=True)
 class ThresholdResult:
     name: str
-    observed: float
+    observed: float | None
     threshold: float
     direction: Literal["min", "max"]
     passed: bool
@@ -1023,15 +1022,18 @@ def check_thresholds(
 ) -> list[ThresholdResult]:
     """Direction-aware threshold comparison.
 
-    Missing observation → ``passed=False`` with ``NaN`` for ``observed``
-    so renderers can surface the gap without crashing on ``None``.
+    Missing observation → ``passed=False`` with ``observed=None``.
+    Previously we used ``math.nan``, which serialises as the JSON
+    token ``NaN`` (invalid JSON; rejected by strict parsers and by
+    Postgres JSONB) — ``None`` rides through ``json.dumps`` as
+    ``null`` and renderers handle the missing case explicitly.
     """
     out: list[ThresholdResult] = []
     for name, thr in thresholds.items():
         direction = _threshold_direction(name)
         value = metrics.get(name)
         if value is None:
-            out.append(ThresholdResult(name, math.nan, thr, direction, False))
+            out.append(ThresholdResult(name, None, thr, direction, False))
             continue
         passed = value <= thr if direction == "max" else value >= thr
         out.append(ThresholdResult(name, value, thr, direction, passed))
@@ -1053,6 +1055,18 @@ class SynthEvalReport(BaseModel):
     informational: dict[str, float] = Field(default_factory=dict)
     judge_summary: JudgeSummary | None = None
     warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def gated(self) -> bool:
+        """True when the dataset declared at least one synth threshold.
+
+        An ungated report (``threshold_results == []``) is informational
+        — ``passed`` is vacuously ``True`` because ``all([])`` is ``True``,
+        not because anything was checked. Aggregate callers use
+        ``gated`` to decide whether to fold this report into an
+        overall pass/fail.
+        """
+        return bool(self.threshold_results)
 
     @property
     def passed(self) -> bool:

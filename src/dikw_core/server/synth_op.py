@@ -108,8 +108,12 @@ def make_eval_runner(
     dataset: str | None,
     mode: str,
     cache_mode: str,
+    eval_modes: list[str] | None = None,
+    judge: bool = False,
+    judge_sample: int | None = None,
 ) -> Callable[[ProgressReporter], Awaitable[dict[str, Any]]]:
-    """Build a ``TaskRunner`` that drives ``eval.run_eval`` for one task.
+    """Build a ``TaskRunner`` that drives ``eval.run_eval`` (retrieval)
+    and/or ``eval.run_synth_eval`` (K-layer) for one task.
 
     The runner builds an embedder + (optional) multimodal embedder from
     the server's wiki cfg so eval scores against the same vector space
@@ -117,6 +121,15 @@ def make_eval_runner(
     under the packaged datasets root), an explicit path, or ``None`` to
     run every packaged dataset back-to-back — preserving the
     ``dikw eval`` (no-arg) workflow that the in-process CLI shipped with.
+
+    ``eval_modes`` (optional) restricts which families run per dataset.
+    ``None`` keeps the legacy contract — retrieval-only, even on
+    datasets that declare ``synth`` (synth opt-in is explicit). An
+    explicit list like ``["synth"]`` runs that family on every dataset
+    that declares it; if no selected dataset declares any requested
+    mode, the run fails loud (``eval_mode_unavailable``) rather than
+    returning a vacuous ``passed=True``. Synth eval also drives the
+    LLM judge layer when ``judge=True``.
     """
 
     async def _runner(reporter: ProgressReporter) -> dict[str, Any]:
@@ -128,8 +141,8 @@ def make_eval_runner(
             iter_packaged_datasets,
             load_dataset,
         )
-        from ..eval.runner import EvalError, run_eval
-        from ..providers import build_multimodal_embedder
+        from ..eval.runner import EvalError, run_eval, run_synth_eval
+        from ..providers import build_llm, build_multimodal_embedder
 
         cfg = load_config(wiki_root / CONFIG_FILENAME)
 
@@ -179,40 +192,137 @@ def make_eval_runner(
                     f"eval proceeds with text-only: {e}",
                 )
 
+        # LLM is only needed when synth mode is in play — lazy-built per
+        # request, cached for the run so we don't pay setup twice on the
+        # multi-dataset path.
+        _llm = None
+
+        def _get_llm() -> Any:
+            nonlocal _llm
+            if _llm is None:
+                try:
+                    _llm = build_llm(cfg.provider, wiki_base=wiki_root)
+                except Exception as e:
+                    raise BadRequest(
+                        f"could not build LLM for synth eval: {e}",
+                        code="llm_unavailable",
+                    ) from e
+            return _llm
+
         reports: list[dict[str, Any]] = []
         all_passed = True
+        modes_actually_run: set[str] = set()
         for spec in specs:
-            try:
-                report = await run_eval(
-                    spec,
-                    embedder=embedder,
-                    provider_config=cfg.provider,
-                    retrieval_config=cfg.retrieval,
-                    assets_config=cfg.assets,
-                    multimodal_embedder=multimodal_embedder,
-                    mode=mode,  # type: ignore[arg-type]
-                    cache_mode=cache_mode,  # type: ignore[arg-type]
-                    reporter=reporter,
-                )
-            except EvalError as e:
-                raise BadRequest(
-                    f"eval failed on dataset {spec.name!r}: {e}",
-                    code="eval_error",
-                ) from e
-            dumped = report.model_dump(mode="json")
-            dumped["passed"] = report.passed
-            all_passed = all_passed and report.passed
-            reports.append(dumped)
+            modes_to_run = _resolve_eval_modes(spec, eval_modes)
+            for em in modes_to_run:
+                modes_actually_run.add(em)
+                if em == "retrieval":
+                    try:
+                        report = await run_eval(
+                            spec,
+                            embedder=embedder,
+                            provider_config=cfg.provider,
+                            retrieval_config=cfg.retrieval,
+                            assets_config=cfg.assets,
+                            multimodal_embedder=multimodal_embedder,
+                            mode=mode,  # type: ignore[arg-type]
+                            cache_mode=cache_mode,  # type: ignore[arg-type]
+                            reporter=reporter,
+                        )
+                    except EvalError as e:
+                        raise BadRequest(
+                            f"retrieval eval failed on dataset "
+                            f"{spec.name!r}: {e}",
+                            code="eval_error",
+                        ) from e
+                    dumped = report.model_dump(mode="json")
+                    dumped["passed"] = report.passed
+                    # ``mode: retrieval`` marks which family produced this
+                    # row so the client renderer can dispatch.
+                    dumped["mode"] = "retrieval"
+                    all_passed = all_passed and report.passed
+                    reports.append(dumped)
+                else:  # em == "synth"
+                    try:
+                        synth_rep = await run_synth_eval(
+                            spec,
+                            llm=_get_llm(),
+                            embedder=embedder,
+                            provider_config=cfg.provider,
+                            retrieval_config=cfg.retrieval,
+                            judge=judge,
+                            judge_sample=judge_sample,
+                            reporter=reporter,
+                        )
+                    except EvalError as e:
+                        raise BadRequest(
+                            f"synth eval failed on dataset "
+                            f"{spec.name!r}: {e}",
+                            code="eval_error",
+                        ) from e
+                    dumped = synth_rep.model_dump(mode="json")
+                    dumped["passed"] = synth_rep.passed
+                    dumped["gated"] = synth_rep.gated
+                    dumped["mode"] = "synth"
+                    # An ungated synth report (no thresholds declared) is
+                    # informational — don't fold its vacuous ``passed=True``
+                    # into the aggregate so it can't mask a real failure
+                    # elsewhere.
+                    if synth_rep.gated:
+                        all_passed = all_passed and synth_rep.passed
+                    reports.append(dumped)
 
         _ = wiki_root  # eval owns its own throwaway wiki tree
-        # Single-dataset runs keep the legacy result shape so existing
-        # client renderers (``render_eval_report``) Just Work; multi-
-        # dataset runs return a ``{datasets: [...], passed: bool}`` envelope.
-        if dataset is not None:
+        if eval_modes is not None:
+            missing = [m for m in eval_modes if m not in modes_actually_run]
+            if missing:
+                raise BadRequest(
+                    f"requested eval modes {missing} not declared by any "
+                    f"selected dataset; nothing ran",
+                    code="eval_mode_unavailable",
+                )
+        if not reports:
+            # Synth-only dataset with omitted ``eval_modes`` (defaults
+            # to retrieval-only, which the dataset doesn't declare) is
+            # the canonical case — surface it instead of returning a
+            # vacuous ``passed=True`` over an empty datasets list.
+            declared = sorted({m for spec in specs for m in spec.modes})
+            raise BadRequest(
+                f"no eval modes selected for any dataset (selected "
+                f"datasets declare {declared}; "
+                f"omitted ``eval_modes`` defaults to retrieval-only — "
+                f"pass --eval synth to opt in)",
+                code="eval_mode_unavailable",
+            )
+        # Single-report runs keep the legacy result shape so existing
+        # client renderers (``render_eval_report``) Just Work; everything
+        # else returns a ``{datasets: [...], passed: bool}`` envelope.
+        if dataset is not None and len(reports) == 1:
             return reports[0]
         return {"datasets": reports, "passed": all_passed}
 
     return _runner
+
+
+def _resolve_eval_modes(
+    spec: Any, requested: list[str] | None
+) -> list[str]:
+    """Pick which eval modes to run for ``spec``.
+
+    ``requested is None`` → retrieval-only (back-compat for legacy
+    ``/v1/eval`` bodies that pre-date ``eval_modes``). A dataset that
+    declares ``synth`` still needs an explicit ``--eval synth`` opt-in;
+    otherwise a default-shape request would silently invoke LLM synth
+    and change cost / failure semantics.
+
+    Explicit ``requested`` returns the intersection with ``spec.modes``;
+    empty intersection is left for the caller to surface (multi-dataset
+    runs skip silently per-spec, then fail at the end if some requested
+    mode never ran on any dataset)."""
+    declared = list(spec.modes)
+    if requested is None:
+        return ["retrieval"] if "retrieval" in declared else []
+    return [m for m in requested if m in declared]
 
 
 __all__ = [

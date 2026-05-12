@@ -280,6 +280,11 @@ class CountingEmbedder:
 class FakeLLM:
     """Captures the last call and returns a scripted or default response.
 
+    ``responses`` (optional) is consumed in order — call N returns
+    ``responses[N]`` if present, otherwise the default ``response_text``.
+    Tests that drive multi-call paths (synth fan-out, judge per-page)
+    use this to script distinct outputs per call without mocking.
+
     ``stream_chunks`` (optional) lets a test exercise the streaming path:
     when set, ``complete_stream`` yields one ``token`` event per chunk
     followed by a ``done`` event whose ``text`` is the joined chunks.
@@ -295,11 +300,13 @@ class FakeLLM:
     """
 
     response_text: str = "STUB: wired up."
+    responses: list[str] | None = None
     stream_chunks: list[str] | None = None
     reasoning_chunks: list[str] | None = None
     last_system: str | None = field(default=None, init=False)
     last_user: str | None = field(default=None, init=False)
     last_max_tokens: int | None = field(default=None, init=False)
+    call_count: int = field(default=0, init=False)
 
     async def complete(
         self,
@@ -315,6 +322,12 @@ class FakeLLM:
         self.last_system = system
         self.last_user = user
         self.last_max_tokens = max_tokens
+        idx = self.call_count
+        self.call_count += 1
+        if self.responses is not None and idx < len(self.responses):
+            return LLMResponse(
+                text=self.responses[idx], finish_reason="end_turn"
+            )
         return LLMResponse(text=self.response_text, finish_reason="end_turn")
 
     def complete_stream(

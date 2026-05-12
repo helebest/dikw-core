@@ -11,7 +11,14 @@ from dikw_core.eval.dataset import (
     Query,
     load_dataset,
 )
-from dikw_core.eval.runner import EvalError, EvalReport, run_eval
+from dikw_core.eval.runner import (
+    EvalError,
+    EvalReport,
+    SynthEvalError,
+    ThresholdResult,
+    check_thresholds,
+    run_eval,
+)
 
 
 def _write_dataset(
@@ -956,3 +963,75 @@ async def test_eval_cache_mid_build_crash_leaves_partial_dir(
     # .partial/ should still be there for diagnostics.
     partial_dirs = list((cache_root / "toy").glob("fake__*.partial"))
     assert len(partial_dirs) == 1
+
+# ---- check_thresholds direction-aware ---------------------------------------
+
+
+def test_check_thresholds_min_direction_pass() -> None:
+    results = check_thresholds(
+        metrics={'synth/fact_grounding_ratio': 0.85},
+        thresholds={'synth/fact_grounding_ratio': 0.80},
+    )
+    assert len(results) == 1
+    r = results[0]
+    assert isinstance(r, ThresholdResult)
+    assert r.direction == 'min'
+    assert r.passed is True
+
+
+def test_check_thresholds_min_direction_fail() -> None:
+    results = check_thresholds(
+        metrics={'synth/fact_grounding_ratio': 0.75},
+        thresholds={'synth/fact_grounding_ratio': 0.80},
+    )
+    assert results[0].direction == 'min'
+    assert results[0].passed is False
+
+
+def test_check_thresholds_max_direction_pass() -> None:
+    # _max suffix → lower is better
+    results = check_thresholds(
+        metrics={'synth/duplicate_ratio_max': 0.03},
+        thresholds={'synth/duplicate_ratio_max': 0.05},
+    )
+    assert results[0].direction == 'max'
+    assert results[0].passed is True
+
+
+def test_check_thresholds_max_direction_fail() -> None:
+    results = check_thresholds(
+        metrics={'synth/duplicate_ratio_max': 0.10},
+        thresholds={'synth/duplicate_ratio_max': 0.05},
+    )
+    assert results[0].direction == 'max'
+    assert results[0].passed is False
+
+
+def test_check_thresholds_missing_metric_marks_observed_none() -> None:
+    """Missing observation must use ``None``, not ``NaN`` — NaN serialises
+    as the literal token ``NaN`` in JSON, which strict parsers reject
+    and Postgres JSONB refuses to store."""
+    results = check_thresholds(
+        metrics={},
+        thresholds={'synth/atomicity_score': 0.90},
+    )
+    r = results[0]
+    assert r.observed is None
+    assert r.passed is False
+
+
+def test_check_thresholds_namespaced_max_suffix_still_classified() -> None:
+    # The <view>/<metric> prefix doesn't change direction parsing.
+    results = check_thresholds(
+        metrics={'doc/something_max': 1.5},
+        thresholds={'doc/something_max': 1.0},
+    )
+    assert results[0].direction == 'max'
+    assert results[0].passed is False
+
+
+def test_synth_eval_error_is_eval_error_subclass() -> None:
+    # CLI/server can catch the broader EvalError; K-layer-specific
+    # handlers catch SynthEvalError.
+    assert issubclass(SynthEvalError, EvalError)
+

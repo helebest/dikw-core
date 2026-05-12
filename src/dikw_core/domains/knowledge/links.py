@@ -117,6 +117,15 @@ def _normalize_for_match(s: str) -> str:
     return _stem_plural(base)
 
 
+# Public re-exports of K-layer text-normalize and wikilink primitives.
+# The underscored names remain the canonical implementation; these aliases
+# document that other in-tree modules MAY import them (rather than each
+# re-implementing the rules, which would drift).
+normalize_base = _normalize_base
+normalize_for_match = _normalize_for_match
+WIKILINK_RE = _WIKILINK
+
+
 def build_fuzzy_index(title_to_path: dict[str, str]) -> dict[str, list[str]]:
     """Precompute the normalize-keyed lookup ``resolve_links`` needs.
 

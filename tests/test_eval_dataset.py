@@ -331,7 +331,57 @@ def test_thresholds_namespaced_view_unknown_metric_raises(tmp_path: Path) -> Non
     (ds / "dataset.yaml").write_text(
         "name: toy\nthresholds:\n  chunk/bogus_metric: 0.5\n", encoding="utf-8"
     )
-    with pytest.raises(DatasetError, match="threshold metric"):
+    with pytest.raises(DatasetError, match="not a retrieval metric"):
+        load_dataset(ds)
+
+
+def test_thresholds_synth_view_with_retrieval_metric_raises(tmp_path: Path) -> None:
+    """``synth/hit_at_3`` is rejected — retrieval metrics under the synth
+    view would silently become a never-computable miss."""
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  synth/hit_at_3: 0.5\n", encoding="utf-8"
+    )
+    with pytest.raises(DatasetError, match="not a synth metric"):
+        load_dataset(ds)
+
+
+def test_thresholds_bare_synth_metric_raises(tmp_path: Path) -> None:
+    """``atomicity_score`` (bare) is rejected — without the ``synth/``
+    prefix the synth runner's threshold filter would silently drop it."""
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  atomicity_score: 0.9\n", encoding="utf-8"
+    )
+    with pytest.raises(DatasetError, match="must use the 'synth/' prefix"):
+        load_dataset(ds)
+
+
+def test_thresholds_retrieval_view_with_synth_metric_raises(tmp_path: Path) -> None:
+    """``chunk/atomicity_score`` is rejected — synth metrics belong only
+    to the ``synth`` view."""
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  chunk/atomicity_score: 0.9\n", encoding="utf-8"
+    )
+    with pytest.raises(DatasetError, match="not a retrieval metric"):
+        load_dataset(ds)
+
+
+def test_thresholds_synth_page_density_rejected_as_informational(
+    tmp_path: Path,
+) -> None:
+    """``synth/page_density`` is informational only — the runner never
+    fills it into ``SynthEvalReport.metrics`` so any threshold for it
+    would always fail with ``observed=None``. Reject at load with a
+    clear "informational only" message rather than accepting a gate
+    the runner can't satisfy."""
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  synth/page_density: 0.5\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="informational only"):
         load_dataset(ds)
 
 
@@ -378,3 +428,220 @@ def test_query_expect_asset_any_unknown_target_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(DatasetError, match="unknown asset targets"):
         load_dataset(ds)
+
+
+# ---- K-layer (synth) mode contract -----------------------------------------
+
+
+def _write_synth_dataset(root: Path, *, name: str = "synth-toy") -> Path:
+    """Dataset declaring synth mode + expected.yaml + judge section."""
+    ds = root / name
+    (ds / "corpus").mkdir(parents=True, exist_ok=True)
+    (ds / "corpus" / "src1.md").write_text(
+        "# Src One\n\nbody one.\n", encoding="utf-8"
+    )
+    (ds / "corpus" / "src2.md").write_text(
+        "# Src Two\n\nbody two.\n", encoding="utf-8"
+    )
+    (ds / "dataset.yaml").write_text(
+        "name: synth-toy\n"
+        "modes: [retrieval, synth]\n"
+        "thresholds:\n"
+        "  hit_at_3: 0.5\n"
+        "  synth/fact_grounding_ratio: 0.8\n"
+        "  synth/atomicity_score: 0.9\n"
+        "  synth/duplicate_ratio_max: 0.05\n"
+        "  synth/wikilink_resolved_ratio: 0.85\n"
+        "  synth/expected_coverage: 0.8\n"
+        "  synth/language_fidelity: 0.95\n"
+        "synth:\n"
+        "  grounding_threshold: 0.7\n"
+        "  duplicate_threshold: 0.9\n"
+        "  page_types: [entity, concept]\n"
+        "judge:\n"
+        "  model: claude-sonnet\n",
+        encoding="utf-8",
+    )
+    (ds / "queries.yaml").write_text(
+        "queries:\n"
+        "  - q: about src one\n"
+        "    expect_any: [src1]\n",
+        encoding="utf-8",
+    )
+    (ds / "expected.yaml").write_text(
+        "sources:\n"
+        "  - path: src1.md\n"
+        "    expected_titles: [Src One, Topic Alpha]\n"
+        "    expected_keywords: [keyword1]\n"
+        "  - path: src2.md\n"
+        "    expected_titles: [Src Two]\n",
+        encoding="utf-8",
+    )
+    return ds
+
+
+def test_load_dataset_default_modes_is_retrieval(tmp_path: Path) -> None:
+    """Existing retrieval-only datasets parse with modes = ['retrieval']."""
+    ds = _write_valid_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.modes == ["retrieval"]
+
+
+def test_load_dataset_explicit_modes_list(tmp_path: Path) -> None:
+    ds = _write_synth_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.modes == ["retrieval", "synth"]
+
+
+def test_load_dataset_synth_section_parsed(tmp_path: Path) -> None:
+    ds = _write_synth_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.synth.grounding_threshold == 0.7
+    assert spec.synth.duplicate_threshold == 0.9
+    assert spec.synth.page_types == ["entity", "concept"]
+
+
+def test_load_dataset_judge_section_parsed(tmp_path: Path) -> None:
+    ds = _write_synth_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.judge.model == "claude-sonnet"
+
+
+def test_load_dataset_judge_rejects_unknown_field(tmp_path: Path) -> None:
+    """``judge.provider`` was rejected post-review — a typo or stale
+    field shouldn't silently disappear with no judge override applied."""
+    ds = _write_synth_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        (ds / "dataset.yaml").read_text(encoding="utf-8").replace(
+            "judge:\n  model: claude-sonnet\n",
+            "judge:\n  provider: anthropic\n  model: claude-sonnet\n",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError):
+        load_dataset(ds)
+
+
+def test_load_dataset_synth_section_defaults(tmp_path: Path) -> None:
+    """When dataset.yaml omits synth:, defaults apply (back-compat with
+    retrieval-only datasets)."""
+    ds = _write_valid_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.synth.grounding_threshold == 0.65
+    assert spec.synth.duplicate_threshold == 0.85
+    assert spec.synth.page_types == ["entity", "concept", "note"]
+
+
+def test_load_dataset_judge_section_defaults(tmp_path: Path) -> None:
+    ds = _write_valid_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.judge.model is None
+
+
+def test_load_dataset_accepts_synth_namespaced_thresholds(tmp_path: Path) -> None:
+    ds = _write_synth_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.thresholds["synth/fact_grounding_ratio"] == 0.8
+    assert spec.thresholds["synth/duplicate_ratio_max"] == 0.05
+    assert spec.thresholds["synth/wikilink_resolved_ratio"] == 0.85
+
+
+def test_load_dataset_rejects_unknown_synth_metric(tmp_path: Path) -> None:
+    ds = _write_synth_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: synth-toy\n"
+        "modes: [retrieval, synth]\n"
+        "thresholds:\n"
+        "  hit_at_3: 0.5\n"
+        "  synth/bogus_metric: 0.5\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="not a synth metric"):
+        load_dataset(ds)
+
+
+def test_load_dataset_rejects_unknown_mode(tmp_path: Path) -> None:
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\n"
+        "modes: [retrieval, bogus]\n"
+        "thresholds:\n"
+        "  hit_at_3: 0.5\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="mode"):
+        load_dataset(ds)
+
+
+def test_load_dataset_rejects_empty_synth_page_types(tmp_path: Path) -> None:
+    ds = _write_synth_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: synth-toy\n"
+        "modes: [synth]\n"
+        "thresholds:\n"
+        "  synth/atomicity_score: 0.9\n"
+        "synth:\n"
+        "  page_types: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="page_types"):
+        load_dataset(ds)
+
+
+def test_load_dataset_rejects_synth_page_type_blank(tmp_path: Path) -> None:
+    ds = _write_synth_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: synth-toy\n"
+        "modes: [synth]\n"
+        "thresholds:\n"
+        "  synth/atomicity_score: 0.9\n"
+        "synth:\n"
+        "  page_types: ['  ', 'concept']\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="page_types"):
+        load_dataset(ds)
+
+
+def test_load_dataset_expected_yaml_missing_ok(tmp_path: Path) -> None:
+    """expected.yaml is optional; spec.expected is None when absent."""
+    ds = _write_valid_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.expected is None
+
+
+def test_load_dataset_expected_yaml_parsed(tmp_path: Path) -> None:
+    ds = _write_synth_dataset(tmp_path)
+    spec = load_dataset(ds)
+    assert spec.expected is not None
+    assert len(spec.expected.sources) == 2
+    src1 = spec.expected.sources[0]
+    assert src1.path == "src1.md"
+    assert src1.expected_titles == ["Src One", "Topic Alpha"]
+    assert src1.expected_keywords == ["keyword1"]
+    assert spec.expected.sources[1].expected_keywords == []  # default empty
+
+
+def test_load_dataset_expected_yaml_unknown_source_path_raises(
+    tmp_path: Path,
+) -> None:
+    """A typo in expected.yaml's source path must loud-fail at load time,
+    same as a typo in queries.yaml's expect_chunk_any."""
+    ds = _write_synth_dataset(tmp_path)
+    (ds / "expected.yaml").write_text(
+        "sources:\n"
+        "  - path: nonexistent.md\n"
+        "    expected_titles: [X]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="unknown source"):
+        load_dataset(ds)
+
+
+def test_load_dataset_synth_thresholds_namespaced_view_synth_accepted(
+    tmp_path: Path,
+) -> None:
+    """The new 'synth' view name is in SUPPORTED_VIEWS so thresholds parse."""
+    from dikw_core.eval.dataset import SUPPORTED_VIEWS
+
+    assert "synth" in SUPPORTED_VIEWS

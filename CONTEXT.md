@@ -27,8 +27,8 @@ _Avoid_: source (which is the file on disk before it has been indexed)
 ### Pipeline verbs
 
 **import**:
-Take markdown files **outside** the base and commit them into `<base>/sources/`. Validates frontmatter + assets, packs as multipart, server stages then atomically replaces into place. Does **not** chunk, embed, or touch the D/I layer.
-_CLI_: `dikw client import <path>` (top-level: `dikw import`)
+Take files **outside** the base and commit them into `<base>/sources/`. Markdown inputs (`.md`) pass through after frontmatter + asset validation. Non-markdown single-file inputs (`.pdf`, `.epub`, …) are first converted to md+assets by an installed **client-side converter plugin** (see [`docs/converters.md`](docs/converters.md)); without a plugin for the file's extension the input is rejected. Conversion happens in the client process — the server never loads converter dependencies. Validates frontmatter + assets, packs as multipart, server stages then atomically replaces into place. Does **not** chunk, embed, or touch the D/I layer.
+_CLI_: `dikw client import <path>` (top-level: `dikw import`); `--converter=<name>` overrides the default engine for non-md inputs.
 _HTTP_: `POST /v1/import`
 _Avoid_: upload (transport-layer term — only correct when describing the HTTP wire), add, push
 
@@ -82,3 +82,13 @@ _HTTP_: `POST /v1/retrieve` (streams NDJSON)
 - **upload** was used as the user-facing verb for the import action. Resolved: `upload` is reserved for HTTP-wire descriptions only (multipart upload, payload upload). The user-facing verb is `import`. The two are honest at different layers — the CLI speaks domain, the HTTP path speaks transport.
 - **wiki** is used both for the K-layer role and for the on-disk directory `<base>/wiki/`. Resolved: say "K layer" for the role, "wiki tree" for the files. Bare "wiki" is ambiguous.
 - **document** vs **source**: in the D layer they're nearly synonymous (one source → one document, usually), but **source** is the file on disk and **document** is the indexed row. Keep them distinct because in K + W layers the documents have no corresponding source file — they were LLM-authored.
+
+## Plugin contract
+
+**converter plugin**:
+A pypi package that turns one non-markdown file (`paper.pdf`, `book.epub`, …) into the md+assets a **source** is made of. Plugins are discovered via the `dikw.client.converters` entry-points group, run in-process inside `dikw client`, and live in the sibling [`dikw-plugins`](https://github.com/opendikw/dikw-plugins) repo — never in dikw-core. The contract (`Converter` Protocol, `convert(input_path, output_dir)` signature, output layout) is defined in [`src/dikw_core/client/converters.py`](src/dikw_core/client/converters.py) and the rationale in [`docs/adr/0001-client-side-converter-plugins.md`](docs/adr/0001-client-side-converter-plugins.md).
+_Avoid_: backend (`SourceBackend` is the engine-side D-layer parser — different concern, different layer), loader, importer (verb collision), adapter.
+
+**converter engine name**:
+The short label a plugin advertises as `Converter.name` (e.g. `marker`, `mineru`). Used to disambiguate when multiple plugins claim the same extension — via `--converter=<name>` on the CLI or `[default.converters]` in `client.toml`. Lives parallel to the package name (`dikw-converter-pdf` ships the `marker` engine).
+_Avoid_: backend name, driver, profile.

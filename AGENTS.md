@@ -44,6 +44,7 @@ fit. dikw-core is stateless; agents have the context dikw-core doesn't.
 | `POST /v1/retrieve` | retrieval-only NDJSON (chunks + page refs, no LLM call) | knowledge access — feed the chunks into your own LLM prompt |
 | `GET /v1/base/pages` | list pages registered in the base, optional `?layer=` filter | discovering page paths to read |
 | `GET /v1/base/pages/{path}` | full page body + chunk anchors aligned to the parsed coordinate space | reading a specific page after a retrieval hit lands you on it |
+| `GET /v1/base/pages/{path}/links` | K-layer link neighbours of a page — `outgoing[]` (edges from this page) + `incoming[]` (edges to this page), optional `?direction=in\|out\|both` and `?limit=N`. Every returned edge resolves to an active document (bare URLs and deactivated dsts are filtered), so you can always feed `dst_path` / `src_path` back into `/v1/base/pages/{path}` | walking the wiki graph one hop without re-parsing `[[wikilink]]` syntax |
 | `POST /v1/ingest` | ingest whatever is on disk under `<base>/sources/` (loaded there by `POST /v1/import` or by the user dropping files in) | when the user adds/edits markdown and wants the index refreshed |
 | `GET /v1/status`, `POST /v1/lint`, `POST /v1/check` | counts, lint issues, provider connectivity | sanity checks the user may ask for |
 
@@ -56,6 +57,7 @@ dikw client health                           # JSON by default
 dikw client retrieve "your question" --plain # pipe-safe final JSON (chunks + page_refs)
 dikw client pages list                       # JSON by default
 dikw client pages get sources/notes/alpha.md # JSON
+dikw client pages links wiki/Foo.md          # JSON: {outgoing, incoming}
 dikw client import ./local-sources           # pre-flights + imports md packages
 dikw client ingest                           # rendered progress; NOT pipeable
 ```
@@ -81,8 +83,15 @@ talk to `POST /v1/retrieve` over HTTP directly.
 3. If you want full pages instead of just chunks, follow the page refs
    with `GET /v1/base/pages/{path}` — that returns the parsed body plus
    anchors so you can re-locate every chunk hit inside the page body.
-4. Feed the chunks into your own LLM prompt and produce the final
-   answer client-side. dikw-core does not own the synthesis step.
+4. To expand context across the wiki graph, call
+   `GET /v1/base/pages/{path}/links` on hit pages. The response is
+   `{outgoing[{dst_path, link_type, line, anchor}], incoming[{src_doc_id,
+   src_path, link_type, line, anchor}]}` — each edge is a hop you can
+   immediately re-feed into `GET /v1/base/pages/{path}` without scanning
+   wiki bodies for `[[wikilinks]]`.
+5. Feed the chunks (and any neighbour pages you pulled) into your own
+   LLM prompt and produce the final answer client-side. dikw-core does
+   not own the synthesis step.
 
 ## Things that will trip you up
 

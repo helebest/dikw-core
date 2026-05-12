@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from dikw_core import api
 from dikw_core.cli import app
+from dikw_core.schemas import DocumentRecord, Layer, LinkRecord, LinkType
 from dikw_core.server import synth_op
 from dikw_core.server.runtime import ServerRuntime
 
@@ -285,6 +286,119 @@ def test_pages_get_unknown_exits_one(
     result = _run(["client", "pages", "get", "sources/missing.md"])
     assert result.exit_code == 1
     assert "page_not_found" in result.stdout or "404" in result.stdout
+
+
+def _seed_pages_links(rt: ServerRuntime) -> tuple[str, str, str]:
+    """Seed wiki docs ``a → b → c`` via direct engine storage writes so
+    the link-graph CLI tests don't need a real synth pass. Returns the
+    three paths for assertions."""
+    import asyncio
+
+    a_path, b_path, c_path = "wiki/a.md", "wiki/b.md", "wiki/c.md"
+
+    async def _seed() -> None:
+        cfg, _root, storage = await api._with_storage(rt.root)
+        del cfg
+        try:
+            for p in (a_path, b_path, c_path):
+                await storage.upsert_document(
+                    DocumentRecord(
+                        doc_id=api._doc_id_for(Layer.WIKI, p),
+                        path=p,
+                        hash="0" * 64,
+                        mtime=0.0,
+                        layer=Layer.WIKI,
+                        active=True,
+                    )
+                )
+            await storage.upsert_link(
+                LinkRecord(
+                    src_doc_id=api._doc_id_for(Layer.WIKI, a_path),
+                    dst_path=b_path,
+                    link_type=LinkType.WIKILINK,
+                    anchor=None,
+                    line=3,
+                )
+            )
+            await storage.upsert_link(
+                LinkRecord(
+                    src_doc_id=api._doc_id_for(Layer.WIKI, b_path),
+                    dst_path=c_path,
+                    link_type=LinkType.WIKILINK,
+                    anchor=None,
+                    line=4,
+                )
+            )
+        finally:
+            await storage.close()
+
+    asyncio.run(_seed())
+    return a_path, b_path, c_path
+
+
+def test_pages_links_default_emits_both_directions_as_json(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    """``dikw client pages links <path>`` defaults to JSON with ``both``
+    direction — the agent-friendly contract. b has one outgoing edge to
+    c and one incoming edge from a."""
+    _, rt = asgi_client
+    a_path, b_path, c_path = _seed_pages_links(rt)
+    patch_transport_factory()
+    result = _run(["client", "pages", "links", b_path])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["path"] == b_path
+    assert [e["dst_path"] for e in payload["outgoing"]] == [c_path]
+    assert [e["src_path"] for e in payload["incoming"]] == [a_path]
+
+
+def test_pages_links_direction_out(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    _, rt = asgi_client
+    _, b_path, _ = _seed_pages_links(rt)
+    patch_transport_factory()
+    result = _run(["client", "pages", "links", b_path, "--direction", "out"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["outgoing"] and payload["incoming"] == []
+
+
+def test_pages_links_table_mode(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    _, rt = asgi_client
+    _, b_path, _ = _seed_pages_links(rt)
+    patch_transport_factory()
+    result = _run(["client", "pages", "links", b_path, "--format", "table"])
+    assert result.exit_code == 0, result.stdout
+    # Table header columns surface in stdout text.
+    assert "outgoing" in result.stdout
+    assert "incoming" in result.stdout
+
+
+def test_pages_links_unknown_path_exits_one(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    patch_transport_factory()
+    result = _run(["client", "pages", "links", "wiki/missing.md"])
+    assert result.exit_code == 1
+    assert "page_not_found" in result.stdout or "404" in result.stdout
+
+
+def test_pages_links_rejects_invalid_format(
+    asgi_client: tuple[Any, ServerRuntime],
+    patch_transport_factory: Callable[[], None],
+) -> None:
+    patch_transport_factory()
+    result = _run(["client", "pages", "links", "wiki/a.md", "--format", "csv"])
+    assert result.exit_code == 2
+    assert "must be 'json' or 'table'" in result.stdout
 
 
 def test_review_list_empty_on_fresh_wiki(

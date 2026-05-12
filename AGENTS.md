@@ -49,22 +49,24 @@ fit. dikw-core is stateless; agents have the context dikw-core doesn't.
 
 CLI equivalents — all `dikw client` commands default to JSON output
 suitable for piping into `jq` or an agent loop. Human-readable rendering
-requires opting in via `--format table` or `--pretty`:
+requires opting in via `--format table`:
 
 ```
 dikw client health                           # JSON by default
-dikw client retrieve "your question" --plain # raw NDJSON stream; pipe-safe
+dikw client retrieve "your question" --plain # pipe-safe final JSON (chunks + page_refs)
 dikw client pages list                       # JSON by default
 dikw client pages get sources/notes/alpha.md # JSON
 dikw client import ./local-sources           # pre-flights + imports md packages
 dikw client ingest                           # rendered progress; NOT pipeable
 ```
 
-`retrieve` needs `--plain` whenever you pipe its NDJSON output,
-otherwise the "retrieving…" rich banner lands on stdout and breaks
-`jq`. The `--format json` and `--plain` toggles are orthogonal:
-`--format` picks the *final* shape, `--plain` suppresses the
-*intermediate* status.
+`retrieve` consumes the NDJSON event stream server-side and emits the
+final JSON payload (chunks + page_refs) to stdout. Pass `--plain`
+whenever you pipe, otherwise the "retrieving…" rich banner lands on
+stdout and breaks `jq`. The `--format json` and `--plain` toggles are
+orthogonal: `--format` picks the *final* shape, `--plain` suppresses
+the *intermediate* status. If you want the raw NDJSON event stream,
+talk to `POST /v1/retrieve` over HTTP directly.
 
 ## A typical retrieval-augmented loop
 

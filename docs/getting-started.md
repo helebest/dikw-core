@@ -99,12 +99,12 @@ are skipped.
 ## 4. Retrieve grounded chunks (Information layer)
 
 ```bash
-uv run dikw client retrieve "What does Karpathy mean by deterministic scoping?" --pretty
+uv run dikw client retrieve "What does Karpathy mean by deterministic scoping?" --format table
 ```
 
 Returns the top-K chunks (with full text, path, layer, and score) plus
-page-level refs. `--pretty` renders the hits as a human-readable table;
-drop the flag to get the default JSON payload that an agent or `jq`
+page-level refs. `--format table` renders the hits as a human-readable
+table; the default `--format json` emits the payload an agent or `jq`
 pipeline can parse directly.
 
 **dikw-core does not produce the final answer itself.** Answer synthesis

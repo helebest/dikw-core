@@ -379,7 +379,7 @@ Each operation is implemented in `dikw_core.api` and surfaced over HTTP by the s
 | `synthesize(scope)` | source doc_ids (or "new since log") | new/updated wiki pages + wiki_log entries | I→K; LLM call with prompts/synthesize.md |
 | `distill(window)` | optional time/topic window | candidate wisdom items in `wisdom/_candidates/` + `wisdom_items(status='candidate')` | K→W; LLM call with prompts/distill.md; always produces candidates, never auto-approves |
 | `review()` | — | interactive CLI workflow to approve/edit/reject candidates | W gate; writes final files to `wisdom/*.md` |
-| `retrieve(q)` | user question | ranked chunks + page refs + applicable wisdom refs (no LLM call) | hybrid search via `info/search.py` (BM25 + vec RRF); **LLM synthesis is the agent's responsibility, not dikw-core's** |
+| `retrieve(q)` | user question | ranked chunks + page refs (no LLM call) | hybrid search via `info/search.py` (BM25 + vec RRF); applicable wisdom surfaces separately via `GET /v1/wisdom/applicable?q=...` (PR-5); **LLM synthesis is the agent's responsibility, not dikw-core's** |
 | `lint()` | — | report of broken links, stale claims, orphan pages, duplicated entities | K+W hygiene; prompts/lint.md |
 | `status()` | — | counts per layer, last-ingest, last-synthesize, pending review | for CLI and HTTP `/v1/status` |
 

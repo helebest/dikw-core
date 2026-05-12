@@ -31,7 +31,6 @@ import contextlib
 import gzip
 import json
 import os
-import shutil
 import stat
 import tarfile
 import tempfile
@@ -47,7 +46,7 @@ from ..md_inspect import (
     package_sha256,
     sha256_file,
 )
-from .converters import Converter, ConverterError
+from .converters import Converter, ConverterError, no_converter_error
 
 # Spooled buffer threshold — 16 MiB matches the plan's recommendation.
 # Below it, the tarball stays in RAM (zero disk I/O); above it, the
@@ -194,9 +193,6 @@ def _build_from_normalized(src: Path) -> ImportBundle:
 # ---- internals ---------------------------------------------------------
 
 
-_DIKW_PLUGINS_URL = "https://github.com/opendikw/dikw-plugins"
-
-
 @contextlib.contextmanager
 def _normalize_input(
     src: Path,
@@ -232,10 +228,7 @@ def _normalize_input(
 
     ext = resolved.suffix.lower()
     if converter_for is None:
-        raise SourceImportError(
-            f"no converter installed for {ext!r}. "
-            f"See {_DIKW_PLUGINS_URL} for available plugins."
-        )
+        raise SourceImportError(str(no_converter_error(ext)))
 
     try:
         converter = converter_for(ext)
@@ -245,8 +238,8 @@ def _normalize_input(
         # the CLI's error path stays uniform.
         raise SourceImportError(str(e)) from e
 
-    staging = Path(tempfile.mkdtemp(prefix="dikw-import-"))
-    try:
+    with tempfile.TemporaryDirectory(prefix="dikw-import-") as staging_str:
+        staging = Path(staging_str)
         output_dir = staging / resolved.stem
         try:
             converter.convert(resolved, output_dir)
@@ -260,8 +253,6 @@ def _normalize_input(
                 f"{resolved.name}"
             )
         yield staging
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
 
 
 @dataclass(frozen=True)

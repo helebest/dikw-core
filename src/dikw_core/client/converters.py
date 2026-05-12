@@ -33,7 +33,7 @@ from typing import Protocol, runtime_checkable
 
 ENTRY_POINT_GROUP = "dikw.client.converters"
 
-_DIKW_PLUGINS_URL = "https://github.com/opendikw/dikw-plugins"
+DIKW_PLUGINS_URL = "https://github.com/opendikw/dikw-plugins"
 
 
 @runtime_checkable
@@ -45,6 +45,14 @@ class Converter(Protocol):
     entry-points. ``convert`` is expected to be deterministic for the
     same input bytes — dikw-core's ingest pipeline relies on md hashes
     being stable across imports to skip unchanged sources.
+
+    Implementation note: ``discover()`` instantiates every registered
+    converter as part of its return value (so it can validate
+    Protocol-required attributes), which means heavy work in
+    ``__init__`` (loading PyTorch models, downloading weights, …)
+    bloats first-dispatch latency for *every* installed plugin even
+    when only one is invoked. Keep ``__init__`` cheap; defer ML model
+    loading to inside ``convert()``.
     """
 
     name: str  # engine label, e.g. "marker", "mineru"
@@ -56,6 +64,19 @@ class Converter(Protocol):
 class ConverterError(Exception):
     """Raised when discovery or dispatch fails — bad plugin metadata,
     ambiguous extension routing, or a missing/unknown engine selection."""
+
+
+def no_converter_error(ext: str) -> ConverterError:
+    """Build the canonical "no plugin installed for ``ext``" error.
+
+    The same message is needed both from ``pick()`` (empty registry)
+    and from the importer's pre-dispatch guard (no resolver supplied),
+    so centralising here keeps the wording + plugins URL in one place.
+    """
+    return ConverterError(
+        f"no converter installed for {ext!r}. "
+        f"See {DIKW_PLUGINS_URL} for available plugins."
+    )
 
 
 Registry = dict[str, list[Converter]]
@@ -143,10 +164,7 @@ def pick(
     ext = ext.lower()
     candidates = registry.get(ext, [])
     if not candidates:
-        raise ConverterError(
-            f"no converter installed for {ext!r}. "
-            f"See {_DIKW_PLUGINS_URL} for available plugins."
-        )
+        raise no_converter_error(ext)
 
     if converter:
         for c in candidates:
@@ -181,10 +199,12 @@ def pick(
 
 
 __all__ = [
+    "DIKW_PLUGINS_URL",
     "ENTRY_POINT_GROUP",
     "Converter",
     "ConverterError",
     "Registry",
     "discover",
+    "no_converter_error",
     "pick",
 ]

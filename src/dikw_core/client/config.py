@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -85,8 +86,10 @@ def _load_file(path: Path) -> dict[str, object]:
 
 def _converters_from_file(file_cfg: dict[str, object]) -> dict[str, str]:
     """Extract the ``[default.converters]`` sub-table, normalising keys
-    to lowercase and dropping non-string / empty entries silently — the
-    same forgiving stance ``_strip_or_none`` takes elsewhere."""
+    to lowercase and dropping non-string / empty entries silently. An
+    empty-string value is treated as "unset" so a user can comment out
+    an engine choice by replacing it with ``""`` and fall through to
+    the discovery default."""
     raw = file_cfg.get("converters")
     if not isinstance(raw, dict):
         return {}
@@ -101,15 +104,13 @@ def _converters_from_file(file_cfg: dict[str, object]) -> dict[str, str]:
     return out
 
 
-def _converters_from_env(env: dict[str, str] | os._Environ[str]) -> dict[str, str]:
+def _converters_from_env(env: Mapping[str, str]) -> dict[str, str]:
     """Read ``DIKW_CLIENT_CONVERTER_<EXT>=<engine>`` entries into a
     ``{".pdf": "marker"}`` mapping. Empty values fall through (treated
     as "unset")."""
     out: dict[str, str] = {}
     for key, value in env.items():
         if not key.startswith(ENV_CONVERTER_PREFIX):
-            continue
-        if not isinstance(value, str):
             continue
         v = value.strip()
         if not v:

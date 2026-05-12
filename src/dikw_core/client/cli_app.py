@@ -30,7 +30,7 @@ from rich.table import Table
 from ..schemas import Layer
 from . import serve_and_run as _sar
 from .config import ClientConfig, resolve
-from .converters import Converter, discover, pick
+from .converters import Converter, Registry, discover, pick
 from .importer import SourceImportError, build_import
 from .progress import (
     QueryStreamRenderer,
@@ -88,12 +88,20 @@ def _converter_resolver(
     cli_choice: str | None, cfg: ClientConfig
 ) -> Callable[[str], Converter]:
     """Build a lazy converter resolver — ``discover()`` runs only on
-    first invocation, so md-only imports never pay the plugin import
-    cost even when heavy converters are installed."""
+    first invocation and is memoised for subsequent calls (so a future
+    directory-import flow that dispatches one file at a time doesn't
+    re-instantiate every installed plugin per file). Md-only imports
+    never trigger discover() at all because the resolver itself is
+    never called."""
+
+    registry: Registry | None = None
 
     def _resolve_one(ext: str) -> Converter:
+        nonlocal registry
+        if registry is None:
+            registry = discover()
         return pick(
-            ext, discover(), converter=cli_choice, config=cfg.converters
+            ext, registry, converter=cli_choice, config=cfg.converters
         )
 
     return _resolve_one

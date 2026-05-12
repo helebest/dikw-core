@@ -714,10 +714,20 @@ def render_synth_eval_report(
 
     n_sources = report.get("n_sources")
     n_pages = report.get("n_pages")
+    gated = bool(report.get("gated", True))
     passed = bool(report.get("passed", True))
+    if not gated:
+        # Ungated synth runs (no synth thresholds declared) — ``passed``
+        # is vacuously True; surface that explicitly so the human
+        # doesn't read it as "all thresholds passed".
+        status = "[yellow](informational — no synth thresholds)[/yellow]"
+    elif passed:
+        status = "[green]True[/green]"
+    else:
+        status = "[red]False[/red]"
     footer = (
         f"n_sources={n_sources}  n_pages={n_pages}  "
-        f"passed={'[green]True[/green]' if passed else '[red]False[/red]'}"
+        f"passed={status}"
     )
     console.print(footer)
 

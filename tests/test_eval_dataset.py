@@ -368,6 +368,23 @@ def test_thresholds_retrieval_view_with_synth_metric_raises(tmp_path: Path) -> N
         load_dataset(ds)
 
 
+def test_thresholds_synth_page_density_rejected_as_informational(
+    tmp_path: Path,
+) -> None:
+    """``synth/page_density`` is informational only — the runner never
+    fills it into ``SynthEvalReport.metrics`` so any threshold for it
+    would always fail with ``observed=None``. Reject at load with a
+    clear "informational only" message rather than accepting a gate
+    the runner can't satisfy."""
+    ds = _write_valid_dataset(tmp_path)
+    (ds / "dataset.yaml").write_text(
+        "name: toy\nthresholds:\n  synth/page_density: 0.5\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetError, match="informational only"):
+        load_dataset(ds)
+
+
 def test_targets_yaml_duplicate_asset_ids_rejected(tmp_path: Path) -> None:
     ds = _write_mm_dataset(tmp_path)
     (ds / "targets.yaml").write_text(

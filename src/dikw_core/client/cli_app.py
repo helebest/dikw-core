@@ -988,9 +988,41 @@ def eval_cmd(
             _render_eval_result(result, pretty=pretty)
             if not bool(result.get("passed", True)):
                 raise typer.Exit(code=1)
+            # An explicit ``--eval synth`` request must have at least
+            # one gated synth report — otherwise the user asked for a
+            # K-layer gate run and the dataset declared no synth
+            # thresholds (informational only). Exit 2 to distinguish
+            # "no gate ran" from "gate ran and passed" (exit 0) and
+            # "gate failed" (exit 1).
+            if eval_modes and "synth" in eval_modes:
+                synth_reports = _synth_reports(result)
+                if synth_reports and not any(
+                    r.get("gated") for r in synth_reports
+                ):
+                    console.print(
+                        "[yellow]warning:[/yellow] --eval synth ran but "
+                        "no synth thresholds were declared; result is "
+                        "informational, not a gate pass.",
+                        markup=True,
+                    )
+                    raise typer.Exit(code=2)
         _exit_on_failure(status, error)
 
     _run(_go())
+
+
+def _synth_reports(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Pluck the synth-mode reports out of a single- or multi-report
+    eval result. Used by the ``--eval synth`` exit-code logic to tell
+    "no gate ran" from "all gates passed"."""
+    if "datasets" in result and isinstance(result["datasets"], list):
+        rows = list(result["datasets"])
+    else:
+        rows = [result]
+    return [
+        row for row in rows
+        if isinstance(row, dict) and row.get("mode") == "synth"
+    ]
 
 
 def _render_eval_result(result: Mapping[str, Any], *, pretty: bool) -> None:

@@ -115,6 +115,35 @@ def test_dataset_path_fails_when_thresholds_unmet(
     assert result.exit_code == 1, result.stdout
 
 
+def test_synth_reports_helper_filters_by_mode() -> None:
+    """``_synth_reports`` is the load-bearing helper for the
+    ``--eval synth`` exit-code logic: it must pluck only synth-mode
+    reports out of a multi-dataset envelope so the gated/ungated
+    decision is made over the right rows."""
+    from dikw_core.client.cli_app import _synth_reports
+
+    single_synth = {"mode": "synth", "gated": False, "passed": True}
+    single_retrieval = {"mode": "retrieval", "passed": True}
+    multi = {
+        "datasets": [
+            {"mode": "retrieval", "passed": True},
+            {"mode": "synth", "gated": True, "passed": True},
+            {"mode": "synth", "gated": False, "passed": True},
+        ],
+        "passed": True,
+    }
+    assert _synth_reports(single_synth) == [single_synth]
+    assert _synth_reports(single_retrieval) == []
+    synths = _synth_reports(multi)
+    assert len(synths) == 2
+    # The ungated-flag arithmetic the CLI relies on:
+    assert any(r.get("gated") for r in synths) is True
+    # If all synth reports were ungated, the CLI exits 2 (informational).
+    assert not any(
+        r.get("gated") for r in [{"mode": "synth", "gated": False}]
+    )
+
+
 def test_missing_dataset_returns_non_zero(
     asgi_client: tuple[Any, ServerRuntime],
     patch_transport_factory: Callable[[], None],

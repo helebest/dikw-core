@@ -42,6 +42,11 @@ _RETRIEVAL_METRICS = frozenset(
 # MUST be namespaced (``synth/atomicity_score``); the bare form is rejected
 # at load time so a typo can't bypass the gate. ``duplicate_ratio_max``
 # carries the ``_max`` suffix to signal lower-is-better (reverse-direction).
+# ``page_density`` is informational only — runner emits it into
+# ``SynthEvalReport.informational`` rather than ``metrics``, so it would
+# never satisfy a threshold even if one were declared. Kept in the
+# "known synth metric" set for the informational column, but
+# ``_GATEABLE_SYNTH_METRICS`` is what threshold validation accepts.
 _SYNTH_METRICS = frozenset(
     {
         "fact_grounding_ratio",
@@ -53,6 +58,7 @@ _SYNTH_METRICS = frozenset(
         "page_density",
     }
 )
+_GATEABLE_SYNTH_METRICS = _SYNTH_METRICS - {"page_density"}
 SUPPORTED_METRICS = _RETRIEVAL_METRICS | _SYNTH_METRICS
 
 # Granularity / scoring views the runner can score. ``doc`` is always
@@ -597,10 +603,17 @@ def _parse_thresholds(raw: Mapping[str, Any]) -> dict[str, float]:
                     f"unknown threshold view {view!r} in key {key!r}; "
                     f"supported: {sorted(SUPPORTED_VIEWS)}"
                 )
-            if view == "synth" and metric not in _SYNTH_METRICS:
+            if view == "synth" and metric not in _GATEABLE_SYNTH_METRICS:
+                if metric in _SYNTH_METRICS:
+                    raise DatasetError(
+                        f"threshold {key!r}: {metric!r} is informational "
+                        f"only and cannot be gated (runner emits it into "
+                        f"``informational``, not ``metrics``)"
+                    )
                 raise DatasetError(
                     f"threshold {key!r}: {metric!r} is not a synth metric; "
-                    f"available synth metrics: {sorted(_SYNTH_METRICS)}"
+                    f"available synth metrics: "
+                    f"{sorted(_GATEABLE_SYNTH_METRICS)}"
                 )
             if view != "synth" and metric not in _RETRIEVAL_METRICS:
                 raise DatasetError(

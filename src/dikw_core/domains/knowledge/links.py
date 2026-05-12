@@ -117,12 +117,13 @@ def _normalize_for_match(s: str) -> str:
     return _stem_plural(base)
 
 
-# Public aliases — used by ``eval.metrics`` so the expected-coverage check
-# applies the exact same normalize rules as wikilink resolution. Underscore
-# names stay as the canonical implementation; these re-exports document
-# that the helpers ARE intentionally available to other in-tree modules.
+# Public re-exports of K-layer text-normalize and wikilink primitives.
+# The underscored names remain the canonical implementation; these aliases
+# document that other in-tree modules MAY import them (rather than each
+# re-implementing the rules, which would drift).
 normalize_base = _normalize_base
 normalize_for_match = _normalize_for_match
+WIKILINK_RE = _WIKILINK
 
 
 def build_fuzzy_index(title_to_path: dict[str, str]) -> dict[str, list[str]]:

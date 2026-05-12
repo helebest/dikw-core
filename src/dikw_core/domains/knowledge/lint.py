@@ -86,13 +86,8 @@ class LintReport:
 
 @dataclass(frozen=True)
 class AtomicityVerdict:
-    """Outcome of ``check_atomicity`` — atomic flag + violation messages.
-
-    The same heuristic powers two consumers: ``run_lint`` (loud surfacing of
-    individual offending pages) and ``eval/metrics.atomicity_score``
-    (aggregate quality gate). Keeping the implementation pure lets both
-    callers share one source of truth for the thresholds.
-    """
+    """Atomic-flag + ordered violation messages produced by
+    ``check_atomicity``."""
 
     atomic: bool
     violations: tuple[str, ...]
@@ -101,9 +96,8 @@ class AtomicityVerdict:
 def check_atomicity(*, body: str, tags: list[str]) -> AtomicityVerdict:
     """Decide whether a wiki page body+tags violate the atomicity heuristic.
 
-    A page is **non-atomic** when ANY of the independent symptoms below
-    trigger; each contributes one entry to ``violations`` so callers can
-    surface the specific reasons.
+    A page is **non-atomic** when ANY of these independent symptoms trigger;
+    each contributes one entry to ``violations``:
 
     * body chars > ``_ATOMIC_BODY_CHARS``
     * H1 count > 1 (atomic page should have exactly one title)
@@ -111,16 +105,11 @@ def check_atomicity(*, body: str, tags: list[str]) -> AtomicityVerdict:
     * distinct wikilink targets > ``_ATOMIC_WIKILINK_COUNT``
     * namespaced-tag domains > ``_ATOMIC_TAG_DOMAIN_COUNT``
 
-    Fenced code blocks are stripped before counting headings, so technical
+    Fenced code blocks are stripped before counting headings so technical
     notes with inline shell snippets (``# install deps``) don't false-trigger.
     Wikilinks are counted by distinct target so a single-topic page that
     repeats one entity (``[[Elon Musk]]`` x16) stays atomic.
     """
-    # Local imports avoid a circular dependency: ``links`` does not import
-    # ``lint``, but keeping this lazy makes the dependency graph explicit.
-    from ...schemas import LinkType
-    from .links import parse_links
-
     violations: list[str] = []
     if len(body) > _ATOMIC_BODY_CHARS:
         violations.append(f"body {len(body)} chars > {_ATOMIC_BODY_CHARS}")

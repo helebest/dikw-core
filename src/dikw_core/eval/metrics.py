@@ -1,22 +1,18 @@
 """Retrieval and K-layer (synth) quality metrics.
 
-Retrieval section (the historical content of this module):
-    Each query's ground truth is an ``expect_any`` set — retrieval
-    succeeds if **any** member appears in the top-k ranked results. This
-    matches how dogfood Q/A is authored (paraphrased answers often live
-    in multiple docs; requiring all of them would be artificially
-    punitive). ``ndcg_at_k`` and ``recall_at_k`` exposed for public
-    benchmark calibration (BEIR/CMTEB).
+Retrieval metrics use binary ``expect_any`` ground truth — a query is a
+hit at k if **any** listed identity appears in the top-k ranked results.
+Paraphrased dogfood Q/A often lives in multiple docs; requiring all
+would be artificially punitive. ``ndcg_at_k`` / ``recall_at_k`` exposed
+for BEIR/CMTEB calibration.
 
-K-layer (synth) section:
-    Deterministic per-page metrics that quantify synth output quality
-    without an LLM judge. The same heuristics drive ``run_synth_eval``'s
-    hard gate, so a single source of truth governs both ``dikw lint``
-    surfacing and PR-blocking thresholds.
+K-layer metrics quantify synth output without an LLM judge. The
+``atomicity_score`` shares ``check_atomicity`` with ``dikw lint`` so
+one heuristic governs both interactive surfacing and the hard gate.
 
-All retrieval functions are pure and synchronous. K-layer functions are
-mostly pure-sync; the two embedding-driven ones (``fact_grounding_ratio``,
-``duplicate_ratio_max``) are async so they can call ``EmbeddingProvider``.
+The two embedding-driven K-layer metrics (``fact_grounding_ratio`` /
+``duplicate_ratio_max``) are ``async`` so they can drive an
+``EmbeddingProvider``; everything else is pure-sync.
 """
 
 from __future__ import annotations
@@ -26,7 +22,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal
 
-from ..domains.knowledge.links import normalize_for_match
+from ..domains.knowledge.links import WIKILINK_RE, normalize_for_match
 from ..domains.knowledge.lint import _FENCED_CODE, check_atomicity
 from ..domains.knowledge.wiki import WikiPage
 from ..providers.base import EmbeddingProvider
@@ -120,36 +116,18 @@ def mean_recall_at_k(
 # ===========================================================================
 # K-layer (synth) quality metrics
 # ===========================================================================
-#
-# Two families. The pure-sync ones (atomicity, expected_coverage,
-# wikilink_resolved_ratio, language_fidelity, page_density) just inspect
-# WikiPage state. The two async ones (fact_grounding_ratio,
-# duplicate_ratio_max) drive an EmbeddingProvider — semantic similarity
-# is the only deterministic way to spot "this claim isn't in the source"
-# / "these two pages are near-duplicates" without an LLM judge.
 
-# Regex for stripping markdown structure before sentence-splitting.
-# Code fences come from the lint module so atomicity and grounding share
-# one strip rule. Heading lines (ATX style only — setext is rare in
-# generated wiki pages) are removed because they're titles, not claims.
-# Wikilinks are stripped entirely (not replaced by alias text) so a body
-# that's just ``[[Other]]`` produces zero claim sentences instead of a
-# misleading "Other" claim; prose like ``mentions [[Alice]] briefly``
-# still yields ``mentions briefly`` as a legitimate (though stub) claim.
+# ATX-style headings; setext is rare in LLM-generated wiki pages.
 _HEADING_LINE = re.compile(r"^\s{0,3}#+\s+.*$", flags=re.MULTILINE)
-_WIKILINK_INLINE = re.compile(r"\[\[([^\]\|\n]+?)(?:\|([^\]\n]+?))?\]\]")
-# Sentence boundary: zero-width after ``.`` / ``。`` so we don't require
-# whitespace after the period (CJK rarely has it), plus blank-line splits
-# for paragraph-style claims.
+# Zero-width sentence boundary after ``.`` / ``。`` (CJK rarely has a space
+# after the full stop) plus blank-line splits for paragraph-style claims.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.。])|\n{2,}")
 
-# Language classification — ASCII-vs-CJK character-ratio heuristic on the
-# first 200 chars. No external dependency: see spec Open question (c) —
-# langdetect is LGPL + heavy for a single 0.95-target metric. The
-# character class covers Han (U+4E00-9FFF), Hiragana (U+3040-309F),
-# Katakana (U+30A0-30FF), and Hangul Syllables (U+AC00-D7AF).
-# Using escape sequences (not literal CJK glyphs) keeps the source file
-# editor-friendly across font setups and silences ruff's RUF001 warning.
+# Han (U+4E00-9FFF) + Hiragana (U+3040-309F) + Katakana (U+30A0-30FF) +
+# Hangul Syllables (U+AC00-D7AF). Escape sequences (not literal glyphs)
+# silence ruff RUF001 and keep the source file editor-portable.
+# Avoid ``langdetect`` (LGPL + heavy) for a single 0.95-target metric on
+# the en/zh/ja/ko range.
 _CJK_CHAR = re.compile(
     "[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]"
 )
@@ -158,30 +136,27 @@ _LANG_SAMPLE_PREFIX = 200
 _LANG_CJK_RATIO_THRESHOLD = 0.3
 
 
-def _split_claims(body: str) -> list[str]:
+def split_claims(body: str) -> list[str]:
     """Tokenise a wiki-page body into claim-bearing sentences.
 
-    Strips fenced code, headings, and wikilink markup (keeping the alias
-    text so embedding sees real words), then splits on sentence terminators
-    plus paragraph breaks. Returns the trimmed non-empty fragments.
+    Strips fenced code, headings, and wikilink markup (replaced by space
+    so a body that's just ``[[Other]]`` yields zero claims and doesn't
+    embed-match against a misleading "Other" word), then splits on
+    sentence terminators plus paragraph breaks.
     """
     text = _FENCED_CODE.sub("", body)
     text = _HEADING_LINE.sub("", text)
-    text = _WIKILINK_INLINE.sub(" ", text)
-    parts = _SENTENCE_BOUNDARY.split(text)
-    out: list[str] = []
-    for p in parts:
-        cleaned = p.strip()
-        if cleaned:
-            out.append(cleaned)
-    return out
+    text = WIKILINK_RE.sub(" ", text)
+    return [p.strip() for p in _SENTENCE_BOUNDARY.split(text) if p.strip()]
 
 
-def _classify_lang(text: str) -> Literal["en", "cjk", "other"]:
-    """Cheap language classifier — CJK char ratio over the first 200 chars."""
+def classify_lang(text: str) -> Literal["en", "cjk", "other"]:
+    """CJK-char-ratio language classifier over the first 200 chars.
+
+    Returns ``"other"`` when the sample has no countable CJK or ASCII
+    characters (empty, pure punctuation, etc.).
+    """
     sample = text[:_LANG_SAMPLE_PREFIX]
-    if not sample.strip():
-        return "other"
     cjk_count = len(_CJK_CHAR.findall(sample))
     ascii_count = len(_ASCII_LETTER.findall(sample))
     total = cjk_count + ascii_count
@@ -189,15 +164,12 @@ def _classify_lang(text: str) -> Literal["en", "cjk", "other"]:
         return "other"
     if cjk_count / total > _LANG_CJK_RATIO_THRESHOLD:
         return "cjk"
-    if ascii_count > 0:
-        return "en"
-    return "other"
+    return "en"
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    """Cosine similarity. Assumes both vectors are L2-normalised (the
-    contract for ``EmbeddingProvider.embed`` and ``FakeEmbeddings``);
-    dot product equals cosine in that case."""
+    """Dot product — equals cosine when both vectors are L2-normalised,
+    which is the contract for ``EmbeddingProvider.embed``."""
     return sum(x * y for x, y in zip(a, b, strict=False))
 
 
@@ -253,7 +225,7 @@ def language_fidelity(
     """Fraction of pages whose dominant language matches their source's.
 
     Source is supplied as raw text (runner provides this from disk or
-    storage). Both sides go through ``_classify_lang`` on the first 200
+    storage). Both sides go through ``classify_lang`` on the first 200
     chars; ``"other"`` matching ``"other"`` is still a match so empty-
     bodied pages don't false-mismatch.
     """
@@ -262,7 +234,7 @@ def language_fidelity(
     matched = sum(
         1
         for page, source_text in pages_with_sources
-        if _classify_lang(page.body) == _classify_lang(source_text)
+        if classify_lang(page.body) == classify_lang(source_text)
     )
     return matched / len(pages_with_sources)
 
@@ -287,36 +259,54 @@ async def fact_grounding_ratio(
 ) -> float:
     """Fraction of page claims whose nearest source chunk has cosine ≥ tau.
 
-    Per page: split body into claim sentences, embed claims + chunks of
-    the originating source in two batches, take per-claim max cosine
-    against the chunk set; claim is "grounded" if max ≥ tau. Page score
-    = grounded / total_claims. Final ratio = mean across pages.
+    Per page: split body into claim sentences, take per-claim max cosine
+    against the source's chunk embeddings; claim is "grounded" if max ≥
+    tau. Page score = grounded / total_claims. Final ratio = mean across
+    pages.
 
     Pages with no claim sentences (only headings or wikilinks) score 1.0
     — nothing to ground, so they don't unfairly tank the aggregate.
     Pages whose source has zero chunks score 0.0 (we can't verify them).
+
+    Each source's chunks are embedded once (not once per referencing page)
+    — for a 100-page wiki with 10 sources, that's 10 chunk-embed calls
+    instead of 100, the dominant cost in real-LLM runs.
     """
     if not pages_with_sources:
         return 1.0
+    # Embed each source's chunks once, lazily on first use.
+    chunk_embeds_cache: dict[str, list[list[float]]] = {}
+
+    async def _chunks_for(source_path: str) -> list[list[float]]:
+        cached = chunk_embeds_cache.get(source_path)
+        if cached is not None:
+            return cached
+        chunks = chunks_by_source.get(source_path, [])
+        if not chunks:
+            chunk_embeds_cache[source_path] = []
+            return []
+        embeds = await embedder.embed(
+            [c.text for c in chunks], model=embedding_model
+        )
+        chunk_embeds_cache[source_path] = embeds
+        return embeds
+
     per_page: list[float] = []
     for page, source_path in pages_with_sources:
-        claims = _split_claims(page.body)
+        claims = split_claims(page.body)
         if not claims:
             per_page.append(1.0)
             continue
-        chunks = chunks_by_source.get(source_path, [])
-        if not chunks:
+        chunk_embeds = await _chunks_for(source_path)
+        if not chunk_embeds:
             per_page.append(0.0)
             continue
         claim_embeds = await embedder.embed(claims, model=embedding_model)
-        chunk_embeds = await embedder.embed(
-            [c.text for c in chunks], model=embedding_model
+        grounded = sum(
+            1
+            for ce in claim_embeds
+            if max((_cosine(ce, ch) for ch in chunk_embeds), default=0.0) >= tau
         )
-        grounded = 0
-        for ce in claim_embeds:
-            best = max((_cosine(ce, ch) for ch in chunk_embeds), default=0.0)
-            if best >= tau:
-                grounded += 1
         per_page.append(grounded / len(claims))
     return sum(per_page) / len(per_page)
 

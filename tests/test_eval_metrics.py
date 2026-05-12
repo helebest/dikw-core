@@ -9,9 +9,8 @@ import pytest
 from dikw_core.domains.knowledge.wiki import WikiPage, build_page
 from dikw_core.eval.fake_embedder import FakeEmbeddings
 from dikw_core.eval.metrics import (
-    _classify_lang,
-    _split_claims,
     atomicity_score,
+    classify_lang,
     duplicate_ratio_max,
     expected_coverage,
     fact_grounding_ratio,
@@ -25,6 +24,7 @@ from dikw_core.eval.metrics import (
     page_density,
     recall_at_k,
     reciprocal_rank,
+    split_claims,
     wikilink_resolved_ratio,
 )
 from dikw_core.schemas import ChunkRecord
@@ -469,12 +469,12 @@ async def test_duplicate_ratio_max_empty_pages() -> None:
     assert ratio == 0.0
 
 
-# ---- _split_claims ----------------------------------------------------------
+# ---- split_claims ----------------------------------------------------------
 
 
 def test_split_claims_basic_sentences() -> None:
     body = "# Title\n\nFirst claim. Second claim.\n\nThird claim.\n"
-    claims = _split_claims(body)
+    claims = split_claims(body)
     assert len(claims) == 3
     assert "First claim" in claims[0]
     assert "Second claim" in claims[1]
@@ -483,7 +483,7 @@ def test_split_claims_basic_sentences() -> None:
 
 def test_split_claims_strips_wikilinks() -> None:
     body = "# T\n\nThis mentions [[Alice]] and also [[Bob|Robert]] briefly.\n"
-    claims = _split_claims(body)
+    claims = split_claims(body)
     text = " ".join(claims)
     # Wikilink markup gone; target text may stay but [[ ]] should not
     assert "[[" not in text
@@ -492,7 +492,7 @@ def test_split_claims_strips_wikilinks() -> None:
 
 def test_split_claims_strips_headings() -> None:
     body = "# Big Title Heading\n\n## Subhead Heading\n\nA real claim sentence here.\n"
-    claims = _split_claims(body)
+    claims = split_claims(body)
     text = " ".join(claims)
     assert "Big Title Heading" not in text
     assert "Subhead Heading" not in text
@@ -505,7 +505,7 @@ def test_split_claims_strips_fenced_code() -> None:
         "```python\nignored_code_line()\n```\n\n"
         "Another claim sentence.\n"
     )
-    claims = _split_claims(body)
+    claims = split_claims(body)
     text = " ".join(claims)
     assert "ignored_code_line" not in text
     assert "prose claim sentence" in text
@@ -513,38 +513,38 @@ def test_split_claims_strips_fenced_code() -> None:
 
 def test_split_claims_chinese_period() -> None:
     body = "# T\n\n这是第一个声明。这是第二个声明。\n"
-    claims = _split_claims(body)
+    claims = split_claims(body)
     assert len(claims) == 2
 
 
 def test_split_claims_empty_body() -> None:
-    assert _split_claims("") == []
+    assert split_claims("") == []
 
 
 def test_split_claims_only_heading() -> None:
-    assert _split_claims("# Just a title\n") == []
+    assert split_claims("# Just a title\n") == []
 
 
-# ---- _classify_lang ---------------------------------------------------------
+# ---- classify_lang ---------------------------------------------------------
 
 
 def test_classify_lang_pure_english() -> None:
-    assert _classify_lang("This is plain English without any non-ASCII.") == "en"
+    assert classify_lang("This is plain English without any non-ASCII.") == "en"
 
 
 def test_classify_lang_pure_cjk() -> None:
-    assert _classify_lang("这是一段全部由中文字符组成的文本内容") == "cjk"
+    assert classify_lang("这是一段全部由中文字符组成的文本内容") == "cjk"
 
 
 def test_classify_lang_mostly_cjk() -> None:
     text = "这是一段以中文为主的内容,只是夹杂了 a few English words 用于测试。"
-    assert _classify_lang(text) == "cjk"
+    assert classify_lang(text) == "cjk"
 
 
 def test_classify_lang_mostly_english() -> None:
     text = "Mostly English content with just 中文 a couple of characters."
-    assert _classify_lang(text) == "en"
+    assert classify_lang(text) == "en"
 
 
 def test_classify_lang_empty_is_other() -> None:
-    assert _classify_lang("") == "other"
+    assert classify_lang("") == "other"

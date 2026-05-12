@@ -402,32 +402,32 @@ def _parse_modes(raw: Any) -> list[EvalMode]:
     return out
 
 
-def _parse_synth_section(raw: Any) -> SynthSection:
-    """Parse the optional ``synth:`` block; missing → defaults."""
+def _parse_optional_section[T: BaseModel](
+    raw: Any, *, name: str, model_cls: type[T]
+) -> T:
+    """Parse an optional ``dataset.yaml`` block; missing → model defaults.
+
+    Surfaces pydantic's first violation message in the error (the rest are
+    usually downstream noise from the same root cause)."""
     if raw is None:
-        return SynthSection()
+        return model_cls()
     if not isinstance(raw, dict):
-        raise DatasetError(f"synth: must be a mapping, got {type(raw).__name__}")
+        raise DatasetError(
+            f"{name}: must be a mapping, got {type(raw).__name__}"
+        )
     try:
-        return SynthSection.model_validate(raw)
+        return model_cls.model_validate(raw)
     except ValidationError as e:
-        # Surface a cleaner message: pydantic stacks "Value error, ..." onto
-        # each violation; the first one is the most actionable.
-        first = e.errors()[0]
-        msg = first.get("msg", str(e))
-        raise DatasetError(f"invalid synth section: {msg}") from e
+        first_msg = e.errors()[0].get("msg", str(e))
+        raise DatasetError(f"invalid {name} section: {first_msg}") from e
+
+
+def _parse_synth_section(raw: Any) -> SynthSection:
+    return _parse_optional_section(raw, name="synth", model_cls=SynthSection)
 
 
 def _parse_judge_section(raw: Any) -> JudgeSection:
-    """Parse the optional ``judge:`` block; missing → defaults (no pin)."""
-    if raw is None:
-        return JudgeSection()
-    if not isinstance(raw, dict):
-        raise DatasetError(f"judge: must be a mapping, got {type(raw).__name__}")
-    try:
-        return JudgeSection.model_validate(raw)
-    except ValidationError as e:
-        raise DatasetError(f"invalid judge section: {e}") from e
+    return _parse_optional_section(raw, name="judge", model_cls=JudgeSection)
 
 
 def _load_expected(path: Path) -> ExpectedSpec | None:

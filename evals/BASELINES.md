@@ -107,6 +107,132 @@ Rationale stamped on the proposal:
   mutating the base. A separate apply pass would be needed to confirm
   `grep -r "TODO: stub page generated" wiki/` returns 0 on disk; the
   proposal-side guarantees above make that a foregone conclusion.
+## 2026-05-13 — K-layer orphan-page governance (lint-fix PR3)
+
+Issue #82: `dikw lint propose --rule orphan_page` previously skipped
+every orphan because `FIXER_REGISTRY` lacked an entry — 250 orphans
+on the elon-musk validation base produced 0 applicable proposals.
+This PR registers `OrphanPageFixer` with four strategies (delete /
+merge / link / mark_as_leaf), plus a soft-delete `<base>/trash/` for
+all `delete_page` ops, and `lint.skip` per-page frontmatter
+suppression.
+
+### What this PR ships
+
+| Strategy                    | When                                                       | Source       |
+|-----------------------------|------------------------------------------------------------|--------------|
+| `delete_page`               | body < 40 B, no outbound wikilinks, AND empty / TODO marker / no sources+tags | heuristic    |
+| `merge_into_existing_page`  | candidate score ≥ `MERGE_THRESHOLD = 6.0` AND `--enable-llm` | LLM          |
+| `link_from_existing_page`   | candidate score ≥ `LINK_THRESHOLD = 3.0` (or merge LLM no-op) | heuristic    |
+| `mark_as_leaf` (tail)       | nothing else fits — writes `lint: {skip: [orphan_page], reason}` | heuristic    |
+
+Scoring weights and thresholds documented in
+`docs/lint-orphan-governance.md`.
+
+### Baseline run — elon-musk-validation base, 2026-05-13
+
+Base: `~/Project/opendikw/dikw-data/bases/elon-musk-validation/`
+(wiki/ = 364 KB, donor source = Walter Isaacson's *Elon Musk* 2023
+biography). Pre-PR result: `lint propose --rule orphan_page` skipped
+every orphan because `FIXER_REGISTRY` had no entry → 0 applicable
+proposals. Post-PR results below.
+
+#### Lint baseline (pre-propose)
+
+```
+Total issues:          135
+By kind:               broken_wikilink=96, orphan_page=39
+Acknowledged leaves:   0
+```
+
+#### Heuristic-only run (`--rule orphan_page --limit 50`)
+
+```
+Proposals generated:   39 / 39 orphans  (100%)
+Skipped:               0
+Strategy distribution: link_from_existing=39
+Source:                heuristic=39 (no LLM call)
+```
+
+Every orphan cleared `LINK_THRESHOLD = 3.0` from the shared
+`sources: [sources/elon-musk.md]` entry alone — the donor source is
+the single D-page that fans out across all K-pages, so every
+orphan-vs-candidate pair scores ≥ 3.0 on shared sources. None
+dropped to `mark_as_leaf`; no stubs detected.
+
+#### LLM-enabled run (`--rule orphan_page --limit 50 --enable-llm`)
+
+Provider: `openai_codex` (gpt-5.5 via ChatGPT-Plus backend).
+
+```
+Proposals generated:   39 / 39 orphans  (100%)
+Skipped:               0
+Strategy distribution: merge_into_existing=33, link_from_existing=6
+Source:                llm=33, heuristic=6
+```
+
+85% of orphans (33/39) cleared `MERGE_THRESHOLD = 6.0` once embedding
+similarity was folded in — the elon-musk corpus has dense semantic
+overlap between sub-notes ("Elon Musk's Crisis Combat Mode" and
+"Elon Musk's Adversity-Shaped Risk Tolerance" both pull from the
+same source paragraph, score = 3 shared-source + ~3 embed = ~6+).
+The remaining 6 orphans landed below MERGE_THRESHOLD but above
+LINK_THRESHOLD, so the fixer fell back to the heuristic link branch
+exactly as designed.
+
+All 39 LLM merge prompts passed the destructive-merge contract
+checks (`strict=True` parse, exactly-one-page response, path/title/
+body-starts-with-heading validation) — no fall-through to link due
+to contract violation.
+
+#### Delta vs the issue #82 acceptance bar
+
+| Before PR | After PR (heuristic) | After PR (LLM) |
+|-----------|---------------------:|---------------:|
+| 0 / 39 actionable proposals | 39 / 39 | 39 / 39 |
+| every orphan silently skipped | every orphan reviewable as link | 85% merge-class, 15% link-class |
+
+#### Reproducing
+
+```powershell
+$base = "$HOME/Project/opendikw/dikw-data/bases/elon-musk-validation"
+$port = Get-Random -Minimum 53000 -Maximum 60000
+Push-Location $base
+Start-Process -NoNewWindow uv -ArgumentList @(
+    "--project", "$HOME/Project/opendikw/dikw-core",
+    "run", "dikw", "serve", "--port", $port, "--log-level", "warning"
+)
+$env:DIKW_SERVER_URL = "http://127.0.0.1:$port"
+
+uv run dikw client lint --format json
+uv run dikw client lint propose --rule orphan_page --limit 50 --plain
+uv run dikw client lint propose --rule orphan_page --limit 50 --enable-llm --plain
+uv run dikw client lint proposals --format json > props.json
+```
+
+### Tests landed
+
+- 26 unit tests in `tests/test_lint_orphan_fixer.py` covering each
+  strategy + edge cases (duplicate-title gate, vec_search layer
+  scoping, trash collision avoidance, stub-delete refusal on
+  metadata-rich pages).
+- 4 frontmatter-suppression tests in `tests/test_lint_skip_frontmatter.py`.
+- End-to-end ASGI roundtrip in
+  `tests/client/test_cli_lint_fix.py::test_lint_orphan_page_propose_apply_roundtrip`.
+- Storage contract additions: `test_delete_document_purges_all_rows`,
+  `test_delete_document_missing_is_noop`,
+  `test_delete_document_clears_wisdom_evidence_references`.
+
+### Open follow-ups
+
+- `add_to_moc` strategy (issue #82 item 2) — deferred. MOC topic
+  recovery is a deterministic-scoping hard problem and overlaps with
+  `wiki/index.md`; more natural to schedule into synth (which is
+  already clustering source material) than to bolt onto lint.
+- `wiki/index.md` promotion to a real K-page — conflicts with
+  `indexgen.py`'s rewrite contract.
+- Wire orphan score into `dikw eval` metrics — current baseline table
+  is good enough for first iteration.
 
 ## 2026-05-13 — fact_grounding_ratio tau sweep + claim-filter fix
 

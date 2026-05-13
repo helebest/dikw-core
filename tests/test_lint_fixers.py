@@ -14,17 +14,22 @@ from typing import Any
 
 import pytest
 
-from dikw_core.domains.knowledge.lint import LintIssue
+from dikw_core.domains.knowledge.lint import LintIssue, LintReport
 from dikw_core.domains.knowledge.lint_fix import (
     FixerContext,
     FixOperation,
     FixProposal,
     WikiPageMeta,
+    run_lint_propose,
+)
+from dikw_core.domains.knowledge.lint_fixers import (
+    broken_wikilink as bwl_mod,
 )
 from dikw_core.domains.knowledge.lint_fixers.broken_wikilink import (
     BrokenWikilinkFixer,
 )
 from dikw_core.domains.knowledge.wiki import build_page
+from dikw_core.schemas import Hit, Layer
 
 from .fakes import FakeLLM
 
@@ -289,7 +294,46 @@ class _NullReporter:
         return self._token
 
 
-# --- PR2: broken_wikilink LLM stub fallback ----------------------------------
+class _ListReporter:
+    """Captures progress/log/partial events so orchestrator-level tests
+    can assert on the live event stream as well as on the final report."""
+
+    def __init__(self) -> None:
+        from dikw_core.progress import CancelToken
+
+        self._token = CancelToken()
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    async def progress(
+        self, *, phase: str, current: int = 0, total: int = 0,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.events.append((
+            "progress",
+            {"phase": phase, "current": current, "total": total,
+             "detail": detail or {}},
+        ))
+
+    async def log(self, level: str, message: str) -> None:
+        self.events.append(("log", {"level": level, "message": message}))
+
+    async def partial(self, kind: str, payload: dict[str, Any]) -> None:
+        self.events.append(("partial", {"kind": kind, "payload": payload}))
+
+    def cancel_token(self) -> Any:
+        return self._token
+
+
+# --- PR3 (#83): broken_wikilink evidence-backed LLM repair -------------------
+#
+# Semantics change: ``--enable-llm`` no longer means "allow TODO stubs"; it
+# means "allow the LLM to write a real grounded page IFF the D/I layer has
+# enough source evidence". The fixer pulls evidence chunks via
+# ``_collect_evidence`` (real impl uses HybridSearcher); tests
+# monkeypatch that function to script evidence presence/absence and verify
+# both the gating (no evidence → skip + structured reason, agent-visible)
+# and the post-generation body checks (reject TODO markers, reject too-short
+# bodies).
 
 
 def _make_broken_link_setup(
@@ -298,8 +342,8 @@ def _make_broken_link_setup(
     """Build a wiki-root + a source page that references a missing target.
 
     No existing K-page resembles ``broken_target``, so the heuristic
-    must miss; LLM-stub tests then assert that the fallback fires when
-    enabled and is silent when not.
+    must miss; LLM-grounded tests then assert that the fallback fires
+    when evidence is present and is silent when not.
     """
     wiki_root = tmp_path
     src_page = _make_page(
@@ -321,7 +365,30 @@ def _make_broken_link_setup(
     return wiki_root, src_page, issue
 
 
-_STUB_LLM_RESPONSE = (
+# A 400+ char real-content body: passes the _MIN_BODY_CHARS=200 floor and
+# contains no _FORBIDDEN_BODY_TOKENS. Used by happy-path + canonicalization
+# tests where we want the grounded path to succeed end-to-end.
+_GROUNDED_LLM_RESPONSE = (
+    "<page path=\"wiki/concepts/whole-new-topic.md\" type=\"concept\">\n"
+    "---\n"
+    "tags: [grounded]\n"
+    "sources: [\"sources/foo.md\"]\n"
+    "---\n"
+    "\n"
+    "# Whole New Topic\n"
+    "\n"
+    "Whole New Topic is the concept the source material introduces. "
+    "The evidence describes specific characteristics: practitioners use "
+    "it to coordinate across teams, the approach measurably reduces "
+    "review time, and adoption has spread across multiple production "
+    "projects. Concrete examples in the source illustrate the workflow "
+    "from initial setup through ongoing maintenance.\n"
+    "</page>\n"
+)
+
+# Same shell, but the body still carries a TODO marker — the post-generation
+# guard must reject this even when evidence was sufficient.
+_TODO_LLM_RESPONSE = (
     "<page path=\"wiki/concepts/whole-new-topic.md\" type=\"concept\">\n"
     "---\n"
     "tags: [stub]\n"
@@ -330,17 +397,112 @@ _STUB_LLM_RESPONSE = (
     "# Whole New Topic\n"
     "\n"
     "TODO: stub page for the broken `[[Whole New Topic]]` reference. "
-    "Replace this body with real content.\n"
+    "Even with enough evidence we must refuse pages whose body still "
+    "contains the literal TODO marker, otherwise broken_wikilink: 0 "
+    "would once again hide unrepaired knowledge gaps.\n"
+    "</page>\n"
+)
+
+# Body too short — passes the TODO-token check but fails the body length
+# floor. Guards against the LLM producing "Topic A is a topic." filler.
+_SHORT_LLM_RESPONSE = (
+    "<page path=\"wiki/concepts/whole-new-topic.md\" type=\"concept\">\n"
+    "---\n"
+    "tags: [grounded]\n"
+    "---\n"
+    "\n"
+    "# Whole New Topic\n"
+    "\n"
+    "Whole New Topic is a topic.\n"
     "</page>\n"
 )
 
 
+def _make_hit(*, chunk_id: int, text: str, source_path: str = "sources/foo.md") -> Hit:
+    """Build a D-layer ``Hit`` good enough to feed the evidence check.
+
+    Only the fields the fixer reads matter: ``text`` (counted toward the
+    char threshold + rendered into the prompt) and ``path`` / ``title``
+    (citation in the prompt). The rest of the schema's required fields
+    get plausible placeholders.
+    """
+    return Hit(
+        doc_id=f"D-{chunk_id}",
+        chunk_id=chunk_id,
+        seq=chunk_id,
+        score=1.0 - chunk_id * 0.01,
+        snippet=text[:80],
+        path=source_path,
+        title="Source File",
+        layer=Layer.SOURCE,
+        start=0,
+        end=len(text),
+        text=text,
+    )
+
+
+def _patch_evidence(monkeypatch: pytest.MonkeyPatch, hits: list[Hit]) -> dict[str, int]:
+    """Swap ``_collect_evidence`` with a script that returns ``hits``.
+
+    Returns a counter dict so callers can assert call count — e.g., the
+    ``enable_llm=False`` test verifies the evidence pipeline is not even
+    invoked when the user hasn't opted in.
+    """
+    counter = {"calls": 0}
+
+    async def fake(
+        ctx: Any, target: str, excerpt: str, issue_path: str
+    ) -> list[Hit]:
+        counter["calls"] += 1
+        return list(hits)
+
+    monkeypatch.setattr(bwl_mod, "_collect_evidence", fake)
+    return counter
+
+
+def _grounded_evidence_hits() -> list[Hit]:
+    """Two chunks totaling ~500 chars — well above the _MIN_EVIDENCE_CHARS=200
+    floor, comfortably above _MIN_EVIDENCE_CHUNKS=1."""
+    return [
+        _make_hit(
+            chunk_id=1,
+            text=(
+                "Whole New Topic was introduced last quarter to coordinate "
+                "engineering teams across distributed projects. Practitioners "
+                "report measurable reductions in review time after adopting "
+                "the workflow described here."
+            ),
+        ),
+        _make_hit(
+            chunk_id=2,
+            text=(
+                "The Whole New Topic playbook covers initial setup, the "
+                "weekly cadence, and the rollback procedure. Three production "
+                "projects have adopted it so far, each documenting their "
+                "experience in the engineering log."
+            ),
+            source_path="sources/bar.md",
+        ),
+    ]
+
+
+def _orchestrator_skipped_reasons(
+    report: Any,
+) -> list[str]:
+    """Pull the ``reason`` field off every skip record for assertions."""
+    return [str(s.get("reason", "")) for s in report.skipped]
+
+
 @pytest.mark.asyncio
-async def test_broken_wikilink_llm_stub_when_enabled(tmp_path: Path) -> None:
-    """A heuristic miss with ``enable_llm=True`` should produce a
-    ``create_page`` proposal whose body comes from the LLM."""
+async def test_broken_wikilink_llm_grounded_when_enough_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ``enable_llm=True`` and sufficient D/I evidence the fixer must
+    produce a ``create_page`` proposal whose body is the grounded LLM
+    response — no TODO marker, no stub language."""
     wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
-    fake = FakeLLM(response_text=_STUB_LLM_RESPONSE)
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    fake = FakeLLM(response_text=_GROUNDED_LLM_RESPONSE)
     fixer = BrokenWikilinkFixer()
     proposal = await fixer.propose(
         issue,
@@ -348,7 +510,7 @@ async def test_broken_wikilink_llm_stub_when_enabled(tmp_path: Path) -> None:
         reporter=_NullReporter(),
     )
 
-    assert proposal is not None, "LLM stub fallback must fire when enabled"
+    assert proposal is not None, "grounded path must fire when evidence is enough"
     assert isinstance(proposal, FixProposal)
     assert proposal.source == "llm"
     assert proposal.issue_path == src_page.path
@@ -356,23 +518,332 @@ async def test_broken_wikilink_llm_stub_when_enabled(tmp_path: Path) -> None:
     op = proposal.operations[0]
     assert isinstance(op, FixOperation)
     assert op.kind == "create_page"
-    assert op.expected_hash is None  # create_page never asserts a prior hash
+    assert op.expected_hash is None
     assert op.path.startswith("wiki/")
     assert op.path.endswith(".md")
     assert op.new_body is not None
     assert "Whole New Topic" in op.new_body
-    # FakeLLM captured the prompt — verify the broken target was injected
-    # so the model has the context it needs to emit a relevant stub.
+    # The whole point of #83 — body must not regress to TODO stubs.
+    assert "TODO" not in op.new_body
+    assert "stub page" not in op.new_body.lower()
+    # Rationale must surface the evidence count so reviewers see the
+    # repair was grounded, not hallucinated.
+    assert "evidence" in proposal.rationale.lower()
+    # The prompt must inject the evidence chunks so the LLM can ground
+    # its prose against real source text.
     assert fake.last_user is not None
     assert "Whole New Topic" in fake.last_user
+    assert "review time" in fake.last_user  # excerpt from chunk #1
 
 
 @pytest.mark.asyncio
-async def test_broken_wikilink_llm_disabled_returns_none(tmp_path: Path) -> None:
-    """When ``enable_llm`` is False, a heuristic miss must still return
-    None — the LLM path is opt-in and must not fire by default."""
+async def test_broken_wikilink_llm_skipped_when_evidence_insufficient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No evidence in D/I → the fixer must NOT call the LLM and the
+    orchestrator must record a structured ``evidence_insufficient`` reason
+    so agents reading ``FixProposalReport.skipped`` see why the wikilink
+    stays unrepaired (not the generic 'fixer returned None')."""
     wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
-    fake = FakeLLM(response_text=_STUB_LLM_RESPONSE)
+    counter = _patch_evidence(monkeypatch, [])  # zero chunks
+    fake = FakeLLM(response_text=_GROUNDED_LLM_RESPONSE)
+
+    ctx = _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=True)
+    reporter = _ListReporter()
+    report = await run_lint_propose(
+        report=LintReport(issues=[issue]),
+        rule="broken_wikilink",
+        limit=10,
+        ctx=ctx,
+        reporter=reporter,
+        registry={"broken_wikilink": BrokenWikilinkFixer()},  # type: ignore[dict-item]
+    )
+
+    assert report.proposals == []
+    reasons = _orchestrator_skipped_reasons(report)
+    assert len(reasons) == 1
+    assert reasons[0].startswith("evidence_insufficient"), reasons
+    # Evidence pipeline was invoked, LLM was not.
+    assert counter["calls"] == 1
+    assert fake.last_user is None, "LLM must not be called without evidence"
+    # Reporter also saw the reason on the live stream so --plain users
+    # see it without waiting for the final report.
+    log_messages = [
+        e[1]["message"] for e in reporter.events if e[0] == "log"
+    ]
+    assert any(
+        "evidence_insufficient" in m for m in log_messages
+    ), log_messages
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_llm_rejects_todo_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evidence is sufficient but the LLM still emits a TODO-laced body
+    (prompt regression, model misbehavior). The fixer must reject the
+    proposal and surface ``rejected_todo_marker`` as the skip reason —
+    a defence-in-depth so #83 cannot resurface through a prompt drift."""
+    wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    fake = FakeLLM(response_text=_TODO_LLM_RESPONSE)
+
+    ctx = _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=True)
+    report = await run_lint_propose(
+        report=LintReport(issues=[issue]),
+        rule="broken_wikilink",
+        limit=10,
+        ctx=ctx,
+        reporter=_ListReporter(),
+        registry={"broken_wikilink": BrokenWikilinkFixer()},  # type: ignore[dict-item]
+    )
+
+    assert report.proposals == []
+    reasons = _orchestrator_skipped_reasons(report)
+    assert len(reasons) == 1
+    assert reasons[0].startswith("rejected_todo_marker"), reasons
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_llm_rejects_title_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evidence is sufficient and the body is real prose, but the LLM
+    titled the page after a *related* concept (not the broken target).
+    Applying that would add an unrelated K-page while leaving the
+    original ``[[Whole New Topic]]`` reference still broken — exactly
+    the silent failure mode #83 is fighting. The fixer must reject the
+    proposal with ``rejected_title_mismatch`` so agents see why."""
+    wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    mismatched_response = (
+        "<page path=\"wiki/concepts/related-topic.md\" type=\"concept\">\n"
+        "---\n"
+        "tags: [grounded]\n"
+        "---\n"
+        "\n"
+        "# Related Topic\n"
+        "\n"
+        "Related Topic is a different concept that the evidence happens "
+        "to mention. It is not the canonical target of the broken link, "
+        "so creating this page would not resolve the original wikilink "
+        "and would only pollute the K-layer with an unrelated entry. "
+        "The fixer must catch this before proposing a create_page op.\n"
+        "</page>\n"
+    )
+    fake = FakeLLM(response_text=mismatched_response)
+
+    ctx = _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=True)
+    report = await run_lint_propose(
+        report=LintReport(issues=[issue]),
+        rule="broken_wikilink",
+        limit=10,
+        ctx=ctx,
+        reporter=_ListReporter(),
+        registry={"broken_wikilink": BrokenWikilinkFixer()},  # type: ignore[dict-item]
+    )
+
+    assert report.proposals == []
+    reasons = _orchestrator_skipped_reasons(report)
+    assert len(reasons) == 1
+    assert reasons[0].startswith("rejected_title_mismatch"), reasons
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_collect_evidence_falls_back_to_bm25_on_hybrid_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``mode='hybrid'`` embeds the query first; if the embedder raises
+    (no creds, transient outage, dim mismatch) the whole search blows
+    up. Without a fallback the fixer is recorded as ``fixer raised`` —
+    losing every BM25-recoverable repair on a base whose embedding leg
+    is temporarily degraded. We must retry with ``mode='bm25'`` so
+    lexical evidence still drives grounded proposals."""
+
+    class _FailingHybridSearcher:
+        instance: _FailingHybridSearcher | None = None
+        hybrid_called: int = 0
+        bm25_called: int = 0
+
+        @classmethod
+        def from_config(
+            cls, storage: Any, embedder: Any, retrieval_cfg: Any, **_kw: Any
+        ) -> _FailingHybridSearcher:
+            inst = cls()
+            cls.instance = inst
+            return inst
+
+        async def search(
+            self, q: str, *, limit: int, layer: Any, mode: str
+        ) -> list[Hit]:
+            _ = (q, limit, layer)
+            if mode == "hybrid":
+                type(self).hybrid_called += 1
+                raise RuntimeError("embedding provider unreachable")
+            type(self).bm25_called += 1
+            return _grounded_evidence_hits()
+
+    class _StubStorage:
+        async def get_active_embed_version(self, *, modality: str) -> Any:
+            _ = modality
+            return None
+
+    monkeypatch.setattr(bwl_mod, "HybridSearcher", _FailingHybridSearcher)
+    wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
+    fake = FakeLLM(response_text=_GROUNDED_LLM_RESPONSE)
+    ctx = FixerContext(
+        storage=_StubStorage(),  # type: ignore[arg-type]
+        llm=fake,
+        embedding=None,
+        wiki_root=wiki_root,
+        all_pages=[_meta_from(src_page)],
+        enable_llm=True,
+        cfg=_default_cfg(),
+    )
+    fixer = BrokenWikilinkFixer()
+    proposal = await fixer.propose(issue, ctx, reporter=_NullReporter())
+
+    assert _FailingHybridSearcher.hybrid_called == 1
+    assert _FailingHybridSearcher.bm25_called == 1, (
+        "fixer must retry with mode='bm25' after hybrid raises"
+    )
+    assert proposal is not None, "BM25 fallback must produce a grounded proposal"
+    assert proposal.source == "llm"
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_llm_rejects_singular_target_plural_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[[Network]]`` (singular target) + LLM page titled ``# Networks``
+    (regular plural). ``_normalize_for_match`` stems both sides to
+    ``network`` — a symmetric compare would accept this — but the real
+    resolver indexes stored titles via ``_normalize_base`` (no stem) so
+    a page indexed as ``networks`` would NOT resolve a stemmed lookup of
+    ``network``. The fixer must mirror the resolver's asymmetric
+    semantics or this proposal silently leaves ``broken_wikilink`` open."""
+    wiki_root = tmp_path
+    src_page = _make_page(
+        "Source",
+        "# Source\n\nSee [[Network]] for context.\n",
+    )
+    src_abs = wiki_root / src_page.path
+    src_abs.parent.mkdir(parents=True, exist_ok=True)
+    src_abs.write_text(
+        "---\ntitle: Source\n---\n\n# Source\n\nSee [[Network]] for context.\n",
+        encoding="utf-8",
+    )
+    issue = LintIssue(
+        kind="broken_wikilink",
+        path=src_page.path,
+        detail="[[Network]] has no matching wiki page",
+        line=3,
+    )
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    plural_response = (
+        "<page path=\"wiki/concepts/networks.md\" type=\"concept\">\n"
+        "---\n"
+        "tags: [grounded]\n"
+        "---\n"
+        "\n"
+        "# Networks\n"
+        "\n"
+        "Networks (plural) is a category encompassing many specific "
+        "network kinds. The evidence describes several examples and "
+        "their use cases. While related, this page title does not "
+        "match the singular link target and would leave the link "
+        "broken under the resolver's asymmetric normalize rules.\n"
+        "</page>\n"
+    )
+    fake = FakeLLM(response_text=plural_response)
+    ctx = _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=True)
+    report = await run_lint_propose(
+        report=LintReport(issues=[issue]),
+        rule="broken_wikilink",
+        limit=10,
+        ctx=ctx,
+        reporter=_ListReporter(),
+        registry={"broken_wikilink": BrokenWikilinkFixer()},  # type: ignore[dict-item]
+    )
+
+    assert report.proposals == []
+    reasons = _orchestrator_skipped_reasons(report)
+    assert len(reasons) == 1
+    assert reasons[0].startswith("rejected_title_mismatch"), reasons
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_llm_grounded_preserves_evidence_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grounded create_page op must cite the D-layer evidence
+    chunks' source paths in its ``sources:`` frontmatter, not the
+    K-layer page that contained the broken wikilink. Without this
+    override, ``parse_synthesis_response`` would stamp the referrer
+    path on every generated stub, breaking source traceability for
+    pages that were specifically built from D-layer evidence."""
+    wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
+    hits = _grounded_evidence_hits()  # two hits with paths sources/foo.md and sources/bar.md
+    _patch_evidence(monkeypatch, hits)
+    fake = FakeLLM(response_text=_GROUNDED_LLM_RESPONSE)
+    fixer = BrokenWikilinkFixer()
+    proposal = await fixer.propose(
+        issue,
+        _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=True),
+        reporter=_NullReporter(),
+    )
+
+    assert proposal is not None
+    op = proposal.operations[0]
+    assert op.new_frontmatter is not None
+    op_sources = op.new_frontmatter.get("sources", [])
+    assert isinstance(op_sources, list)
+    # Must cite the D-layer evidence paths, NOT the K-page referrer.
+    evidence_paths = {h.path for h in hits if h.path}
+    assert set(op_sources) == evidence_paths, (
+        f"expected sources = {evidence_paths!r}, got {op_sources!r}"
+    )
+    assert issue.path not in op_sources
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_llm_rejects_too_short_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One-sentence filler ("Topic A is a topic.") would technically
+    resolve the wikilink but adds no knowledge. Body-length floor
+    rejects it with ``rejected_body_too_short`` so the link stays
+    flagged as broken."""
+    wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    fake = FakeLLM(response_text=_SHORT_LLM_RESPONSE)
+
+    ctx = _ctx(pages=[src_page], wiki_root=wiki_root, llm=fake, enable_llm=True)
+    report = await run_lint_propose(
+        report=LintReport(issues=[issue]),
+        rule="broken_wikilink",
+        limit=10,
+        ctx=ctx,
+        reporter=_ListReporter(),
+        registry={"broken_wikilink": BrokenWikilinkFixer()},  # type: ignore[dict-item]
+    )
+
+    assert report.proposals == []
+    reasons = _orchestrator_skipped_reasons(report)
+    assert len(reasons) == 1
+    assert reasons[0].startswith("rejected_body_too_short"), reasons
+
+
+@pytest.mark.asyncio
+async def test_broken_wikilink_llm_disabled_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``enable_llm`` is False, a heuristic miss must still return
+    None — the LLM path is opt-in, and the evidence pipeline must NOT
+    even run (no storage hits, no embedder spend)."""
+    wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
+    counter = _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    fake = FakeLLM(response_text=_GROUNDED_LLM_RESPONSE)
     fixer = BrokenWikilinkFixer()
     proposal = await fixer.propose(
         issue,
@@ -380,15 +851,27 @@ async def test_broken_wikilink_llm_disabled_returns_none(tmp_path: Path) -> None
         reporter=_NullReporter(),
     )
     assert proposal is None
-    # The LLM must NOT have been called when the flag is off.
+    # Neither the evidence pipeline nor the LLM should fire when the
+    # user hasn't opted in.
+    assert counter["calls"] == 0
     assert fake.last_user is None
 
 
 @pytest.mark.asyncio
-async def test_broken_wikilink_llm_failure_returns_none(tmp_path: Path) -> None:
-    """An LLM exception in the stub path must not fail the whole propose
-    task — return None so the orchestrator records a skip."""
+async def test_broken_wikilink_llm_failure_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An LLM exception in the grounded path must not fail the whole
+    propose task — return None so the orchestrator records a soft skip.
+
+    We deliberately do NOT route this through FixerSkip: provider outages
+    are operational noise, not product semantics. The existing
+    ``safe_synthesize_pages`` soft-failure contract keeps logging them
+    via reporter; the proposal report's ``skipped`` field stays clean
+    of "LLM call failed" entries that would distract from the
+    evidence-vs-quality decisions agents care about."""
     wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
 
     class _RaisingLLM:
         async def complete(self, **kwargs: Any) -> Any:
@@ -409,18 +892,19 @@ async def test_broken_wikilink_llm_failure_returns_none(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_broken_wikilink_llm_stub_strips_alias_and_anchor(
-    tmp_path: Path,
+async def test_broken_wikilink_llm_strips_alias_and_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``[[Target|label]]`` / ``[[Target#section]]`` resolve against a
-    page titled ``Target``. The LLM stub MUST be built around the
+    page titled ``Target``. The grounded page MUST be built around the
     bare canonical name; otherwise the LLM titles the page with the
     suffix (``Target|label``) and the next lint pass keeps reporting
     the wikilink as broken."""
     wiki_root, src_page, _ = _make_broken_link_setup(
         tmp_path, broken_target="Whole New Topic|Custom Label"
     )
-    fake = FakeLLM(response_text=_STUB_LLM_RESPONSE)
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    fake = FakeLLM(response_text=_GROUNDED_LLM_RESPONSE)
     issue = LintIssue(
         kind="broken_wikilink",
         path=src_page.path,
@@ -434,17 +918,16 @@ async def test_broken_wikilink_llm_stub_strips_alias_and_anchor(
         reporter=_NullReporter(),
     )
     assert proposal is not None
-    # Prompt must instruct the LLM to build the stub around the bare
-    # canonical target — `[[Whole New Topic]]` — even though the
-    # source body the prompt also embeds still contains the raw
-    # `[[Whole New Topic|Custom Label]]` reference.
+    # Prompt must inject the bare canonical target — `[[Whole New Topic]]`
+    # — even though the source body the prompt also embeds still
+    # contains the raw `[[Whole New Topic|Custom Label]]` reference.
     assert fake.last_user is not None
     assert "[[Whole New Topic]]" in fake.last_user
     assert "[[Whole New Topic|Custom Label]]" in fake.last_user  # in source_context
     assert proposal.rationale.endswith("'[[Whole New Topic]]'")
 
     # Same check for `#anchor` syntax.
-    fake_anchor = FakeLLM(response_text=_STUB_LLM_RESPONSE)
+    fake_anchor = FakeLLM(response_text=_GROUNDED_LLM_RESPONSE)
     issue_anchor = LintIssue(
         kind="broken_wikilink",
         path=src_page.path,
@@ -468,11 +951,17 @@ async def test_broken_wikilink_llm_stub_strips_alias_and_anchor(
 
 
 @pytest.mark.asyncio
-async def test_broken_wikilink_llm_unparseable_returns_none(tmp_path: Path) -> None:
+async def test_broken_wikilink_llm_unparseable_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """LLM emits no usable ``<page>`` block (e.g. apologies / refusal):
-    fixer must skip rather than synthesise an empty page."""
+    fixer must skip rather than synthesise an empty page. Treated as a
+    soft failure (same channel as provider outages), not a FixerSkip —
+    the grounded prompt explicitly offers a ``REFUSE: ...`` exit when
+    evidence is insufficient, which lands here."""
     wiki_root, src_page, issue = _make_broken_link_setup(tmp_path)
-    fake = FakeLLM(response_text="Sorry, I cannot draft that stub.")
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    fake = FakeLLM(response_text="REFUSE: insufficient evidence")
     fixer = BrokenWikilinkFixer()
     proposal = await fixer.propose(
         issue,
@@ -796,31 +1285,38 @@ async def test_non_atomic_page_skips_when_llm_disabled(tmp_path: Path) -> None:
 # the gate to the heuristic branch only; the LLM path stays gated by
 # ``enable_llm`` alone.
 
-_CJK_STUB_LLM_RESPONSE = (
+_CJK_GROUNDED_LLM_RESPONSE = (
     "<page path=\"wiki/concepts/qin-dynasty.md\" type=\"concept\">\n"
     "---\n"
-    "tags: [stub]\n"
+    "tags: [history]\n"
+    "sources: [\"sources/foo.md\"]\n"
     "---\n"
     "\n"
     "# 秦朝\n"
     "\n"
-    "TODO: stub page for the broken `[[秦朝]]` reference. "
-    "Replace this body with real content.\n"
+    "秦朝是中国历史上第一个统一的中央集权王朝,根据证据所述,公元前 221 "
+    "年由秦始皇建立。证据描述了郡县制取代分封制、统一度量衡与文字、修筑长城 "
+    "等关键举措。这些制度奠定了此后两千余年中国官僚体系的基础,虽然王朝本身 "
+    "国祚短暂,仅历两世便告倾覆。秦朝还推行了书同文、车同轨,统一货币与度量衡, "
+    "并大规模修建驰道与水利工程,为后世留下了深远影响。考古发现表明,秦代陵墓 "
+    "形制与兵马俑数量也反映出当时中央集权对人力与资源的高度调动。\n"
     "</page>\n"
 )
 
 
 @pytest.mark.asyncio
 async def test_broken_wikilink_short_cjk_target_enters_llm_when_enabled(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``[[秦朝]]`` is 2 CJK chars — below the 4-char heuristic gate.
-    With ``enable_llm=True`` the LLM stub fallback MUST still fire; the
-    gate guards heuristic fuzzy match, not the LLM path."""
+    With ``enable_llm=True`` AND sufficient D/I evidence the grounded
+    LLM path MUST still fire; the heuristic length gate guards fuzzy
+    match, not the LLM path."""
     wiki_root, src_page, issue = _make_broken_link_setup(
         tmp_path, broken_target="秦朝"
     )
-    fake = FakeLLM(response_text=_CJK_STUB_LLM_RESPONSE)
+    _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    fake = FakeLLM(response_text=_CJK_GROUNDED_LLM_RESPONSE)
     fixer = BrokenWikilinkFixer()
     proposal = await fixer.propose(
         issue,
@@ -829,7 +1325,7 @@ async def test_broken_wikilink_short_cjk_target_enters_llm_when_enabled(
     )
 
     assert proposal is not None, (
-        "LLM stub fallback must fire for short CJK targets when enabled"
+        "grounded LLM path must fire for short CJK targets when enabled"
     )
     assert proposal.source == "llm"
     assert proposal.operations[0].kind == "create_page"
@@ -840,7 +1336,7 @@ async def test_broken_wikilink_short_cjk_target_enters_llm_when_enabled(
 
 @pytest.mark.asyncio
 async def test_broken_wikilink_short_cjk_target_skipped_when_llm_disabled(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Same short CJK target with ``enable_llm=False``: propose returns
     None and the LLM is NEVER called — confirms the relaxed gate didn't
@@ -848,7 +1344,8 @@ async def test_broken_wikilink_short_cjk_target_skipped_when_llm_disabled(
     wiki_root, src_page, issue = _make_broken_link_setup(
         tmp_path, broken_target="秦朝"
     )
-    fake = FakeLLM(response_text=_CJK_STUB_LLM_RESPONSE)
+    counter = _patch_evidence(monkeypatch, _grounded_evidence_hits())
+    fake = FakeLLM(response_text=_CJK_GROUNDED_LLM_RESPONSE)
     fixer = BrokenWikilinkFixer()
     proposal = await fixer.propose(
         issue,
@@ -857,4 +1354,5 @@ async def test_broken_wikilink_short_cjk_target_skipped_when_llm_disabled(
     )
 
     assert proposal is None
+    assert counter["calls"] == 0
     assert fake.last_user is None

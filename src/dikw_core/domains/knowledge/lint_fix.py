@@ -56,6 +56,30 @@ from .wiki import WikiPage, build_page, path_slug_title, write_page
 logger = logging.getLogger(__name__)
 
 
+class FixerSkip(Exception):
+    """Structured skip signal a fixer can raise to record a specific
+    ``reason`` in :attr:`FixProposalReport.skipped` instead of the
+    generic ``"fixer returned None"`` orchestrator default.
+
+    Use cases live in the per-rule fixers — broken_wikilink raises this
+    when D/I evidence is insufficient, when the LLM body fails grounding
+    checks, or when the proposed page path collides with an existing
+    page. Agents reading the propose-task result JSON then see the
+    actual product-semantic reason (``evidence_insufficient: 0 chunks``,
+    ``rejected_todo_marker``, ``path_collision: ...``) rather than a
+    catch-all None.
+
+    Caught only by :func:`run_lint_propose`. Soft failures that aren't
+    product-meaningful (LLM provider outages, parse errors) continue to
+    use the ``return None`` path so the skipped list stays focused on
+    decisions agents care about.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class FixOperation(BaseModel):
     """One page-level mutation in a fix proposal.
 
@@ -362,6 +386,12 @@ async def run_lint_propose(
             continue
         try:
             proposal = await fixer.propose(issue, ctx, reporter)
+        except FixerSkip as skip:
+            # Structured product-semantic skip — propagate the fixer's
+            # reason verbatim so agents reading the final report see why
+            # this issue stayed unrepaired.
+            _record_skip(idx, issue, skip.reason)
+            continue
         except Exception as e:
             await reporter.log(
                 "WARN",

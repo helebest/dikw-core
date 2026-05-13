@@ -7,6 +7,37 @@ on each entry call out exactly what shape changes break.
 
 ## Unreleased
 
+### fix(lint): broken_wikilink `--enable-llm` is now evidence-backed (#83)
+
+* **Semantics change**: `dikw client lint propose --rule broken_wikilink
+  --enable-llm` no longer creates TODO-stub placeholder pages. The
+  LLM is invoked only when the D/I-layer has enough source evidence to
+  ground a real K-page; insufficient-evidence cases stay visible in
+  the next `dikw lint` run as unresolved `broken_wikilink`.
+* **Three rejection paths**, each surfaced as a structured skip reason
+  in `FixProposalReport.skipped[].reason` (agent-visible in the
+  propose-task result JSON, not just on the live stream):
+  * `evidence_insufficient: N chunks, M chars` — D-layer hybrid search
+    returned fewer than 1 chunk or under 200 chars total.
+  * `rejected_todo_marker` — LLM body still contained `TODO` / `stub
+    page` / `placeholder` (defence-in-depth against prompt drift).
+  * `rejected_body_too_short` — body cleared the marker check but was
+    shorter than 200 chars (rejects "Topic A is a topic." filler).
+* **New skip signal**: `FixerSkip(reason)` in
+  `domains/knowledge/lint_fix.py` lets any fixer record a structured
+  product-semantic skip reason on the propose report. Other fixers are
+  unaffected; the orchestrator continues to record `"fixer returned
+  None"` for the unstructured-skip path.
+* **Prompt rename**: `prompts/lint_fix_broken_wikilink_stub.md` →
+  `prompts/lint_fix_broken_wikilink_grounded.md`. The new prompt
+  injects retrieved evidence chunks and offers an explicit `REFUSE:
+  insufficient evidence` exit when grounding fails.
+* **Internal API**: `BrokenWikilinkFixer` now reads `ctx.storage` and
+  `ctx.embedding` to retrieve evidence via `HybridSearcher`. No
+  changes to `FixerContext` shape, server routes, or client CLI flags
+  — `--enable-llm` still toggles the LLM path, the LLM path just
+  behaves correctly now.
+
 ### Agent-first CLI evolution + remove `query`
 
 * **BREAKING (HTTP)**: `POST /v1/query` is **removed**. dikw-core no longer

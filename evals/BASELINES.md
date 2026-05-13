@@ -7,6 +7,107 @@ regression from a re-run variance.
 Newest first. `dikw eval` thresholds in each dataset's `dataset.yaml`
 are calibrated ~2-3 % below the most recent canonical-mode run.
 
+## 2026-05-13 — broken_wikilink `--enable-llm` evidence-backed (#83)
+
+**Status:** semantics change to the K-layer `lint propose` LLM path.
+Before this PR, `--enable-llm` produced TODO-stub placeholder pages
+that satisfied wikilink resolution without adding knowledge. After,
+the LLM is invoked only when the D-layer has enough source evidence
+to ground a real page; insufficient cases stay flagged as unresolved
+`broken_wikilink`.
+
+**Provider config:** openai_codex (gpt-5.5 via ChatGPT subscription)
+LLM + Qwen3-Embedding-0.6B on Gitee AI; same as the 2026-05-10
+baseline below so before/after are directly comparable.
+
+**Methodology (after):** randomly-ported `dikw serve` against
+`bases/elon-musk-validation`, then:
+
+```
+DIKW_SERVER_URL=http://127.0.0.1:<port> \
+  dikw client lint propose --rule broken_wikilink --enable-llm \
+    --limit 10 --plain
+DIKW_SERVER_URL=... dikw client tasks show <task_id> > propose.json
+```
+
+Inspect `result.proposals[].operations[].new_body` for forbidden
+tokens + body length; inspect `result.skipped[].reason` distribution.
+
+### Before (2026-05-10 PR2 spot check)
+
+| metric                   | value                          |
+|--------------------------|--------------------------------|
+| issues consumed          | 2                              |
+| proposals returned       | 2                              |
+| skipped                  | 0                              |
+| generated body ⊇ `TODO`  | 2/2 (every proposal)           |
+| skip reasons surfaced    | none (orchestrator default)    |
+
+The user later reported a demo workspace producing **108 TODO-stub
+pages** from one `lint apply` — the bug #83 describes.
+
+### After (this PR — 2026-05-13 real-LLM run, `--limit 10`)
+
+`elon-musk-validation` base, 99 total `broken_wikilink` issues in
+the lint scan; the first 10 sampled by `run_lint_propose`. openai_codex
+(gpt-5.5) LLM + Qwen3-Embedding-0.6B (Gitee AI) embedder, both
+auto-wired by `api.lint_propose` when `enable_llm=True`.
+
+| metric                                            | value     |
+|---------------------------------------------------|-----------|
+| issues consumed                                   | 10        |
+| proposals returned (grounded `create_page`)       | 5         |
+| skipped: `evidence_insufficient`                  | 0         |
+| skipped: `rejected_todo_marker`                   | 0         |
+| skipped: `rejected_body_too_short`                | 0         |
+| skipped: `rejected_title_mismatch`                | 0         |
+| skipped: `path_collision`                         | 0         |
+| skipped: `fixer returned None` (soft LLM REFUSE / parse-fail) | 5 |
+| generated body ⊇ `TODO` / `stub page` / `placeholder` | **0/5**  |
+| body length min / mean / max (chars)              | 616 / 763 / 893 |
+| evidence chunks per proposal                      | 8 (constant — `_EVIDENCE_TOP_K`) |
+| evidence chars per proposal (range)               | 9 201 – 11 856 |
+| frontmatter `sources` cites D-layer               | **5/5** (`sources/elon-musk.md`) — never the K-page referrer |
+
+Sample proposal — `[[Justine Musk]]` (truncated to first paragraph;
+note: prose actually traceable to evidence, not TODO-stubbed):
+
+> # Justine Musk
+>
+> The supplied source refers to Justine Musk in Chinese translation
+> as "贾丝廷" and gives her a named section in the biography's table
+> of contents. In the Zip2-era material, she appears in a photo
+> caption with Elon Musk receiving a delivered McLaren. The source
+> also describes a hotel-pool wedding ceremony involving Justine and
+> Musk: she wore a sleeveless white dress with a white floral
+> headpiece, Musk wore a fitted tailcoat, Maye and Errol were present,
+> and after dinner the group danced a conga line. […]
+
+Rationale stamped on the proposal:
+> `LLM-grounded (8 evidence chunks, 11856 chars) for missing target '[[Justine Musk]]'`
+
+### Acceptance assertions met
+
+- **Zero TODO-laced bodies** (5/5 clean). The bug #83 specifically
+  reported is gone.
+- **D-layer source traceability** preserved on every proposal —
+  `sources: ["sources/elon-musk.md"]` (Round-2 P3 fix verified live).
+- The 5 skips fell into the soft-failure bucket (`safe_synthesize_pages`
+  returning None on LLM REFUSE / parse-fail). Reasons land on the
+  live NDJSON stream via `reporter.log` but the final
+  `FixProposalReport.skipped[].reason` is currently the generic
+  `"fixer returned None"` for these cases. **Follow-up gap:** elevate
+  LLM REFUSE into a structured `FixerSkip("rejected_llm_refused")` so
+  agents reading the propose-task result distinguish "model refused on
+  given evidence" from real operational failures. Out of scope for #83
+  proper (which targets TODO-stub elimination + evidence gating); track
+  separately.
+- `lint apply` intentionally NOT run during this baseline — the
+  numbers above all derive from the propose-task result JSON without
+  mutating the base. A separate apply pass would be needed to confirm
+  `grep -r "TODO: stub page generated" wiki/` returns 0 on disk; the
+  proposal-side guarantees above make that a foregone conclusion.
+
 ## 2026-05-13 — fact_grounding_ratio tau sweep + claim-filter fix
 
 Resolves follow-up #1 from the synth eval mvp baseline below. The

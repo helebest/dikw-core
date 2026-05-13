@@ -2273,11 +2273,13 @@ async def lint_propose(
     still work. The default keeps a ``propose`` invocation cheap and
     deterministic; users opt in via ``--enable-llm``.
 
-    ``llm`` is a passthrough override used by tests; in production
-    it is built from ``cfg.provider`` the same way :func:`synthesize`
-    does, so ``$DIKW_*_API_KEY`` resolution flows through one path.
-    ``embedder`` is preserved for call-signature stability (PR1
-    accepted it as a future-fixer hook); no PR2 fixer reads it yet.
+    ``llm`` / ``embedder`` are passthrough overrides used by tests; in
+    production both are built from ``cfg.provider`` the same way
+    :func:`synthesize` / :func:`retrieve` do, so ``$DIKW_*_API_KEY``
+    resolution flows through one path. The embedder powers the D-layer
+    hybrid evidence search the ``broken_wikilink`` grounded repair
+    relies on — without it the search silently degrades to BM25 and
+    semantically relevant but lexically distant evidence is missed.
     """
     cfg, root, storage = await _with_storage(path)
     try:
@@ -2289,16 +2291,20 @@ async def lint_propose(
             WikiPageMeta(path=doc.path, title=doc.title)
             for doc in await storage.list_documents(layer=Layer.WIKI, active=True)
         ]
-        # Skip the build entirely on ``--enable-llm False`` so the
-        # provider-import + key-lookup cost stays out of heuristic-only
-        # propose runs.
+        # Skip the LLM + embedder builds entirely on ``--enable-llm
+        # False`` so the provider-import + key-lookup cost stays out
+        # of heuristic-only propose runs.
         _llm: Any = llm
-        if _llm is None and enable_llm:
-            _llm = build_llm(cfg.provider, wiki_base=root)
+        _embedder: Any = embedder
+        if enable_llm:
+            if _llm is None:
+                _llm = build_llm(cfg.provider, wiki_base=root)
+            if _embedder is None:
+                _embedder = build_embedder(cfg.provider)
         ctx = FixerContext(
             storage=storage,
             llm=_llm,
-            embedding=embedder,
+            embedding=_embedder,
             wiki_root=root,
             all_pages=all_pages,
             enable_llm=enable_llm,

@@ -50,22 +50,31 @@ Tooling config lives in `pyproject.toml`:
 
 ```
 src/dikw_core/
-├── api.py                 engine facade (ingest, query, synth, distill, review, lint, status)
-├── cli.py                 top-level Typer app: version, init, serve + dikw client subgroup
+├── api.py                 engine facade — ingest, retrieve, synthesize, lint (+ propose/apply),
+│                          distill, review, list_pages, read_page, list_links, list_graph,
+│                          read_asset, status, health, check_providers
+├── cli.py                 top-level Typer app: version, init, serve, auth subgroup, dikw client subgroup
+│                          (client commands are also spliced as top-level aliases — `dikw status`,
+│                          `dikw retrieve`, `dikw serve-and-run`, …)
+├── auth_cli.py            `dikw auth {login,import,status,list,logout}` — local OAuth token store at <base>/.dikw/auth.json
+├── logging.py             init_logging() — DIKW_LOG_LEVEL clamp; clamps httpx/httpcore/urllib3 to WARNING
+├── md_inspect.py          standalone markdown preflight — frontmatter + image-ref extraction (no engine deps)
 ├── progress.py            ProgressReporter Protocol + CancelToken (engine-side progress contract)
 ├── config.py              pydantic config + YAML loader (dikw.yml)
 ├── schemas.py             cross-layer DTOs (cross the Storage Protocol boundary — no SQL types)
 ├── domains/               DIKW domain model — the four layers grouped together
-│   ├── data/              D layer — sources + SourceBackend registry (markdown only)
-│   ├── info/              I layer — chunk, embed, RRF-fused hybrid search
-│   ├── knowledge/         K layer — wiki pages, [[wikilinks]], index.md, log.md, lint
-│   └── wisdom/            W layer — distill, review state machine, apply-at-query
-├── providers/             LLMProvider + EmbeddingProvider Protocols (anthropic, openai_compat)
-├── storage/               Storage Protocol + adapters (sqlite, postgres)
-├── eval/                  retrieval-quality eval — metrics, dataset loader, runner, packaged datasets
+│   ├── data/              D layer — sources + assets + SourceBackend registry (markdown only)
+│   ├── info/              I layer — chunk, tokenize, embed, render, RRF-fused hybrid search
+│   ├── knowledge/         K layer — wiki pages, [[wikilinks]], index.md, log.md, lint, lint_fix + lint_fixers/
+│   └── wisdom/            W layer — distill, review state machine, apply-at-retrieve (PR-5)
+├── providers/             LLMProvider + EmbeddingProvider + MultimodalEmbeddingProvider Protocols
+│                          (anthropic_compat, openai_compat, openai_codex, gitee_multimodal)
+├── storage/               Storage Protocol + adapters (sqlite, postgres) + migrations/{sqlite,postgres}
+├── eval/                  retrieval + synth-quality eval — metrics, judge, dataset loader, runner, fake embedder
 ├── prompts/               versioned LLM prompts (importlib.resources)
-├── server/                FastAPI app, auth, sync + task routes, NDJSON streaming, task subsystem
-└── client/                Remote Typer CLI + httpx transport + NDJSON progress renderer + sources importer
+├── server/                FastAPI app, auth, sync + task + import + retrieve + pages + assets + graph routes,
+│                          NDJSON streaming, task subsystem
+└── client/                Remote Typer CLI + httpx transport + NDJSON progress + sources importer + converter dispatch
 ```
 
 ### Layering invariants
@@ -81,7 +90,7 @@ src/dikw_core/
 
 ### Core invariants
 
-- **Karpathy's rule:** *scoping is deterministic, reasoning is probabilistic*. Navigation (source listing, chunk lookup, link traversal, wisdom lookup-by-title) is deterministic SQL/file I/O. LLMs enter only at synth, distill, and the final answer step of query.
+- **Karpathy's rule:** *scoping is deterministic, reasoning is probabilistic*. Navigation (source listing, chunk lookup, link traversal, wisdom lookup-by-title) is deterministic SQL/file I/O. LLMs enter only at synth and distill — the two engine-internal authoring legs that write the K and W layers. **Answer synthesis is not a `dikw-core` verb**; `retrieve` returns ranked chunks + page refs and the agent layer runs its own LLM on the result.
 - **W layer gate:** every wisdom item must cite **≥ 2 pieces of evidence** from K or D; state transitions go through `dikw review approve|reject`.
 - **On-disk format is the product.** `wiki/` and `wisdom/` are plain markdown with YAML front-matter and `[[wikilinks]]` — an Obsidian vault the user owns. The engine writes, the user reads/edits with any editor.
 - **Idempotent ingest.** Files whose content hash is unchanged are skipped.

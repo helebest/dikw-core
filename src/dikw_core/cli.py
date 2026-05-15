@@ -10,7 +10,7 @@ Top-level commands fall into two groups:
   running ``dikw serve`` instance over HTTP + NDJSON. The full surface
   lives under the ``client`` subcommand group, and the most common
   commands are also exposed as top-level aliases so existing muscle
-  memory (``dikw status``, ``dikw query "…"``) keeps working.
+  memory (``dikw status``, ``dikw retrieve "…"``) keeps working.
 """
 
 from __future__ import annotations

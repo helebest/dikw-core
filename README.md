@@ -33,7 +33,7 @@ cd my-base
 # `serve-and-run` — it spawns a local server, runs the inner command,
 # and tears it down.
 uv run dikw serve-and-run -- ingest --no-embed
-uv run dikw serve-and-run -- query "What does Karpathy mean by deterministic scoping?"
+uv run dikw serve-and-run -- retrieve "What does Karpathy mean by deterministic scoping?"
 ```
 
 For interactive sessions or long iterations, run `dikw serve` once and
@@ -47,11 +47,14 @@ uv run dikw client synth               # K layer (needs ANTHROPIC_API_KEY or Ope
 uv run dikw client distill             # W-layer candidates
 uv run dikw client review list
 uv run dikw client review approve W-abcdef123456
-uv run dikw client query "What does Karpathy mean by deterministic scoping?"
+uv run dikw client retrieve "What does Karpathy mean by deterministic scoping?"
 ```
 
-> Top-level aliases (`dikw status`, `dikw query`, …) are kept as shortcuts and
-> route through the same client.
+> Top-level aliases (`dikw status`, `dikw retrieve`, …) are kept as shortcuts and
+> route through the same client. **`dikw-core` no longer ships an in-engine
+> answer-synthesis path** — `retrieve` returns ranked chunks + page refs and
+> the agent (Claude Code, ChatGPT, your own script) feeds them into its own
+> LLM. See [`AGENTS.md`](./AGENTS.md).
 
 Server deployment, security posture, and the wire contract live in
 [`docs/server.md`](./docs/server.md).
@@ -77,16 +80,26 @@ Everything else lives under `dikw client *` and talks to a running server
 | command                     | does                                                                          |
 | --------------------------- | ----------------------------------------------------------------------------- |
 | `dikw client status`        | counts across DIKW layers                                                     |
+| `dikw client info`          | raw `GET /v1/info` passthrough — version, storage backend, auth posture       |
+| `dikw client health`        | server self-description (base, version, storage, providers) — the first call an agent makes |
 | `dikw client check`         | ping the configured LLM + embedding endpoints to verify `dikw.yml` + keys     |
 | `dikw client import <path>` | pre-flight + import local md packages (md + referenced assets) into the server's `sources/` |
 | `dikw client ingest [--no-embed]` | parse + chunk + FTS-index + embed the server's `sources/` tree           |
-| `dikw client query "<q>"`   | hybrid search + LLM answer (streams tokens via NDJSON) with citations         |
+| `dikw client retrieve "<q>"` | hybrid search returning ranked chunks + page refs (no LLM call); agent supplies its own synthesis |
 | `dikw client synth [--all]` | LLM turns source docs into K-layer wiki pages; maintains `index.md`+`log.md`  |
-| `dikw client lint`          | report broken wikilinks, orphan pages, duplicate titles                       |
+| `dikw client lint [propose\|proposals\|apply]` | report broken wikilinks / orphan pages / duplicate titles; propose + apply structured fixes |
 | `dikw client distill`       | LLM proposes W-layer candidates (each needs ≥ 2 pieces of evidence)           |
 | `dikw client review {list,approve,reject}` | drive the candidate -> approved / archived state machine       |
+| `dikw client pages {list,get,links}` | enumerate pages / read a page body + chunk anchors / walk the K-layer link graph |
+| `dikw client graph get`     | fetch the whole base graph (nodes + edges + unresolved wikilinks) in one read |
+| `dikw client assets get <id> --output <file>` | download a content-addressed asset by sha256 id              |
 | `dikw client eval [--dataset]` | run retrieval-quality evaluation against packaged or custom datasets       |
 | `dikw client tasks {list,show,follow,cancel}` | inspect running / past async tasks on the server               |
+| `dikw client serve-and-run -- <cmd>` | same as the top-level shortcut — one-shot server + inner command + teardown |
+
+The `dikw auth {login,import,status,list,logout}` subgroup is **local** —
+it manages OAuth tokens in `<base>/.dikw/auth.json` without talking to a
+server (used by the `openai_codex` provider; see [`docs/providers.md`](./docs/providers.md)).
 
 ## Providers
 
@@ -110,7 +123,7 @@ provider:
 actual vendor is whatever `llm_base_url` points at.
 
 - `anthropic_compat` → uses the `anthropic` async SDK with `cache_control`
-  on the system prompt, so repeated synth/query calls hit the prompt cache.
+  on the system prompt, so repeated synth/distill calls hit the prompt cache.
   Set `llm_base_url` to retarget the SDK at any Anthropic-protocol-compatible
   endpoint (e.g., MiniMax's `https://api.minimaxi.com/anthropic`); leave null
   for api.anthropic.com.
@@ -159,7 +172,7 @@ export ANTHROPIC_API_KEY=<your-MiniMax-key>
 export DIKW_EMBEDDING_API_KEY=<your-Gitee-key>
 ```
 
-Verify connectivity **before** running ingest/query. The two legs can be
+Verify connectivity **before** running ingest/synth/distill. The two legs can be
 probed separately, which is useful when you set up one vendor first:
 
 ```bash

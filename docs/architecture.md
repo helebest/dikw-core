@@ -32,8 +32,11 @@ no longer performs answer synthesis.
 
 ```text
 src/dikw_core/
-├── api.py                 thin facade (init_wiki, ingest, synth, distill,
-│                          review, retrieve, lint, status)
+├── api.py                 thin facade — init_wiki, ingest, retrieve,
+│                          synthesize, lint (+ lint_propose / lint_apply),
+│                          distill, review state machine, list_pages,
+│                          read_page, list_links, list_graph,
+│                          read_asset, status, health, check_providers
 ├── config.py              Pydantic config + YAML loader
 ├── schemas.py             cross-layer DTOs
 ├── domains/                 DIKW domain model (the four layers)
@@ -65,9 +68,13 @@ src/dikw_core/
 │       ├── review.py        approve/reject state machine
 │       └── apply.py         stem-aware token overlap; surfaced to agents via /v1/wisdom/applicable (PR-5)
 ├── providers/
-│   ├── base.py            LLMProvider + EmbeddingProvider Protocols
-│   ├── anthropic.py       anthropic SDK, system-prompt cache_control
-│   └── openai_compat.py   openai SDK; any base_url
+│   ├── base.py              LLMProvider + EmbeddingProvider + MultimodalEmbeddingProvider Protocols
+│   ├── anthropic_compat.py  anthropic SDK, system-prompt cache_control; retargets via llm_base_url
+│   ├── openai_compat.py     openai SDK; any base_url (OpenAI, Azure, Ollama, DeepSeek, GLM, Gemini-compat, …)
+│   ├── openai_codex.py      ChatGPT-only GPT-5 family via dikw-managed OAuth at <base>/.dikw/auth.json
+│   ├── codex_auth.py        device-code + import + refresh for the codex OAuth store
+│   ├── gitee_multimodal.py  Gitee AI multimodal-embedding HTTP client (text + image inputs)
+│   └── _http.py             shared httpx pool helpers
 ├── storage/
 │   ├── base.py              Storage Protocol (engine depends only on this)
 │   ├── sqlite.py            SQLite + sqlite-vec + FTS5 (default)
@@ -76,9 +83,14 @@ src/dikw_core/
 │       ├── sqlite/          schema SQL
 │       └── postgres/        schema SQL (vector extension)
 ├── prompts/               versioned LLM prompts loaded via importlib.resources
-├── server/                FastAPI app + auth + sync/task/import/retrieve routes + task subsystem
-├── client/                Remote Typer CLI + httpx transport + NDJSON progress
-└── cli.py                 top-level Typer app: version, init, serve + dikw client subgroup
+├── server/                FastAPI app + auth + sync/task/import/retrieve/pages/assets/graph routes + task subsystem
+├── client/                Remote Typer CLI + httpx transport + NDJSON progress + sources importer + converter dispatch
+├── auth_cli.py            local `dikw auth {login,import,status,list,logout}` for the per-base OAuth store
+├── logging.py             init_logging() — DIKW_LOG_LEVEL + httpx/httpcore/urllib3 clamp
+├── md_inspect.py          standalone markdown preflight (frontmatter + image-ref extraction)
+└── cli.py                 top-level Typer app: version, init, serve, auth subgroup, dikw client subgroup
+                           (client commands are also spliced as top-level aliases — `dikw status`,
+                           `dikw retrieve`, `dikw serve-and-run`, …)
 ```
 
 ## Seams on purpose

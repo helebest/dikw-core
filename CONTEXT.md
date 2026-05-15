@@ -50,16 +50,11 @@ _CLI_: `dikw client distill`
 _HTTP_: `POST /v1/distill`
 _Avoid_: extract, derive
 
-**query**:
-Answer a natural-language question by retrieving from I + applicable W, then asking the LLM. End-of-pipeline read path.
-_CLI_: `dikw client query "..."`
-_HTTP_: `POST /v1/query` (streams NDJSON)
-_Avoid_: ask, search (which is `retrieve`)
-
 **retrieve**:
-Like `query` but stops before the LLM — returns chunks + page refs for an agent to assemble its own answer.
+End-of-pipeline read path. Hybrid search (BM25 + vector + RRF) over the I layer returns ranked chunks + page refs. **No LLM call** — the agent owns synthesis (rewrite, expansion, conversation context, the final answer prompt). `dikw-core` no longer ships an in-engine `query` verb.
 _CLI_: `dikw client retrieve "..."`
-_HTTP_: `POST /v1/retrieve` (streams NDJSON)
+_HTTP_: `POST /v1/retrieve` (streams NDJSON: `retrieve_started → retrieval_done → final`)
+_Avoid_: query, ask, search
 
 ## Relationships
 

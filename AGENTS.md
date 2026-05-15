@@ -45,6 +45,8 @@ fit. dikw-core is stateless; agents have the context dikw-core doesn't.
 | `GET /v1/base/pages` | list pages registered in the base, optional `?layer=` filter | discovering page paths to read |
 | `GET /v1/base/pages/{path}` | full page body + chunk anchors aligned to the parsed coordinate space | reading a specific page after a retrieval hit lands you on it |
 | `GET /v1/base/pages/{path}/links` | K-layer link neighbours of a page — `outgoing[]` (edges from this page) + `incoming[]` (edges to this page), optional `?direction=in\|out\|both` and `?limit=N`. Every returned edge resolves to an active document (bare URLs and deactivated dsts are filtered), so you can always feed `dst_path` / `src_path` back into `/v1/base/pages/{path}` | walking the wiki graph one hop without re-parsing `[[wikilink]]` syntax |
+| `GET /v1/base/graph` | whole-base graph in one read: `nodes[]`, `edges[]`, `unresolved[]`, `stats{}`, plus a `base_revision` content hash for cheap caching. Optional `?active=true\|false`. | global graph view (knowledge-graph UI, connectivity analysis) without N requests |
+| `GET /v1/assets/{asset_id}` | stream the raw bytes of a content-addressed asset (sha256 hex id). Immutable; `ETag` + `Cache-Control: public, max-age=31536000, immutable`. Look up the id via the `assets[]` array on `GET /v1/base/pages/{path}` | rendering images embedded in a page response, or piping a binary into another tool |
 | `POST /v1/ingest` | ingest whatever is on disk under `<base>/sources/` (loaded there by `POST /v1/import` or by the user dropping files in) | when the user adds/edits markdown and wants the index refreshed |
 | `GET /v1/status`, `POST /v1/lint`, `POST /v1/check` | counts, lint issues, provider connectivity | sanity checks the user may ask for |
 
@@ -58,6 +60,8 @@ dikw client retrieve "your question" --plain # pipe-safe final JSON (chunks + pa
 dikw client pages list                       # JSON by default
 dikw client pages get sources/notes/alpha.md # JSON
 dikw client pages links wiki/Foo.md          # JSON: {outgoing, incoming}
+dikw client graph get                        # JSON: full base graph in one call
+dikw client assets get <asset_id> --output f # streams bytes to a local file; metadata to stdout JSON
 dikw client import ./local-sources           # pre-flights + imports md packages
 dikw client ingest                           # rendered progress; NOT pipeable
 ```

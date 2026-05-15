@@ -26,16 +26,23 @@ same runner, so the CLI and the gate can never drift.
 - **What's covered.** Retrieval (I layer): chunking + RRF fusion + storage
   lookup. Catches: wrong chunk boundaries, broken vec/FTS wiring, RRF bugs,
   storage-adapter regressions.
-- **What's not.** Generation (K-layer synth, query answering) is not
-  measured. A retrieval hit doesn't mean the LLM will answer correctly.
+- **What's not.** Generation is not measured. The two engine-internal LLM
+  legs (K-layer synth, W-layer distill) get partial coverage via
+  `dikw eval --eval synth` (added 2026-05-12; seven quantified metrics —
+  `fact_grounding_ratio`, `atomicity_score`, `duplicate_ratio_max`,
+  `wikilink_resolved_ratio`, `expected_coverage`, `language_fidelity`,
+  `page_density`). Agent-side answer synthesis (which lives outside
+  dikw-core entirely now that `query` is removed) is the caller's
+  responsibility to evaluate.
 
 ## Options for generation-side eval
 
 ### Homegrown golden answers
 
-Author ~20 Q/A pairs with **reference answers**, run `api.query` against
-a live LLM, compare output to reference via string match or embedding
-cosine.
+Author ~20 Q/A pairs with **reference answers**, run `api.retrieve` +
+an LLM call wired into the eval harness, compare output to reference
+via string match or embedding cosine. The harness owns the LLM call;
+the engine side stays retrieval-only.
 
 - **Pros:** deterministic scoring, no extra deps, cheap to run.
 - **Cons:** string/cosine match is brittle — paraphrased correct answers

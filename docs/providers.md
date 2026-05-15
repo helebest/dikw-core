@@ -14,7 +14,7 @@ to speak), not the vendor — vendor is whatever `llm_base_url` points at:
   `llm_base_url` retargets it at any Anthropic-protocol-compatible
   endpoint (e.g., MiniMax's `https://api.minimaxi.com/anthropic`).
   Applies `cache_control: ephemeral` on the system prompt, so repeated
-  synth / query / distill within the 5-minute TTL hit the prompt cache.
+  synth / distill within the 5-minute TTL hit the prompt cache.
   Leave `llm_base_url` null to talk to api.anthropic.com directly.
 - **`openai_compat`** — uses the `openai` async SDK against any
   `llm_base_url` that speaks the OpenAI HTTP surface. Covers OpenAI,
@@ -136,21 +136,26 @@ automation, wrap the call in your own retry layer (e.g., `tenacity`).
 
 The `AnthropicCompatLLM` provider passes `cache_control: {"type": "ephemeral"}`
 on the system prompt, cutting repeat-call input-token cost by ~90%
-within a 5-minute TTL. Synth / query / distill all benefit.
+within a 5-minute TTL. Synth / distill both benefit. (Retrieve never
+calls the LLM — answer synthesis is the agent's job — so prompt caching
+is irrelevant on the read path.)
 
 **`openai_compat` does not expose prompt caching** — GLM / Gemini /
 DeepSeek pay full price on every call even with a stable system
 prompt. If you plan heavy synth work on an `openai_compat` vendor, the
 cost model is different from the Anthropic leg.
 
-### 5. `max_tokens` is hardcoded
+### 5. `max_tokens` is per-op, configurable via `dikw.yml`
 
-Set in [`api.py`](../src/dikw_core/api.py):
-`synth=2048, distill=2048, query=1024`. These are comfortable for all
+Defaults (in [`config.py`](../src/dikw_core/config.py)):
+`provider.llm_max_tokens_synth = 2048`,
+`provider.llm_max_tokens_distill = 2048`. These are comfortable for all
 tested vendors, but some cost-optimized models (a few GLM-Flash
 variants, smaller Gemini Nano endpoints) cap responses below 2048 and
-will return 400. If you hit this, the fix is a small patch making the
-value configurable — not merged yet.
+return 400. Override per-base by adding the field(s) to your
+`dikw.yml` `provider:` block — no code change needed. There is no
+`llm_max_tokens_query` knob; `retrieve` doesn't call an LLM, so the
+read-path budget lives on the agent side.
 
 ### 6. Two separate keys, on purpose
 
@@ -233,13 +238,13 @@ flagging — keep these in mind before flipping `llm: openai_codex`:
 - **gpt-5.5 / gpt-5.4-mini / gpt-5.3-codex are ChatGPT-only.** They are
   not exposed at `api.openai.com`; pointing `llm_base_url` at the public
   OpenAI API will return `model_not_found`.
-- **No prompt caching.** Repeated synth / query / distill within the same
+- **No prompt caching.** Repeated synth / distill within the same
   session pay full input-token cost — same caveat as `openai_compat`,
   unlike `anthropic_compat`'s `cache_control: ephemeral`.
 - **Reasoning fragments are dropped today.** dikw's `LLMStreamEvent`
   Protocol carries a `reasoning` event type and the codex provider emits
   it for `response.reasoning_summary_text.delta` events, but the
-  query/synth NDJSON renderer only forwards `token` / `done`. Switch to
+  synth NDJSON renderer only forwards `token` / `done`. Switch to
   reasoning models freely — the chain-of-thought just isn't surfaced to
   the user yet (a follow-up PR will add a `--show-reasoning` toggle).
 - **`$CODEX_HOME` is consulted only by `dikw auth import`** as the source
@@ -329,8 +334,8 @@ retrieval:
   vector_weight: 1.0  # raise for paraphrase / semantic match
 ```
 
-No code change needed — `api.query` and the server's `POST /v1/doc/search`
-endpoint pick up the block on next call.
+No code change needed — `api.retrieve` and the server's
+`POST /v1/doc/search` endpoint pick up the block on next call.
 
 ### Score-normalised fusion alternatives
 
@@ -453,7 +458,7 @@ config:
 - [ ] If you're migrating from another vendor, `.dikw/index.sqlite` is
       deleted (see gotcha #1).
 - [ ] Costs understood: if the LLM leg is `openai_compat`, you pay full
-      input-token price on every synth / query — no prompt caching.
+      input-token price on every synth / distill — no prompt caching.
 - [ ] If the LLM leg is `openai_codex`, you've authenticated via
       `dikw auth login openai-codex --wiki .` (or `dikw auth import`)
       and `dikw auth status` reports `active` (gotcha #8).

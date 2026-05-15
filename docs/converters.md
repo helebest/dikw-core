@@ -53,7 +53,7 @@ The entry-point name (`marker` here) is informational — `Converter.name`
 on the loaded class is what dispatch uses.
 
 Discovery is **lazy**: `dikw client` only loads plugins when an actual
-non-md file triggers dispatch. Common commands (`status`, `query`,
+non-md file triggers dispatch. Common commands (`status`, `retrieve`,
 markdown-only `import`) never pay plugin import cost.
 
 ## Selection priority

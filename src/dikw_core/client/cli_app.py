@@ -1702,7 +1702,7 @@ def serve_and_run_cmd(
 
         dikw client serve-and-run -- status
         dikw client serve-and-run --base ./my-base -- ingest --no-embed
-        dikw client serve-and-run --keep-alive -- query "..."
+        dikw client serve-and-run --keep-alive -- retrieve "..."
     """
     inner_cmd = list(ctx.args)
     opts = _sar.ServeAndRunOptions(

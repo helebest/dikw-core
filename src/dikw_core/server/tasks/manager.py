@@ -30,7 +30,6 @@ from typing import Any
 
 from ...progress import CancelToken, ProgressReporter
 from .._time import isoformat_utc_ms as _isoformat
-from .bus import ProgressBus
 from .store import TaskRow, TaskStatus, TaskStore
 
 logger = logging.getLogger(__name__)
@@ -47,13 +46,19 @@ def _params_digest(params: dict[str, Any] | None) -> str:
 
 
 class TaskBusReporter:
-    """``ProgressReporter`` impl that writes through a TaskStore + bus.
+    """``ProgressReporter`` impl that writes through a TaskStore.
 
     Every event method:
       1. Stamps ``seq`` (from store) and ``ts``.
-      2. Persists the event in ``task_events`` so a late reconnect can
-         replay everything from seq=0.
-      3. Publishes the same dict to the in-memory bus for live subscribers.
+      2. Persists the event in ``task_events`` so a long-poll handler
+         using ``GET /v1/tasks/{id}/events?from_seq=N`` can read it.
+      3. Fires ``on_event`` so the manager can notify per-task
+         ``asyncio.Condition`` waiters (long-poll ``/events`` handlers)
+         to wake within sub-millisecond latency same-process.
+
+    Class name is historical — the in-memory bus is gone; the store +
+    Condition combo replaces it. Rename in a future tidy-up; keeping
+    the name avoids a wider sweep.
 
     Cancellation is exposed via the shared ``CancelToken`` the manager
     creates when submitting the task; the engine main loop polls it
@@ -65,13 +70,13 @@ class TaskBusReporter:
         *,
         task_id: str,
         store: TaskStore,
-        bus: ProgressBus,
         token: CancelToken,
+        on_event: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._task_id = task_id
         self._store = store
-        self._bus = bus
         self._token = token
+        self._on_event = on_event
 
     async def progress(
         self,
@@ -107,20 +112,53 @@ class TaskBusReporter:
         await self._emit(event)
 
     async def _emit(self, event: dict[str, Any]) -> None:
-        # ``append_event`` mutates ``event`` in place to inject ``seq`` + ``ts``;
-        # the bus then sees the same complete dict for fanout.
+        # ``append_event`` mutates ``event`` in place to inject ``seq`` + ``ts``.
         await self._store.append_event(self._task_id, event)
-        await self._bus.publish(self._task_id, event)
+        if self._on_event is not None:
+            await self._on_event()
 
 
 class TaskManager:
     """Submit, query, and cancel async tasks."""
 
-    def __init__(self, *, store: TaskStore, bus: ProgressBus) -> None:
+    def __init__(self, *, store: TaskStore) -> None:
         self._store = store
-        self._bus = bus
         self._running: dict[str, tuple[asyncio.Task[Any], CancelToken]] = {}
+        # Per-task ``asyncio.Condition`` indexed by task_id. Eagerly
+        # created on submit so the long-poll ``/events`` handler can
+        # always call ``condition_for(task_id)`` without checking for
+        # None. Never deleted; conditions are tiny (~100 B each) and
+        # live for the manager's lifetime so late waiters on terminal
+        # tasks still find a Condition object to park on (they fall
+        # through via the route handler's store-poll fallback).
+        self._conditions: dict[str, asyncio.Condition] = {}
         self._lock = asyncio.Lock()
+
+    def condition_for(self, task_id: str) -> asyncio.Condition:
+        """Return the per-task Condition used by long-poll waiters.
+
+        Lazy-creates if the manager hasn't seen this task_id (e.g.
+        rows persisted before this server process started). Callers
+        gate on ``store.get(task_id)`` for existence; we just hand back
+        the synchronisation primitive."""
+        cond = self._conditions.get(task_id)
+        if cond is None:
+            cond = asyncio.Condition()
+            self._conditions[task_id] = cond
+        return cond
+
+    async def _notify_task(self, task_id: str) -> None:
+        """Wake every coroutine parked on this task's Condition.
+
+        Called by the ``TaskBusReporter`` after each persisted event,
+        so long-poll handlers waiting for ``seq > N`` come back from
+        ``cond.wait()`` and re-read the store within notify latency
+        (target sub-millisecond same-process)."""
+        cond = self._conditions.get(task_id)
+        if cond is None:
+            return
+        async with cond:
+            cond.notify_all()
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -193,11 +231,21 @@ class TaskManager:
             params_digest=_params_digest(params),
         )
         await self._store.create(row)
-        await self._bus.register(task_id)
+        # Eagerly create the per-task Condition so any handler that
+        # learned of this task_id via the submit response can park on
+        # it without racing the runner's first event.
+        self._conditions[task_id] = asyncio.Condition()
 
         token = CancelToken()
+
+        async def _notify() -> None:
+            await self._notify_task(task_id)
+
         reporter = TaskBusReporter(
-            task_id=task_id, store=self._store, bus=self._bus, token=token
+            task_id=task_id,
+            store=self._store,
+            token=token,
+            on_event=_notify,
         )
 
         async def _run() -> None:
@@ -255,7 +303,12 @@ class TaskManager:
                     {"type": "final", "status": "failed", "error": error}
                 )
             finally:
-                await self._bus.close(task_id)
+                # Belt-and-braces: even though every emit path already
+                # notifies, the terminal-status update writes the row
+                # before the final ``emit_raw`` — a long-poll handler
+                # that polled in that window must wake on the final
+                # notify here so the terminal status surfaces.
+                await self._notify_task(task_id)
                 async with self._lock:
                     self._running.pop(task_id, None)
 

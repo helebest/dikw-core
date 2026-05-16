@@ -198,12 +198,28 @@ def _client_host(server_host: str) -> str:
     return server_host
 
 
-def build_inner_env(host: str, port: int, token: str | None) -> dict[str, str]:
+def build_inner_env(
+    host: str, port: int, token: str | None, *, keep_alive: bool = False
+) -> dict[str, str]:
     env = dict(os.environ)
     env[ENV_SERVER_URL] = f"http://{_client_host(host)}:{port}"
     if token is not None:
         env[ENV_SERVER_TOKEN] = token
+    if not keep_alive:
+        # Signal to async-default op commands ("dikw ingest" etc.) that
+        # the temporary server dies the moment they exit, so they must
+        # auto-wait instead of fire-and-forget. ``--keep-alive`` mode
+        # leaves the server up and the agent contract holds — the user
+        # can follow the task themselves.
+        env[ENV_SERVE_AND_RUN_AUTO_WAIT] = "1"
     return env
+
+
+# When ``dikw serve-and-run`` spawns an inner CLI without ``--keep-alive``,
+# this env var is set in the inner process so op commands know to
+# auto-wait — otherwise async-default would print a handle, exit 0, and
+# the temporary server would be torn down with the task still running.
+ENV_SERVE_AND_RUN_AUTO_WAIT = "DIKW_SERVE_AND_RUN_AUTO_WAIT"
 
 
 def run(opts: ServeAndRunOptions) -> int:
@@ -238,7 +254,9 @@ def run(opts: ServeAndRunOptions) -> int:
             sys.stderr.write(f"serve-and-run: {e}\n")
             return 1
 
-        env = build_inner_env(opts.host, opts.port, opts.token)
+        env = build_inner_env(
+            opts.host, opts.port, opts.token, keep_alive=opts.keep_alive
+        )
         inner_argv = build_inner_command(opts.inner_cmd)
         inner_rc = subprocess.run(inner_argv, env=env, check=False).returncode
     finally:

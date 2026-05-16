@@ -80,7 +80,7 @@ def test_dataset_path_passes_thresholds(
     ds = _write_toy_dataset(tmp_path)
     patch_transport_factory()
     result = CliRunner().invoke(
-        app, ["eval", "--dataset", str(ds), "--plain"]
+        app, ["eval", "--dataset", str(ds), "--plain", "--wait"]
     )
     assert result.exit_code == 0, result.stdout
     assert "toy" in result.stdout
@@ -110,7 +110,7 @@ def test_dataset_path_fails_when_thresholds_unmet(
     )
     patch_transport_factory()
     result = CliRunner().invoke(
-        app, ["eval", "--dataset", str(ds), "--plain"]
+        app, ["eval", "--dataset", str(ds), "--plain", "--wait"]
     )
     assert result.exit_code == 1, result.stdout
 
@@ -155,6 +155,6 @@ def test_missing_dataset_returns_non_zero(
     patch_transport_factory()
     result = CliRunner().invoke(
         app,
-        ["eval", "--dataset", str(tmp_path / "missing"), "--plain"],
+        ["eval", "--dataset", str(tmp_path / "missing"), "--plain", "--wait"],
     )
     assert result.exit_code != 0, result.stdout

@@ -63,7 +63,10 @@ dikw client pages links wiki/Foo.md          # JSON: {outgoing, incoming}
 dikw client graph get                        # JSON: full base graph in one call
 dikw client assets get <asset_id> --output f # streams bytes to a local file; metadata to stdout JSON
 dikw client import ./local-sources           # pre-flights + imports md packages
-dikw client ingest                           # rendered progress; NOT pipeable
+dikw client ingest                           # async-default: prints task-handle JSON, exits 0
+dikw client ingest --wait                    # rendered progress + report; succeeded=0 / failed=1 / cancelled=130
+dikw client tasks wait <task_id>             # block + render on an existing task_id (same exit-code map)
+dikw client tasks events <task_id>           # raw EventsPage JSON for a single cursor page
 ```
 
 `retrieve` consumes the NDJSON event stream server-side and emits the
@@ -116,14 +119,25 @@ talk to `POST /v1/retrieve` over HTTP directly.
   `DocumentRecord` rows resolve. If a markdown file exists on disk but
   hasn't been ingested, the route returns 404. Use `GET /v1/base/pages`
   to enumerate what's actually queryable.
-- **NDJSON, not SSE — but only on streaming routes.** `POST /v1/retrieve`
-  streams NDJSON directly on its response body. The async-task ops
-  (`POST /v1/ingest`, `POST /v1/synth`, `POST /v1/distill`,
-  `POST /v1/eval`) instead return a JSON `TaskHandle`
-  (`{"task_id": "..."}`); follow the task by **opening
-  `GET /v1/tasks/{task_id}/events`** as the NDJSON stream. Either way
-  the final event has `type=final` and earlier events are `progress` /
-  `partial` / `task_started`. There is no `data:` SSE prefix.
+- **NDJSON streaming vs cursor JSON.** `POST /v1/retrieve` streams
+  NDJSON directly on its response body (`type=retrieve_started →
+  retrieval_done → final`). The async-task ops
+  (`POST /v1/{ingest,synth,distill,eval,lint.propose,lint.apply}`)
+  instead return a JSON `TaskHandle` (`{"task_id": "..."}`); follow
+  the task by polling **`GET /v1/tasks/{task_id}/events?from_seq=N&limit=M&wait=K`**.
+  Each response is one `EventsPage` (cursor JSON, server long-poll up
+  to `wait` seconds, capped at 60s) — agents advance via the returned
+  `next_from_seq` and stop when `task_status` is terminal AND the
+  `final` event has appeared in the rendered page. The final event
+  itself carries the result/error payload. There is no SSE.
+- **CLI mirrors the wire contract.** Op commands default to async:
+  `dikw client ingest` submits + prints `{task_id, status, events_url,
+  wait_command}` and exits 0. Pass `--wait` to block + render + map
+  the final status to the standard exit code (succeeded=0, failed=1,
+  cancelled=130, client-side timeout=124). Use
+  `dikw client tasks events <id>` for raw cursor pages, and
+  `dikw client tasks wait <id>` for the same blocking UX applied to
+  an existing task_id.
 - **Per-file ingest errors are non-fatal.** A bad markdown file produces
   one `partial` event with `kind=file_error` and lands on
   `IngestReport.errors`, but the run continues. CLI users can pass

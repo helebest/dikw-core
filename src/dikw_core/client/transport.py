@@ -187,6 +187,49 @@ class Transport:
             raise _network_error(e) from e
         return _parse_json_response(resp)
 
+    async def get_task_events_page(
+        self,
+        task_id: str,
+        *,
+        from_seq: int = 0,
+        limit: int = 100,
+        wait: int = 0,
+    ) -> dict[str, Any]:
+        """Cursor page from ``GET /v1/tasks/{task_id}/events``.
+
+        Returns the server's ``EventsPage`` JSON as a plain dict — the
+        agent paging primitive used by ``dikw client tasks events`` and
+        the building block for :func:`follow_to_terminal`. ``wait=0`` is
+        a snapshot; ``wait>0`` is a server-side long-poll (server caps
+        at 60s). Errors flow through the standard ``ClientError`` channel.
+
+        The httpx read timeout is widened to ``wait + 15s`` for this
+        request so the server's full long-poll hold doesn't race the
+        client's normal 60s read timeout (a ``wait=60`` call with even
+        a few hundred ms of scheduling overhead would otherwise raise
+        ``network_error`` instead of returning an empty page).
+        """
+        params = {"from_seq": from_seq, "limit": limit, "wait": wait}
+        timeout: httpx.Timeout | None = None
+        if wait > 0:
+            timeout = httpx.Timeout(
+                connect=5.0,
+                read=float(wait) + 15.0,
+                write=60.0,
+                pool=5.0,
+            )
+        try:
+            resp = await self._client.get(
+                f"/v1/tasks/{task_id}/events",
+                params=params,
+                headers=self._headers(),
+                timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+            )
+        except httpx.RequestError as e:
+            raise _network_error(e) from e
+        page = _parse_json_response(resp)
+        return cast(dict[str, Any], page)
+
     @asynccontextmanager
     async def stream_ndjson(
         self,

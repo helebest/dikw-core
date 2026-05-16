@@ -1,36 +1,35 @@
-"""Async task endpoints: submit, query, cancel, follow.
+"""Async task endpoints: submit, query, cancel, page events.
 
-Phase 2 ships the *plumbing* — the only registered op is ``echo``, a
-five-event mock that lets tests exercise the full submit → events →
-final → result loop end-to-end. Phase 3 wires real ops (ingest, synth,
-distill, eval) on top of these same routes.
+The cursor JSON ``/events`` endpoint serves both UI history paging
+(``wait=0``) and agent follow loops (``wait>0`` long-poll). It replaces
+the prior NDJSON streaming tail. See ``docs/server.md``.
 
 URL shape:
   POST   /v1/{op}                 → submit, returns {task_id, op, links}
   GET    /v1/tasks                → list with status / op filters
   GET    /v1/tasks/{task_id}      → row snapshot
   GET    /v1/tasks/{task_id}/result    → terminal result (404 until terminal)
-  GET    /v1/tasks/{task_id}/events    → NDJSON stream (?from_seq=N to resume)
+  GET    /v1/tasks/{task_id}/events    → cursor JSON {events, next_from_seq, has_more, last_seq, task_status}
   POST   /v1/tasks/{task_id}/cancel    → request cancellation
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Query, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..domains.knowledge.lint import LintKind
 from .errors import BadRequest, NotFoundError
 from .ingest_op import make_ingest_runner
 from .lint_op import make_lint_apply_runner, make_lint_propose_runner
-from .ndjson import ndjson_lines, stream_response
 from .runtime import ServerRuntime, get_runtime
 from .synth_op import make_distill_runner, make_eval_runner, make_synth_runner
 from .tasks import (
+    TERMINAL_STATUSES,
     TaskRow,
     TaskRunner,
     TaskStatus,
@@ -39,8 +38,10 @@ from .tasks import (
 # ---- op runners ---------------------------------------------------------
 
 
-async def _echo_runner(reporter: Any, *, count: int = 5) -> dict[str, Any]:
-    """Mock op for Phase 2 end-to-end testing.
+async def _echo_runner(
+    reporter: Any, *, count: int = 5, delay_ms: int = 0
+) -> dict[str, Any]:
+    """Mock op for end-to-end testing.
 
     Emits ``count`` progress events with a simulated phase plus a single
     partial, then returns a result dict the manager wraps in the final
@@ -54,11 +55,13 @@ async def _echo_runner(reporter: Any, *, count: int = 5) -> dict[str, Any]:
             total=count,
             detail={"step": i},
         )
-        # Sleep long enough that a test can race a cancel against an
-        # in-flight task without flakiness, but short enough that the
-        # happy-path test finishes quickly. The scale comes from the
-        # caller via params.
-        await asyncio.sleep(0.0)
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000)
+        else:
+            # Yield so a test can race a cancel against an in-flight
+            # task without flakiness, but short enough that the
+            # happy-path test finishes quickly.
+            await asyncio.sleep(0.0)
     await reporter.partial("echo_done", {"count": count})
     return {"echoed": count}
 
@@ -67,9 +70,16 @@ async def _echo_runner(reporter: Any, *, count: int = 5) -> dict[str, Any]:
 
 
 class EchoSubmit(BaseModel):
-    """Phase 2 mock submit body. Real ops will define their own."""
+    """Phase 2 mock submit body. Real ops will define their own.
+
+    ``delay_ms`` is a test affordance — paces the runner's progress
+    emits so long-poll tests can race the handler's wake-up path
+    against actual event production. Default 0 leaves existing
+    behaviour unchanged.
+    """
 
     count: int = 5
+    delay_ms: int = Field(default=0, ge=0, le=10000)
 
 
 class IngestSubmit(BaseModel):
@@ -214,6 +224,21 @@ class CancelResponse(BaseModel):
     already_terminal: bool
 
 
+class EventsPage(BaseModel):
+    """Cursor-paged response from ``GET /v1/tasks/{id}/events``.
+
+    Serves both UI history browsing (``wait=0``, snapshot) and agent
+    follow loops (``wait>0``, long-poll). See ``docs/server.md`` for
+    the full contract."""
+
+    task_id: str
+    task_status: TaskStatus
+    events: list[dict[str, Any]]
+    next_from_seq: int
+    has_more: bool
+    last_seq: int
+
+
 def make_router(*, auth_dep: Any) -> APIRouter:
     router = APIRouter(prefix="/v1", dependencies=[Depends(auth_dep)])
 
@@ -226,13 +251,16 @@ def make_router(*, auth_dep: Any) -> APIRouter:
     ) -> TaskHandle:
         rt: ServerRuntime = get_runtime(request.app)
         count = max(1, int(body.count))
+        delay_ms = int(body.delay_ms)
 
         async def _runner(reporter: Any) -> dict[str, Any]:
-            return await _echo_runner(reporter, count=count)
+            return await _echo_runner(reporter, count=count, delay_ms=delay_ms)
 
         runner: TaskRunner = _runner
         row = await rt.manager.submit(
-            op="echo", runner=runner, params={"count": count}
+            op="echo",
+            runner=runner,
+            params={"count": count, "delay_ms": delay_ms},
         )
         return _handle(row)
 
@@ -424,11 +452,7 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         row = await rt.task_store.get(task_id)
         if row is None:
             raise NotFoundError(f"task_id {task_id!r} not found")
-        if row.status not in (
-            TaskStatus.SUCCEEDED,
-            TaskStatus.FAILED,
-            TaskStatus.CANCELLED,
-        ):
+        if row.status not in TERMINAL_STATUSES:
             raise BadRequest(
                 f"task {task_id!r} is still {row.status.value}; "
                 "subscribe to /events to wait for the final state",
@@ -444,24 +468,86 @@ def make_router(*, auth_dep: Any) -> APIRouter:
             error=row.error,
         )
 
-    @router.get("/tasks/{task_id}/events")
-    async def follow_task(
+    @router.get("/tasks/{task_id}/events", response_model=EventsPage)
+    async def get_events(
         request: Request,
         task_id: str,
         from_seq: int = Query(default=0, ge=0),
-    ) -> StreamingResponse:
+        limit: int = Query(default=100, ge=1, le=1000),
+        wait: int = Query(default=0, ge=0, le=60),
+    ) -> EventsPage:
+        """Cursor-paged event read.
+
+        ``wait=0`` is a pure snapshot for UI paging or stateless agent
+        polling. ``wait>0`` is a short long-poll — the handler parks on
+        the task's ``asyncio.Condition`` until a new event lands or the
+        timeout fires. Multi-worker safety net: an inner 0.5s ceiling
+        on each Condition wait means handlers on a worker that never
+        sees the in-process notify still pick up changes by re-reading
+        the store ≤ 0.5s later.
+        """
         rt: ServerRuntime = get_runtime(request.app)
         row = await rt.task_store.get(task_id)
         if row is None:
             raise NotFoundError(f"task_id {task_id!r} not found")
 
-        stream = ndjson_lines(
-            task_id=task_id,
-            store=rt.task_store,
-            bus=rt.bus,
-            from_seq=from_seq,
+        events = await rt.task_store.list_events(
+            task_id, from_seq=from_seq, limit=limit
         )
-        return stream_response(stream)
+
+        # Long-poll only when the task is still live AND no backlog —
+        # skip the wait loop entirely on already-terminal tasks so a
+        # client polling a finished task doesn't burn 500ms before
+        # checking row status.
+        if not events and wait > 0 and row.status not in TERMINAL_STATUSES:
+            cond = rt.manager.condition_for(task_id)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + wait
+            while loop.time() < deadline:
+                async with cond:
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            cond.wait(),
+                            timeout=min(0.5, deadline - loop.time()),
+                        )
+                events = await rt.task_store.list_events(
+                    task_id, from_seq=from_seq, limit=limit
+                )
+                if events:
+                    break
+                # Re-read row to catch a quiet terminal transition that
+                # may have happened without an emit firing on this worker.
+                row = await rt.task_store.get(task_id)
+                if row is None:
+                    raise NotFoundError(f"task_id {task_id!r} not found")
+                if row.status in TERMINAL_STATUSES:
+                    break
+
+        # Re-read once more for an up-to-date status — it may have
+        # transitioned during the wait above.
+        latest = row if row.status in TERMINAL_STATUSES else await rt.task_store.get(task_id)
+        if latest is None:
+            raise NotFoundError(f"task_id {task_id!r} not found")
+
+        last_seq = await rt.task_store.max_seq(task_id)
+        next_from_seq = (
+            int(events[-1]["seq"]) + 1 if events else from_seq
+        )
+        # ``has_more`` is "there's at least one persisted event past the
+        # cursor". An empty tape (``last_seq == 0``) trivially has none —
+        # the naive ``next_from_seq <= last_seq`` check would return
+        # ``True`` for the common ``from_seq=0, last_seq=0`` polling
+        # cold-start and force clients into an infinite empty-page loop.
+        has_more = last_seq > 0 and next_from_seq <= last_seq
+
+        return EventsPage(
+            task_id=task_id,
+            task_status=latest.status,
+            events=events,
+            next_from_seq=next_from_seq,
+            has_more=has_more,
+            last_seq=last_seq,
+        )
 
     @router.post(
         "/tasks/{task_id}/cancel", response_model=CancelResponse
@@ -474,11 +560,7 @@ def make_router(*, auth_dep: Any) -> APIRouter:
         if row is None:
             raise NotFoundError(f"task_id {task_id!r} not found")
         was_running = await rt.manager.cancel(task_id)
-        terminal = row.status in (
-            TaskStatus.SUCCEEDED,
-            TaskStatus.FAILED,
-            TaskStatus.CANCELLED,
-        )
+        terminal = row.status in TERMINAL_STATUSES
         return CancelResponse(
             task_id=task_id,
             cancelled=was_running,

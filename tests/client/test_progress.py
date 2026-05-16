@@ -9,10 +9,6 @@ are not part of the contract.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any
-
-import pytest
 from rich.console import Console
 
 from dikw_core.client.progress import (
@@ -25,13 +21,12 @@ from dikw_core.client.progress import (
 )
 
 
-async def _scripted(events: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
-    for ev in events:
-        yield ev
+def test_task_progress_renderer_logs_warning() -> None:
+    """``render(event)`` for a ``log`` event prints it to the console.
 
-
-@pytest.mark.asyncio
-async def test_task_progress_renderer_returns_final_event() -> None:
+    Since PR4 the renderer is a per-event sink driven by
+    :func:`follow_to_terminal`; this test asserts the dispatch shape
+    rather than NDJSON stream iteration."""
     console = Console(record=True, width=80, force_terminal=False)
     renderer = TaskProgressRenderer(console, plain=True)
     events = [
@@ -47,16 +42,13 @@ async def test_task_progress_renderer_returns_final_event() -> None:
         },
     ]
     with renderer.live():
-        final = await renderer.run(_scripted(events))
-    assert final.status == "succeeded"
-    assert final.result == {"scanned": 3, "added": 3, "embedded": 7}
-    assert final.error is None
+        for ev in events:
+            renderer.render(ev)
     out = console.export_text()
     assert "low disk" in out
 
 
-@pytest.mark.asyncio
-async def test_task_progress_renderer_renders_multi_phase_streams_distinctly() -> None:
+def test_task_progress_renderer_renders_multi_phase_streams_distinctly() -> None:
     """Outer (``synth`` source counter) and inner (``synth_llm`` group
     counter) phases must each get their own line — without phase-keyed
     rows the inner counter would overwrite the outer one and the user
@@ -86,26 +78,22 @@ async def test_task_progress_renderer_renders_multi_phase_streams_distinctly() -
         },
     ]
     with renderer.live():
-        final = await renderer.run(_scripted(events))
-    assert final.status == "succeeded"
+        for ev in events:
+            renderer.render(ev)
     out = console.export_text()
     assert "synth: 1/3" in out
     assert "synth_llm: 1/4" in out
 
 
-@pytest.mark.asyncio
-async def test_task_progress_renderer_falls_back_when_no_final() -> None:
-    """A stream that closes without ``final`` surfaces as a synthetic
-    ``failed`` so the caller doesn't have to special-case it."""
+def test_task_progress_renderer_unknown_event_is_noop() -> None:
+    """Unknown event types must not raise — schema growth on the server
+    side should never crash the renderer."""
     console = Console(record=True, width=80, force_terminal=False)
     renderer = TaskProgressRenderer(console, plain=True)
-    events: list[dict[str, Any]] = [
-        {"type": "progress", "phase": "scan", "current": 0, "total": 1},
-    ]
     with renderer.live():
-        final = await renderer.run(_scripted(events))
-    assert final.status == "failed"
-    assert final.result is None
+        renderer.render({"type": "future_event_kind", "weird": 42})
+        renderer.render({"type": "progress", "phase": "scan", "current": 0, "total": 1})
+    # No assertion needed — the test passes if no exception was raised.
 
 
 def test_render_ingest_report_table_has_metrics() -> None:

@@ -30,7 +30,7 @@ The server speaks JSON over HTTP under `/v1/`. Two route families:
 | family | examples | shape |
 |---|---|---|
 | **Sync** (millisecond-level) | `GET /v1/status`, `POST /v1/check`, `POST /v1/lint`, `GET /v1/base/pages`, `GET /v1/base/pages/{path}`, `GET /v1/base/pages/{path}/links`, `GET /v1/base/graph`, `POST /v1/doc/search`, `GET /v1/wisdom`, `POST /v1/wisdom/{id}/approve` | request / response JSON |
-| **Async tasks** (seconds–minutes) | `POST /v1/{ingest,synth,distill,eval}` → `task_id`; `GET /v1/tasks/{id}/events` (NDJSON); `GET /v1/tasks/{id}/result`; `POST /v1/tasks/{id}/cancel` | submit JSON → stream NDJSON → final JSON |
+| **Async tasks** (seconds–minutes) | `POST /v1/{ingest,synth,distill,eval,lint.propose,lint.apply}` → `task_id`; `GET /v1/tasks/{id}/events?from_seq=N&limit=M&wait=K` (cursor JSON, long-poll); `GET /v1/tasks/{id}/result`; `POST /v1/tasks/{id}/cancel` | submit JSON → paged JSON cursor → final JSON |
 | **Streaming retrieve** | `POST /v1/retrieve` | NDJSON: `retrieve_started → retrieval_done → final`. **No LLM tokens stream from the server** — agents compose chunks with their own LLM. |
 | **Import** | `POST /v1/import` | multipart: tar.gz payload + packages-aware manifest JSON; commits straight into `<base>/sources/` |
 
@@ -178,16 +178,21 @@ token comes from the file, and so on.
 
 ### Networking gotchas
 
-* **Reverse proxies and NDJSON** — disable response buffering on any
-  proxy that fronts the server. nginx: `proxy_buffering off;`.
-  Traefik: `--providers.file ... HTTP middleware Buffering` removed.
-  Without this, the client sees streaming events arrive in batches at
-  the buffer flush boundary, which makes the LLM token streaming feel
-  broken.
-* **Heartbeat** — task event streams emit a `{"type":"heartbeat"}`
-  event every 15s while idle, just to defeat reverse-proxy idle
-  timeouts. Clients drop heartbeats at the transport layer; server
-  operators don't need to do anything special.
+* **Reverse proxies and NDJSON streams** — `POST /v1/retrieve` is the
+  only NDJSON-streaming endpoint left after the task-first cursor
+  flip. Disable response buffering on any proxy that fronts the
+  server. nginx: `proxy_buffering off;`. Without this, clients see
+  events arrive in batches at the buffer flush boundary. (Everything
+  else is request/response JSON or multipart: `POST /v1/import` is a
+  multipart upload returning an ``ImportResponse`` JSON body.)
+* **Task events use cursor JSON, not streaming** — `GET /v1/tasks/{id}/events`
+  is a long-poll JSON endpoint (server holds the response up to `wait`
+  seconds, capped at 60s), not an open NDJSON stream. Each response is
+  a single `EventsPage` with `events`, `next_from_seq`, `has_more`,
+  `last_seq`, `task_status`. UIs page with `wait=0`; agents follow
+  with `wait>0` and re-issue with the returned `next_from_seq`. No
+  heartbeat needed because the response cycle itself bounds connection
+  lifetime to ≤ `wait`.
 * **Import payload size** — `POST /v1/import` accepts up to 1 GiB by
   default. Override via `DIKW_SERVER_MAX_IMPORT_BYTES=<int>`.
 

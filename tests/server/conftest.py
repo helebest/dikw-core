@@ -7,9 +7,9 @@ Two flavours of test infrastructure:
     no socket is bound. Suits routes_sync + routes_tasks integration
     tests where the engine should actually exercise.
 
-  * ``manager_only`` — naked ``TaskManager`` + ``ProgressBus`` +
-    ``SqliteTaskStore`` triplet for tests that only care about the
-    task subsystem semantics. Cheap, no FastAPI overhead.
+  * ``manager_only`` — naked ``TaskManager`` + ``SqliteTaskStore``
+    pair for tests that only care about the task subsystem semantics.
+    Cheap, no FastAPI overhead.
 
   * ``ingested_wiki`` — extends ``server_client`` by copying a small
     fixture corpus into the wiki's ``sources/`` and running ``ingest``
@@ -24,6 +24,7 @@ from __future__ import annotations
 import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -33,7 +34,7 @@ from dikw_core import api as api_module
 from dikw_core.server.app import build_app
 from dikw_core.server.auth import AuthConfig
 from dikw_core.server.runtime import ServerRuntime, build_runtime, teardown_runtime
-from dikw_core.server.tasks import ProgressBus, SqliteTaskStore, TaskManager
+from dikw_core.server.tasks import SqliteTaskStore, TaskManager
 
 from ..fakes import FakeEmbeddings, init_test_wiki
 
@@ -128,14 +129,37 @@ async def ingested_wiki(
 @pytest.fixture()
 async def manager_only(
     tmp_path: Path,
-) -> AsyncIterator[tuple[TaskManager, SqliteTaskStore, ProgressBus]]:
-    """``TaskManager`` + ``ProgressBus`` + fresh SQLite store, no FastAPI."""
+) -> AsyncIterator[tuple[TaskManager, SqliteTaskStore]]:
+    """``TaskManager`` + fresh SQLite store, no FastAPI."""
     store = SqliteTaskStore(path=tmp_path / "tasks.db")
     await store.init()
-    bus = ProgressBus()
-    manager = TaskManager(store=store, bus=bus)
+    manager = TaskManager(store=store)
     try:
-        yield manager, store, bus
+        yield manager, store
     finally:
         await manager.shutdown()
         await store.close()
+
+
+async def wait_task_terminal(
+    client: httpx.AsyncClient, task_id: str, *, timeout: float = 10.0
+) -> dict[str, Any]:
+    """Poll ``GET /v1/tasks/{id}`` until status is terminal; return the row.
+
+    Shared by every HTTP-level task test that needs to wait for a
+    submitted runner to finish before asserting on the event tape or
+    final result. Default 10s timeout — synth/distill paths that need
+    more should pass an explicit value."""
+    import asyncio as _asyncio
+
+    deadline = _asyncio.get_event_loop().time() + timeout
+    while _asyncio.get_event_loop().time() < deadline:
+        r = await client.get(f"/v1/tasks/{task_id}")
+        if r.status_code == 200 and r.json()["status"] in {
+            "succeeded",
+            "failed",
+            "cancelled",
+        }:
+            return r.json()
+        await _asyncio.sleep(0.05)
+    raise AssertionError(f"task {task_id} never reached a terminal state")

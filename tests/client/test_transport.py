@@ -143,6 +143,90 @@ async def test_get_bytes_404_raises_client_error(
 
 
 @pytest.mark.asyncio
+async def test_get_task_events_page_basic(
+    client_transport: Transport,
+) -> None:
+    """``get_task_events_page`` returns the cursor JSON shape verbatim.
+
+    Submits a tiny echo task, waits for it to finish, then asks for the
+    full tape with ``wait=0`` — the response is the ``EventsPage`` dict
+    as decoded JSON (no streaming, no shape massaging at the transport
+    layer)."""
+    handle = await client_transport.post_json(
+        "/v1/echo", json_body={"count": 2}
+    )
+    task_id = str(handle["task_id"])
+
+    import asyncio as _asyncio
+
+    deadline = _asyncio.get_event_loop().time() + 5.0
+    while _asyncio.get_event_loop().time() < deadline:
+        row = await client_transport.get_json(f"/v1/tasks/{task_id}")
+        if row["status"] in {"succeeded", "failed", "cancelled"}:
+            break
+        await _asyncio.sleep(0.05)
+
+    page = await client_transport.get_task_events_page(
+        task_id, from_seq=0, limit=100, wait=0
+    )
+    assert isinstance(page, dict)
+    assert page["task_id"] == task_id
+    assert page["task_status"] in {"succeeded", "failed", "cancelled"}
+    assert isinstance(page["events"], list) and page["events"]
+    assert page["events"][-1]["type"] == "final"
+    assert isinstance(page["next_from_seq"], int)
+    assert isinstance(page["has_more"], bool)
+    assert isinstance(page["last_seq"], int)
+
+
+@pytest.mark.asyncio
+async def test_get_task_events_page_passes_params(
+    client_transport: Transport,
+) -> None:
+    """``from_seq`` / ``limit`` / ``wait`` must be wired through to the
+    query string — easy to forget when the helper grows defaults."""
+    handle = await client_transport.post_json(
+        "/v1/echo", json_body={"count": 5}
+    )
+    task_id = str(handle["task_id"])
+
+    import asyncio as _asyncio
+
+    deadline = _asyncio.get_event_loop().time() + 5.0
+    while _asyncio.get_event_loop().time() < deadline:
+        row = await client_transport.get_json(f"/v1/tasks/{task_id}")
+        if row["status"] in {"succeeded", "failed", "cancelled"}:
+            break
+        await _asyncio.sleep(0.05)
+
+    # limit=2 must actually cap the page — proves ``limit`` reaches the
+    # server, not just defaulted client-side.
+    page = await client_transport.get_task_events_page(
+        task_id, from_seq=0, limit=2, wait=0
+    )
+    assert len(page["events"]) == 2
+    assert page["has_more"] is True
+    assert page["next_from_seq"] > 0
+
+
+@pytest.mark.asyncio
+async def test_get_task_events_page_404_raises_client_error(
+    client_transport: Transport,
+) -> None:
+    """A missing task surfaces as ``ClientError`` with the server's
+    stable ``task_not_found`` code, like every other transport path."""
+    with pytest.raises(ClientError) as excinfo:
+        await client_transport.get_task_events_page(
+            "00000000-0000-0000-0000-000000000000",
+            from_seq=0,
+            limit=10,
+            wait=0,
+        )
+    assert excinfo.value.status == 404
+    assert excinfo.value.code == "not_found"
+
+
+@pytest.mark.asyncio
 async def test_transport_wraps_request_error_as_network_client_error() -> None:
     """When httpx fails before any response (DNS, refused, dropped
     socket) we must surface a ``ClientError(status=0, code='network_error')``

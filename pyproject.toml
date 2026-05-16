@@ -66,8 +66,8 @@ dev = [
 dikw = "dikw_core.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/dikw-core/dikw-core"
-Repository = "https://github.com/dikw-core/dikw-core"
+Homepage = "https://github.com/OpenDIKW/dikw-core"
+Repository = "https://github.com/OpenDIKW/dikw-core"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dikw_core"]

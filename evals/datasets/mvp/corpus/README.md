@@ -23,7 +23,7 @@ Inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6
 Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/helebest/dikw-core
+git clone https://github.com/OpenDIKW/dikw-core
 cd dikw-core
 uv sync
 
@@ -132,7 +132,7 @@ PyPI's side:
 
 1. Create the `dikw-core` project on PyPI.
 2. On the project's *Publishing* page, add a GitHub trusted publisher with:
-   - owner: `helebest`
+   - owner: `OpenDIKW`
    - repository: `dikw-core`
    - workflow: `release.yml`
    - environment: `pypi`

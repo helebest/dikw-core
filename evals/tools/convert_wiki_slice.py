@@ -76,7 +76,7 @@ class FetchedArticle:
 
 def _user_agent() -> str:
     """Wikipedia REST API requests require a UA per WMF policy."""
-    return "dikw-core-eval-slice/0.1 (https://github.com/helebest/dikw-core)"
+    return "dikw-core-eval-slice/0.1 (https://github.com/OpenDIKW/dikw-core)"
 
 
 def _http_get(url: str, *, accept: str | None = None) -> bytes:

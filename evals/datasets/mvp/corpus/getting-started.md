@@ -7,7 +7,7 @@ curated Wisdom layer in about five minutes. It only needs Python 3.12+ and
 ## 1. Install and scaffold
 
 ```bash
-git clone https://github.com/helebest/dikw-core
+git clone https://github.com/OpenDIKW/dikw-core
 cd dikw-core
 uv sync
 

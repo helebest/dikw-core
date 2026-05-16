@@ -27,7 +27,7 @@ keys at all.
 From source (recommended for now — the package is pre-alpha):
 
 ```bash
-git clone https://github.com/helebest/dikw-core
+git clone https://github.com/OpenDIKW/dikw-core
 cd dikw-core
 uv sync
 ```

@@ -9,7 +9,7 @@ without any LLM key.
 ## 1. Install and scaffold
 
 ```bash
-git clone https://github.com/helebest/dikw-core
+git clone https://github.com/OpenDIKW/dikw-core
 cd dikw-core
 uv sync
 

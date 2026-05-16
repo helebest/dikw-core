@@ -292,20 +292,33 @@ class PostgresTaskStore:
         return seq
 
     async def list_events(
-        self, task_id: str, *, from_seq: int = 0
+        self,
+        task_id: str,
+        *,
+        from_seq: int = 0,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         # Gate the read on the task belonging to this server's instance —
         # otherwise a shared-DB deployment leaks event tapes across
         # wikis. ``EXISTS`` keeps the gate cheap (PK lookup on tasks).
+        sql = (
+            f"SELECT seq, ts, body FROM {self._schema}.task_events "
+            "WHERE task_id = %s AND seq >= %s "
+            f"AND EXISTS (SELECT 1 FROM {self._schema}.tasks "
+            "             WHERE task_id = %s AND instance_id = %s) "
+            "ORDER BY seq"
+        )
+        params: tuple[Any, ...] = (
+            task_id,
+            int(from_seq),
+            task_id,
+            self._instance_id,
+        )
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (*params, int(limit))
         async with self._acquire() as conn, conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT seq, ts, body FROM {self._schema}.task_events "
-                "WHERE task_id = %s AND seq >= %s "
-                f"AND EXISTS (SELECT 1 FROM {self._schema}.tasks "
-                "             WHERE task_id = %s AND instance_id = %s) "
-                "ORDER BY seq",
-                (task_id, int(from_seq), task_id, self._instance_id),
-            )
+            await cur.execute(sql, params)
             rows = await cur.fetchall()
         out: list[dict[str, Any]] = []
         for seq, ts, body in rows:
@@ -314,6 +327,18 @@ class PostgresTaskStore:
             event["ts"] = ts
             out.append(event)
         return out
+
+    async def max_seq(self, task_id: str) -> int:
+        async with self._acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                f"SELECT COALESCE(MAX(seq), 0) FROM {self._schema}.task_events "
+                "WHERE task_id = %s "
+                f"AND EXISTS (SELECT 1 FROM {self._schema}.tasks "
+                "             WHERE task_id = %s AND instance_id = %s)",
+                (task_id, task_id, self._instance_id),
+            )
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     # ---- internals ------------------------------------------------------
 

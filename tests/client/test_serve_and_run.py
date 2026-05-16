@@ -278,6 +278,11 @@ def test_serve_and_run_propagates_inner_failure(
                 "--dataset",
                 "does-not-exist",
                 "--plain",
+                # ``--wait`` so the test sees the dataset-not-found
+                # failure propagate as a non-zero inner exit code.
+                # Without it the inner CLI just prints the task handle
+                # and exits 0 (task fails later, server-side).
+                "--wait",
             ],
         )
     )

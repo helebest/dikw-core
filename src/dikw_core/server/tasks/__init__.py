@@ -1,9 +1,10 @@
-"""Async task subsystem: TaskManager, TaskStore, ProgressBus, event schemas.
+"""Async task subsystem: TaskManager, TaskStore, event schemas.
 
 Long-running engine operations (ingest, synth, distill, eval) are dispatched
 through a TaskManager that persists task rows + an append-only event log to a
-TaskStore (independent of wiki storage), and fans events out to subscribers
-via an in-memory ProgressBus. NDJSON event streams support resume-by-seq.
+TaskStore (independent of wiki storage). Per-task ``asyncio.Condition``
+instances wake long-poll ``GET /v1/tasks/{id}/events`` handlers; cursor
+pagination supports resume-by-seq.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from ...config import (
     PostgresStorageConfig,
     SQLiteStorageConfig,
 )
-from .bus import ProgressBus
 from .events import (
     ErrorEvent,
     FinalEvent,
@@ -93,7 +93,6 @@ __all__ = [
     "HeartbeatEvent",
     "LogEvent",
     "PartialEvent",
-    "ProgressBus",
     "ProgressEvent",
     "SqliteTaskStore",
     "TaskBusReporter",

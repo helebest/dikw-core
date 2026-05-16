@@ -18,30 +18,12 @@ Asserts:
 
 from __future__ import annotations
 
-import asyncio
-import json
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
 
-
-async def _wait_terminal(
-    client: httpx.AsyncClient, task_id: str, *, timeout: float = 10.0
-) -> dict[str, Any]:
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        r = await client.get(f"/v1/tasks/{task_id}")
-        if r.status_code == 200 and r.json()["status"] in {
-            "succeeded",
-            "failed",
-            "cancelled",
-        }:
-            return r.json()
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"task {task_id} never reached a terminal state")
-
+from .conftest import wait_task_terminal as _wait_terminal
 
 # ---- happy path ---------------------------------------------------------
 
@@ -101,16 +83,12 @@ async def test_event_tape_replay_after_terminal(
     task_id = submit.json()["task_id"]
     await _wait_terminal(server_client, task_id)
 
-    async with server_client.stream(
-        "GET", f"/v1/tasks/{task_id}/events"
-    ) as resp:
-        assert resp.status_code == 200
-        lines = [
-            line.strip() for line in [
-                ln async for ln in resp.aiter_lines()
-            ] if line.strip()
-        ]
-    events = [json.loads(line) for line in lines]
+    resp = await server_client.get(
+        f"/v1/tasks/{task_id}/events",
+        params={"from_seq": 0, "limit": 1000, "wait": 0},
+    )
+    assert resp.status_code == 200
+    events = resp.json()["events"]
     assert events[0]["type"] == "task_started"
     assert events[0]["op"] == "ingest"
     assert events[-1]["type"] == "final"
@@ -137,26 +115,20 @@ async def test_resume_from_seq_returns_tail_only(
     await _wait_terminal(server_client, task_id)
 
     # First read the full tape to learn the seq range.
-    async with server_client.stream(
-        "GET", f"/v1/tasks/{task_id}/events"
-    ) as resp:
-        full = [
-            json.loads(ln)
-            for ln in [line async for line in resp.aiter_lines()]
-            if ln.strip()
-        ]
+    full_resp = await server_client.get(
+        f"/v1/tasks/{task_id}/events",
+        params={"from_seq": 0, "limit": 1000, "wait": 0},
+    )
+    full = full_resp.json()["events"]
     last_seq = full[-1]["seq"]
 
     # Resume from the middle.
     cutoff = last_seq // 2 + 1
-    async with server_client.stream(
-        "GET", f"/v1/tasks/{task_id}/events?from_seq={cutoff}"
-    ) as resp:
-        tail = [
-            json.loads(ln)
-            for ln in [line async for line in resp.aiter_lines()]
-            if ln.strip()
-        ]
+    tail_resp = await server_client.get(
+        f"/v1/tasks/{task_id}/events",
+        params={"from_seq": cutoff, "limit": 1000, "wait": 0},
+    )
+    tail = tail_resp.json()["events"]
     assert tail, "tail should not be empty when from_seq < last_seq"
     assert tail[0]["seq"] >= cutoff
     assert tail[-1]["type"] == "final"
@@ -193,14 +165,11 @@ async def test_file_error_event_lands_on_event_tape(
     assert row["status"] == "succeeded"
 
     # Wire-event coverage.
-    async with server_client.stream(
-        "GET", f"/v1/tasks/{task_id}/events"
-    ) as resp:
-        events = [
-            json.loads(ln)
-            for ln in [line async for line in resp.aiter_lines()]
-            if ln.strip()
-        ]
+    resp = await server_client.get(
+        f"/v1/tasks/{task_id}/events",
+        params={"from_seq": 0, "limit": 1000, "wait": 0},
+    )
+    events = resp.json()["events"]
     file_error_events = [
         e for e in events
         if e["type"] == "partial" and e.get("kind") == "file_error"

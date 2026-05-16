@@ -84,8 +84,10 @@ def test_lint_propose_apply_cli_full_loop(
 ) -> None:
     patch_transport_factory()
 
-    # 1. propose --rule broken_wikilink
-    r1 = _run(["lint", "propose", "--rule", "broken_wikilink", "--plain"])
+    # 1. propose --rule broken_wikilink — ``--wait`` so the test sees
+    # the succeeded summary + ``apply with:`` hint line instead of the
+    # async-default task-handle JSON.
+    r1 = _run(["lint", "propose", "--rule", "broken_wikilink", "--plain", "--wait"])
     assert r1.exit_code == 0, r1.stdout
     assert "succeeded" in r1.stdout.lower()
     assert "apply with:" in r1.stdout.lower()
@@ -105,8 +107,8 @@ def test_lint_propose_apply_cli_full_loop(
     assert r2.exit_code == 0, r2.stdout
     assert task_id in r2.stdout
 
-    # 3. apply <task_id>
-    r3 = _run(["lint", "apply", task_id, "--plain"])
+    # 3. apply <task_id> — ``--wait`` so the test sees the apply report.
+    r3 = _run(["lint", "apply", task_id, "--plain", "--wait"])
     assert r3.exit_code == 0, r3.stdout
     assert "applied" in r3.stdout.lower()
 
@@ -182,7 +184,7 @@ def test_lint_orphan_page_propose_apply_roundtrip(
     to include the orphan's backlink."""
     patch_transport_factory()
 
-    r1 = _run(["lint", "propose", "--rule", "orphan_page", "--plain"])
+    r1 = _run(["lint", "propose", "--rule", "orphan_page", "--plain", "--wait"])
     assert r1.exit_code == 0, r1.stdout
     assert "succeeded" in r1.stdout.lower()
 
@@ -193,7 +195,7 @@ def test_lint_orphan_page_propose_apply_roundtrip(
             break
     assert task_id is not None, r1.stdout
 
-    r2 = _run(["lint", "apply", task_id, "--plain"])
+    r2 = _run(["lint", "apply", task_id, "--plain", "--wait"])
     assert r2.exit_code == 0, r2.stdout
     assert "applied" in r2.stdout.lower()
 
@@ -226,6 +228,8 @@ def test_lint_apply_unknown_proposal_id_fails(
     patch_transport_factory: Callable[[], None],
 ) -> None:
     patch_transport_factory()
-    r = _run(["lint", "apply", "no-such-id", "--plain"])
+    # ``--wait`` so the bad-id rejection surfaces as a failed task
+    # final + non-zero exit instead of the async-default exit-0 handle.
+    r = _run(["lint", "apply", "no-such-id", "--plain", "--wait"])
     assert r.exit_code != 0
     assert "failed" in r.stdout.lower() or "not found" in r.stdout.lower()

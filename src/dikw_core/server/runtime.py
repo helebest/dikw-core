@@ -29,7 +29,6 @@ from ..config import CONFIG_FILENAME, DikwConfig, load_config
 from ..storage import Storage, build_storage
 from .auth import AuthConfig
 from .tasks import (
-    ProgressBus,
     SqliteTaskStore,
     TaskManager,
     TaskStore,
@@ -96,7 +95,6 @@ class ServerRuntime:
     root: Path
     storage: Storage
     task_store: TaskStore
-    bus: ProgressBus
     manager: TaskManager
     auth: AuthConfig
     # Serializes wiki-mutating ops (currently ingest) so two concurrent
@@ -139,8 +137,7 @@ async def build_runtime(
     )
     await task_store.init()
 
-    bus = ProgressBus()
-    manager = TaskManager(store=task_store, bus=bus)
+    manager = TaskManager(store=task_store)
     # Auto-cleanup is safe only when this process owns the task store
     # exclusively — i.e. the per-wiki sqlite file. With a shared Postgres
     # task DB another live replica of *the same wiki* may have in-flight
@@ -172,7 +169,6 @@ async def build_runtime(
         root=root,
         storage=storage,
         task_store=task_store,
-        bus=bus,
         manager=manager,
         auth=auth,
     )

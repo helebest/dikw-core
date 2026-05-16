@@ -305,25 +305,40 @@ class SqliteTaskStore:
         return seq
 
     async def list_events(
-        self, task_id: str, *, from_seq: int = 0
+        self,
+        task_id: str,
+        *,
+        from_seq: int = 0,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_events_sync, task_id, from_seq)
+        return await asyncio.to_thread(
+            self._list_events_sync, task_id, from_seq, limit
+        )
 
     def _list_events_sync(
-        self, task_id: str, from_seq: int
+        self, task_id: str, from_seq: int, limit: int | None
     ) -> list[dict[str, Any]]:
         # Same instance gate as the Postgres impl — keeps the cross-store
         # contract identical so a future shared-DB sqlite scenario doesn't
         # surprise the operator.
         conn = self._require_conn()
-        cur = conn.execute(
+        sql = (
             "SELECT seq, ts, body FROM task_events "
             "WHERE task_id = ? AND seq >= ? "
             "AND EXISTS (SELECT 1 FROM tasks "
             "            WHERE task_id = ? AND instance_id = ?) "
-            "ORDER BY seq",
-            (task_id, int(from_seq), task_id, self._instance_id),
+            "ORDER BY seq"
         )
+        params: tuple[Any, ...] = (
+            task_id,
+            int(from_seq),
+            task_id,
+            self._instance_id,
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (*params, int(limit))
+        cur = conn.execute(sql, params)
         out: list[dict[str, Any]] = []
         for seq, ts, body in cur.fetchall():
             event = json.loads(body)
@@ -331,6 +346,21 @@ class SqliteTaskStore:
             event["ts"] = ts
             out.append(event)
         return out
+
+    async def max_seq(self, task_id: str) -> int:
+        return await asyncio.to_thread(self._max_seq_sync, task_id)
+
+    def _max_seq_sync(self, task_id: str) -> int:
+        conn = self._require_conn()
+        cur = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) FROM task_events "
+            "WHERE task_id = ? "
+            "AND EXISTS (SELECT 1 FROM tasks "
+            "            WHERE task_id = ? AND instance_id = ?)",
+            (task_id, task_id, self._instance_id),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
 
     # ---- internals ------------------------------------------------------
 

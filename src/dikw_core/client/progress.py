@@ -97,28 +97,24 @@ class TaskProgressRenderer:
         self._progress = None
         self._tasks.clear()
 
-    async def run(
-        self, events: AsyncIterator[dict[str, Any]]
-    ) -> FinalEvent:
-        async for event in events:
-            ev_type = event.get("type")
-            if ev_type == "progress":
-                self._on_progress(event)
-            elif ev_type == "log":
-                self._on_log(event)
-            elif ev_type == "partial":
-                self._on_partial(event)
-            elif ev_type == "task_started":
-                pass  # handled implicitly by the first progress row
-            elif ev_type == "final":
-                return FinalEvent(
-                    status=str(event.get("status") or "failed"),
-                    result=_as_dict(event.get("result")),
-                    error=_as_dict(event.get("error")),
-                )
-        # Stream closed without a final event — surface as a synthetic
-        # failure so the caller doesn't have to special-case it.
-        return FinalEvent(status="failed", result=None, error=None)
+    def render(self, event: Mapping[str, Any]) -> None:
+        """Dispatch a single event into the widget.
+
+        Used by :func:`follow_to_terminal` to drive the renderer from
+        the cursor-paged ``/events`` endpoint. Unknown event types and
+        ``final`` itself are no-ops here — the caller owns terminal
+        detection.
+        """
+        ev_type = event.get("type")
+        if ev_type == "progress":
+            self._on_progress(event)
+        elif ev_type == "log":
+            self._on_log(event)
+        elif ev_type == "partial":
+            self._on_partial(event)
+        # ``task_started`` and ``final`` are handled by the caller's
+        # terminal-detection / submit-handle logic — render them as
+        # no-ops so a single dispatch table covers every event.
 
     def _on_progress(self, event: Mapping[str, Any]) -> None:
         phase = str(event.get("phase") or "work")

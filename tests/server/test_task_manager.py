@@ -12,13 +12,13 @@ Drives the manager directly (no FastAPI) to cover:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import pytest
 
 from dikw_core.progress import ProgressReporter
 from dikw_core.server.tasks import (
-    ProgressBus,
     SqliteTaskStore,
     TaskManager,
     TaskStatus,
@@ -52,9 +52,9 @@ async def _wait_terminal(
 
 @pytest.mark.asyncio
 async def test_happy_path_emits_full_event_tape(
-    manager_only: tuple[TaskManager, SqliteTaskStore, ProgressBus],
+    manager_only: tuple[TaskManager, SqliteTaskStore],
 ) -> None:
-    manager, store, _bus = manager_only
+    manager, store = manager_only
 
     async def _runner(reporter: ProgressReporter) -> dict[str, Any]:
         await reporter.progress(phase="step", current=1, total=2)
@@ -90,9 +90,9 @@ async def test_happy_path_emits_full_event_tape(
 
 @pytest.mark.asyncio
 async def test_failure_path_records_traceback(
-    manager_only: tuple[TaskManager, SqliteTaskStore, ProgressBus],
+    manager_only: tuple[TaskManager, SqliteTaskStore],
 ) -> None:
-    manager, store, _bus = manager_only
+    manager, store = manager_only
 
     async def _runner(_reporter: ProgressReporter) -> dict[str, Any]:
         raise ValueError("boom")
@@ -110,9 +110,9 @@ async def test_failure_path_records_traceback(
 
 @pytest.mark.asyncio
 async def test_pre_cancel_via_token(
-    manager_only: tuple[TaskManager, SqliteTaskStore, ProgressBus],
+    manager_only: tuple[TaskManager, SqliteTaskStore],
 ) -> None:
-    manager, store, _bus = manager_only
+    manager, store = manager_only
 
     async def _runner(reporter: ProgressReporter) -> dict[str, Any]:
         # Honour cancel token at the first checkpoint.
@@ -141,48 +141,17 @@ async def test_pre_cancel_via_token(
 
 @pytest.mark.asyncio
 async def test_cancel_unknown_task_returns_false(
-    manager_only: tuple[TaskManager, SqliteTaskStore, ProgressBus],
+    manager_only: tuple[TaskManager, SqliteTaskStore],
 ) -> None:
-    manager, _store, _bus = manager_only
+    manager, _store = manager_only
     assert await manager.cancel("nope") is False
 
 
 @pytest.mark.asyncio
-async def test_bus_fanout_to_two_subscribers(
-    manager_only: tuple[TaskManager, SqliteTaskStore, ProgressBus],
-) -> None:
-    manager, store, bus = manager_only
-
-    async def _runner(reporter: ProgressReporter) -> dict[str, Any]:
-        # Pause briefly so subscribers get a chance to attach before
-        # the runner emits its first event.
-        await asyncio.sleep(0.02)
-        for i in range(3):
-            await reporter.progress(phase="p", current=i, total=3)
-        return {"ok": True}
-
-    row = await manager.submit(op="echo", runner=_runner)
-
-    async def _drain() -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        sub = await bus.subscribe(row.task_id)
-        async for ev in sub:
-            out.append(ev)
-        return out
-
-    a, b = await asyncio.gather(_drain(), _drain())
-    await _wait_terminal(store, row.task_id)
-    # Both subscribers see the same event types in the same order.
-    assert [e["type"] for e in a] == [e["type"] for e in b]
-    # After the bus closes, no more events.
-    assert a[-1]["type"] == "final"
-
-
-@pytest.mark.asyncio
 async def test_resume_by_seq_via_store(
-    manager_only: tuple[TaskManager, SqliteTaskStore, ProgressBus],
+    manager_only: tuple[TaskManager, SqliteTaskStore],
 ) -> None:
-    manager, store, _bus = manager_only
+    manager, store = manager_only
 
     async def _runner(reporter: ProgressReporter) -> dict[str, Any]:
         for i in range(5):
@@ -199,11 +168,166 @@ async def test_resume_by_seq_via_store(
     assert {e["seq"] for e in tail} == {e["seq"] for e in full if e["seq"] >= 4}
 
 
+# ---- per-task asyncio.Condition wakes long-poll waiters ---------------
+
+
+@pytest.mark.asyncio
+async def test_condition_notifies_on_append(
+    manager_only: tuple[TaskManager, SqliteTaskStore],
+) -> None:
+    """A coroutine waiting on ``manager.condition_for(task_id)`` must
+    wake within notify latency (target <100ms) when the runner emits an
+    event. This is the foundation of the long-poll endpoint — without
+    it the `wait=K` handler would always burn its full timeout."""
+    manager, store = manager_only
+    gate = asyncio.Event()
+
+    async def _runner(reporter: ProgressReporter) -> dict[str, Any]:
+        await gate.wait()
+        await reporter.progress(phase="x", current=1, total=1)
+        return {"done": True}
+
+    row = await manager.submit(op="echo", runner=_runner)
+    cond = manager.condition_for(row.task_id)
+
+    woke = asyncio.Event()
+
+    async def _waiter() -> None:
+        async with cond:
+            await cond.wait()
+            woke.set()
+
+    waiter_task = asyncio.create_task(_waiter())
+    # Yield long enough for the waiter coro to actually park on cond.wait()
+    # before we unblock the runner.
+    await asyncio.sleep(0.05)
+    gate.set()
+
+    try:
+        await asyncio.wait_for(woke.wait(), timeout=1.0)
+    finally:
+        waiter_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiter_task
+        await _wait_terminal(store, row.task_id)
+
+
+@pytest.mark.asyncio
+async def test_condition_notifies_on_terminal_transition(
+    manager_only: tuple[TaskManager, SqliteTaskStore],
+) -> None:
+    """Even a runner that never emits a progress event must wake the
+    waiter when the task transitions terminal — otherwise a quiet task
+    would silently stall every long-poll handler until their wait
+    timeout fires."""
+    manager, store = manager_only
+    gate = asyncio.Event()
+
+    async def _runner(_reporter: ProgressReporter) -> dict[str, Any]:
+        await gate.wait()
+        return {"ok": True}
+
+    row = await manager.submit(op="echo", runner=_runner)
+    cond = manager.condition_for(row.task_id)
+
+    woke = asyncio.Event()
+
+    async def _waiter() -> None:
+        async with cond:
+            await cond.wait()
+            woke.set()
+
+    waiter_task = asyncio.create_task(_waiter())
+    # Let the waiter park before letting the runner finish.
+    await asyncio.sleep(0.05)
+    gate.set()
+
+    try:
+        await asyncio.wait_for(woke.wait(), timeout=1.0)
+    finally:
+        waiter_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiter_task
+        await _wait_terminal(store, row.task_id)
+
+
+@pytest.mark.asyncio
+async def test_condition_per_task_isolation(
+    manager_only: tuple[TaskManager, SqliteTaskStore],
+) -> None:
+    """Notify on task A's condition must not wake a waiter parked on
+    task B's condition. Per-task isolation; conditions are not shared."""
+    manager, store = manager_only
+    gate_a = asyncio.Event()
+    gate_b_finishes = asyncio.Event()
+
+    async def _runner_a(reporter: ProgressReporter) -> dict[str, Any]:
+        await gate_a.wait()
+        await reporter.progress(phase="a", current=1, total=1)
+        return {"a": True}
+
+    async def _runner_b(_reporter: ProgressReporter) -> dict[str, Any]:
+        await gate_b_finishes.wait()
+        return {"b": True}
+
+    row_a = await manager.submit(op="echo", runner=_runner_a)
+    row_b = await manager.submit(op="echo", runner=_runner_b)
+
+    # Drain the initial ``task_started`` notifies on both Conditions —
+    # those fire before any waiter is parked, but we need to be SURE
+    # they're done before attaching B's waiter, otherwise the waiter
+    # races into the gap between ``store.append_event`` and the
+    # ``notify_all`` for B's own task_started, catching that notify
+    # and producing a false positive.
+    async def _has_first_event(task_id: str) -> bool:
+        evs = await store.list_events(task_id)
+        return bool(evs)
+
+    for _ in range(200):
+        if await _has_first_event(row_a.task_id) and await _has_first_event(
+            row_b.task_id
+        ):
+            break
+        await asyncio.sleep(0.01)
+    # Belt-and-braces: yield long enough for the notify_all coroutines
+    # following those appends to complete.
+    await asyncio.sleep(0.1)
+
+    cond_b = manager.condition_for(row_b.task_id)
+
+    b_woke = asyncio.Event()
+
+    async def _waiter_b() -> None:
+        async with cond_b:
+            await cond_b.wait()
+            b_woke.set()
+
+    waiter_b_task = asyncio.create_task(_waiter_b())
+    await asyncio.sleep(0.05)
+
+    # Trigger A's event. B's waiter must NOT wake.
+    gate_a.set()
+    await asyncio.sleep(0.2)
+    assert not b_woke.is_set(), "B's waiter woke on A's notify — conditions not per-task"
+
+    # Cleanup: let B finish so the waiter does wake (proves the waiter
+    # was correctly parked, not deadlocked).
+    gate_b_finishes.set()
+    try:
+        await asyncio.wait_for(b_woke.wait(), timeout=1.0)
+    finally:
+        waiter_b_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiter_b_task
+        await _wait_terminal(store, row_a.task_id)
+        await _wait_terminal(store, row_b.task_id)
+
+
 @pytest.mark.asyncio
 async def test_restart_cleanup_marks_orphans_failed(
-    manager_only: tuple[TaskManager, SqliteTaskStore, ProgressBus],
+    manager_only: tuple[TaskManager, SqliteTaskStore],
 ) -> None:
-    _manager, store, bus = manager_only
+    _manager, store = manager_only
     # Simulate a leftover row from a prior process: PENDING in storage,
     # nothing in the in-memory manager.
     from dikw_core.server.tasks import TaskRow
@@ -218,7 +342,7 @@ async def test_restart_cleanup_marks_orphans_failed(
     await store.create(leftover)
 
     # New manager on the same store mimics a fresh server boot.
-    new_manager = TaskManager(store=store, bus=bus)
+    new_manager = TaskManager(store=store)
     await new_manager.restart_cleanup()
 
     row = await store.get("leftover-1")

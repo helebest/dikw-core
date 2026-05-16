@@ -8,8 +8,6 @@ or cancellation (already covered for ingest).
 
 from __future__ import annotations
 
-import asyncio
-import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -22,24 +20,9 @@ from dikw_core.providers import LLMResponse
 from dikw_core.server import synth_op as synth_op_module
 
 from ..fakes import FakeEmbeddings, FakeLLM
+from .conftest import wait_task_terminal as _wait_terminal
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "notes"
-
-
-async def _wait_terminal(
-    client: httpx.AsyncClient, task_id: str, *, timeout: float = 15.0
-) -> dict[str, Any]:
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        r = await client.get(f"/v1/tasks/{task_id}")
-        if r.status_code == 200 and r.json()["status"] in {
-            "succeeded",
-            "failed",
-            "cancelled",
-        }:
-            return r.json()
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"task {task_id} never reached a terminal state")
 
 
 def _patch_synth_factories(
@@ -123,7 +106,7 @@ async def test_synth_task_emits_per_source_progress_and_final_report(
     assert handle["op"] == "synth"
     task_id = handle["task_id"]
 
-    row = await _wait_terminal(server_client, task_id)
+    row = await _wait_terminal(server_client, task_id, timeout=15.0)
     assert row["status"] == "succeeded", row
 
     result = (await server_client.get(f"/v1/tasks/{task_id}/result")).json()[
@@ -135,14 +118,11 @@ async def test_synth_task_emits_per_source_progress_and_final_report(
     assert result["errors"] == 0
 
     # Event tape carries one progress event per source, all phase=synth.
-    async with server_client.stream(
-        "GET", f"/v1/tasks/{task_id}/events"
-    ) as resp:
-        events = [
-            json.loads(line)
-            for line in [ln async for ln in resp.aiter_lines()]
-            if line.strip()
-        ]
+    resp = await server_client.get(
+        f"/v1/tasks/{task_id}/events",
+        params={"from_seq": 0, "limit": 1000, "wait": 0},
+    )
+    events = resp.json()["events"]
     synth_progress = [
         e for e in events if e["type"] == "progress" and e["phase"] == "synth"
     ]
@@ -207,7 +187,7 @@ async def test_distill_task_emits_per_batch_progress(
     )
     assert submit.status_code == 200
     task_id = submit.json()["task_id"]
-    row = await _wait_terminal(server_client, task_id)
+    row = await _wait_terminal(server_client, task_id, timeout=15.0)
     assert row["status"] == "succeeded", row
 
     result = (await server_client.get(f"/v1/tasks/{task_id}/result")).json()[
@@ -217,14 +197,11 @@ async def test_distill_task_emits_per_batch_progress(
     assert result["candidates_added"] == 0  # FakeLLM body doesn't parse
     assert result["rejected"] == 0
 
-    async with server_client.stream(
-        "GET", f"/v1/tasks/{task_id}/events"
-    ) as resp:
-        events = [
-            json.loads(line)
-            for line in [ln async for ln in resp.aiter_lines()]
-            if line.strip()
-        ]
+    resp = await server_client.get(
+        f"/v1/tasks/{task_id}/events",
+        params={"from_seq": 0, "limit": 1000, "wait": 0},
+    )
+    events = resp.json()["events"]
     distill_progress = [
         e for e in events if e["type"] == "progress" and e["phase"] == "distill"
     ]

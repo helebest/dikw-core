@@ -123,9 +123,25 @@ class TaskStore(Protocol):
         ...
 
     async def list_events(
-        self, task_id: str, *, from_seq: int = 0
+        self,
+        task_id: str,
+        *,
+        from_seq: int = 0,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Replay events with ``seq >= from_seq``, in order."""
+        """Replay events with ``seq >= from_seq``, in order.
+
+        ``limit``: cap on returned rows. ``None`` returns everything
+        from ``from_seq`` onwards (used by the historical replay path);
+        a concrete int is the cursor-based pagination knob driving the
+        long-poll ``GET /v1/tasks/{id}/events`` endpoint.
+        """
+        ...
+
+    async def max_seq(self, task_id: str) -> int:
+        """Highest seq currently persisted for ``task_id``, or 0 if no
+        events. Single-row indexed lookup — avoids the O(N) tape scan
+        the cursor ``/events`` endpoint needs to compute ``last_seq``."""
         ...
 
 

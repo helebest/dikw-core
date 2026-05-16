@@ -76,12 +76,19 @@ uv run dikw import ./my-notes
 
 # ``ingest`` is the next step: scans ``<base>/sources/``, chunks the
 # markdown, and writes the D/I layer. Offline mode indexes FTS only,
-# no API calls.
-uv run dikw ingest --no-embed
+# no API calls. Async-by-default: prints a ``{task_id, ...}`` handle
+# and exits 0 so an agent can move on; add ``--wait`` to block + render
+# the IngestReport + map the final status to the exit code.
+uv run dikw ingest --no-embed --wait
 
 # Or with embeddings (requires DIKW_EMBEDDING_API_KEY on any OpenAI-compatible
 # endpoint — OpenAI, Gitee AI, Ollama, vLLM, …).
 export DIKW_EMBEDDING_API_KEY=sk-...
+uv run dikw ingest --wait
+
+# Fire-and-forget (default): submit + capture the task_id; follow up
+# later with ``dikw client tasks wait <id>`` or page events via
+# ``dikw client tasks events <id> --from-seq 0 --limit 100``.
 uv run dikw ingest
 ```
 
@@ -173,7 +180,12 @@ without re-implementing wikilink resolution per client.
 ## 5. Synthesise a Knowledge layer
 
 ```bash
+# Async-default: submit + print the task handle, exit 0 right away.
 uv run dikw synth
+
+# Block until the synth task finishes, render the report, and exit
+# with succeeded=0 / failed=1 / cancelled=130 / timeout=124.
+uv run dikw synth --wait
 ```
 
 The LLM reads each source doc and produces a `wiki/<folder>/<slug>.md`

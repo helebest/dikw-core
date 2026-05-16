@@ -209,3 +209,54 @@ async def test_event_isolation_across_tasks(store: TaskStore) -> None:
     b_events = await store.list_events(b.task_id)
     assert [e["seq"] for e in a_events] == [1, 2]
     assert [e["seq"] for e in b_events] == [1]
+
+
+@pytest.mark.asyncio
+async def test_list_events_with_limit_returns_at_most_n(store: TaskStore) -> None:
+    row = _row()
+    await store.create(row)
+    for i in range(5):
+        await store.append_event(row.task_id, {"type": "progress", "i": i})
+
+    page = await store.list_events(row.task_id, limit=3)
+    assert [e["seq"] for e in page] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_list_events_with_limit_and_from_seq(store: TaskStore) -> None:
+    row = _row()
+    await store.create(row)
+    for i in range(5):
+        await store.append_event(row.task_id, {"type": "progress", "i": i})
+
+    page = await store.list_events(row.task_id, from_seq=2, limit=2)
+    assert [e["seq"] for e in page] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_list_events_no_limit_still_returns_all(store: TaskStore) -> None:
+    """Backwards-safe: omitting `limit` keeps the original full-replay
+    behaviour. Guards against a refactor that defaults to a tight cap."""
+    row = _row()
+    await store.create(row)
+    for i in range(7):
+        await store.append_event(row.task_id, {"type": "progress", "i": i})
+
+    page = await store.list_events(row.task_id)
+    assert [e["seq"] for e in page] == [1, 2, 3, 4, 5, 6, 7]
+
+
+@pytest.mark.asyncio
+async def test_max_seq_returns_highest_event_seq(store: TaskStore) -> None:
+    row = _row()
+    await store.create(row)
+    assert await store.max_seq(row.task_id) == 0
+    await store.append_event(row.task_id, {"type": "x"})
+    await store.append_event(row.task_id, {"type": "y"})
+    await store.append_event(row.task_id, {"type": "z"})
+    assert await store.max_seq(row.task_id) == 3
+
+
+@pytest.mark.asyncio
+async def test_max_seq_unknown_task_returns_zero(store: TaskStore) -> None:
+    assert await store.max_seq("no-such-task") == 0

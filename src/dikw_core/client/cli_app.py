@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Annotated, Any
@@ -48,7 +49,28 @@ from .progress import (
     render_synth_eval_report,
     render_synth_report,
 )
+from .serve_and_run import ENV_SERVE_AND_RUN_AUTO_WAIT
+from .task_follow import follow_to_terminal
 from .transport import ClientError, Transport
+
+# Exit-code contract for ``--wait`` on op commands and ``dikw tasks
+# wait``. Agents script against these — keep them stable.
+_EXIT_FAILED = 1
+_EXIT_CANCELLED = 130  # POSIX SIGINT convention
+_EXIT_TIMEOUT = 124  # POSIX timeout(1) convention
+
+
+def _serve_and_run_forces_wait() -> bool:
+    """True when this CLI invocation is the inner command of a
+    ``dikw serve-and-run`` lifecycle without ``--keep-alive``.
+
+    The outer ``serve-and-run`` tears down the temporary server the
+    moment the inner exits, so an async-default op command would
+    submit a task, print a handle, exit 0, and have the task killed
+    mid-flight. Auto-flipping to ``--wait`` keeps the lifecycle
+    coherent — the inner blocks until the task finishes, the server
+    only shuts down after."""
+    return os.environ.get(ENV_SERVE_AND_RUN_AUTO_WAIT) == "1"
 
 app = typer.Typer(
     name="client",
@@ -430,6 +452,18 @@ def lint_propose_cmd(
             ),
         ),
     ] = False,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            help=(
+                "Block until the task finishes; render the proposal "
+                "summary and map the final status to the standard exit "
+                "code. Without ``--wait`` the command exits immediately "
+                "with the task handle JSON."
+            ),
+        ),
+    ] = False,
     plain: Annotated[
         bool,
         typer.Option("--plain", help="Disable progress widget."),
@@ -439,9 +473,9 @@ def lint_propose_cmd(
 ) -> None:
     """Propose fixes for the current lint findings.
 
-    Submits a ``lint.propose`` task, follows its event stream, and on
-    success prints the task_id + per-proposal summary. The task_id is
-    what `dikw client lint apply <id>` consumes."""
+    Default is async — submit + print JSON task handle. Use ``--wait``
+    to block + render the proposal summary + emit the
+    ``dikw client lint apply <id>`` hint line."""
 
     async def _go() -> None:
         body: dict[str, Any] = {"limit": limit, "enable_llm": enable_llm}
@@ -450,22 +484,20 @@ def lint_propose_cmd(
         async with Transport.from_config(_resolve(server, token)) as t:
             handle = await t.post_json("/v1/lint/propose", json_body=body)
             task_id = str(handle["task_id"])
-            renderer = TaskProgressRenderer(console, plain=plain)
-            with renderer.live():
-                async with t.stream_ndjson(
-                    "GET", f"/v1/tasks/{task_id}/events"
-                ) as events:
-                    final = await renderer.run(events)
-        if final.status == "succeeded" and final.result is not None:
+            if not wait and not _serve_and_run_forces_wait():
+                _print_task_handle(task_id, str(handle.get("status") or "pending"))
+                return
+            status, payload = await _wait_and_render(t, task_id, plain=plain)
+        if status == "succeeded" and payload is not None:
             console.print(
                 f"[green]propose task succeeded[/green] — id=[bold]{task_id}[/bold]"
             )
             from .progress import render_lint_proposals_summary
-            render_lint_proposals_summary(console, final.result)
+            render_lint_proposals_summary(console, payload)
             console.print(
                 f"\n[dim]apply with:[/dim] dikw client lint apply {task_id}"
             )
-        _exit_on_failure(final.status, final.error)
+        _exit_for_status(status, payload)
 
     _run(_go())
 
@@ -541,6 +573,16 @@ def lint_apply_cmd(
             help="Comma-separated proposal indices to drop.",
         ),
     ] = None,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            help=(
+                "Block until the task finishes; render the apply summary "
+                "and map the final status to the standard exit code."
+            ),
+        ),
+    ] = False,
     plain: Annotated[
         bool,
         typer.Option("--plain", help="Disable progress widget."),
@@ -548,7 +590,10 @@ def lint_apply_cmd(
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
-    """Apply a previously-proposed fix to the wiki."""
+    """Apply a previously-proposed fix to the wiki.
+
+    Default is async — submit + print JSON task handle. Use ``--wait``
+    to block + render the apply report."""
 
     def _parse_index_list(v: str | None) -> list[int] | None:
         if v is None:
@@ -570,16 +615,14 @@ def lint_apply_cmd(
         async with Transport.from_config(_resolve(server, token)) as t:
             handle = await t.post_json("/v1/lint/apply", json_body=body)
             task_id = str(handle["task_id"])
-            renderer = TaskProgressRenderer(console, plain=plain)
-            with renderer.live():
-                async with t.stream_ndjson(
-                    "GET", f"/v1/tasks/{task_id}/events"
-                ) as events:
-                    final = await renderer.run(events)
-        if final.status == "succeeded" and final.result is not None:
+            if not wait and not _serve_and_run_forces_wait():
+                _print_task_handle(task_id, str(handle.get("status") or "pending"))
+                return
+            status, payload = await _wait_and_render(t, task_id, plain=plain)
+        if status == "succeeded" and payload is not None:
             from .progress import render_lint_apply_report
-            render_lint_apply_report(console, final.result)
-        _exit_on_failure(final.status, final.error)
+            render_lint_apply_report(console, payload)
+        _exit_for_status(status, payload)
 
     _run(_go())
 
@@ -660,33 +703,67 @@ def retrieve_cmd(
 # ---- async task commands ----------------------------------------------
 
 
-async def _follow_task(
+def _print_task_handle(task_id: str, status: str) -> None:
+    """Default async-submit output: agent-friendly JSON envelope.
+
+    Per ``feedback_cli_agent_first_default`` the no-``--wait`` path is
+    a single JSON object on stdout — agents pipe it to ``jq``; humans
+    follow up with ``dikw client tasks wait <task_id>``."""
+    print(
+        json.dumps(
+            {
+                "task_id": task_id,
+                "status": status,
+                "events_url": f"/v1/tasks/{task_id}/events",
+                "wait_command": f"dikw client tasks wait {task_id}",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+async def _wait_and_render(
     t: Transport,
+    task_id: str,
     *,
-    submit_path: str,
-    body: dict[str, Any],
     plain: bool,
-) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
-    handle = await t.post_json(submit_path, json_body=body)
-    task_id = str(handle["task_id"])
+    poll_wait: int = 30,
+    total_timeout: float | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Drive the long-poll cursor loop with the rich progress widget.
+
+    Shared by every op command's ``--wait`` path and by
+    ``dikw client tasks wait``. Returns the final ``(status, payload)``
+    where ``payload`` is the result dict on success or the error dict
+    on failure. Raises :class:`TimeoutError` on local budget expiry —
+    the caller maps it to exit ``124``.
+    """
     renderer = TaskProgressRenderer(console, plain=plain)
     with renderer.live():
-        async with t.stream_ndjson(
-            "GET", f"/v1/tasks/{task_id}/events"
-        ) as events:
-            final = await renderer.run(events)
-    return final.status, final.result, final.error
+        return await follow_to_terminal(
+            t,
+            task_id,
+            renderer=renderer,
+            poll_wait=poll_wait,
+            total_timeout=total_timeout,
+        )
 
 
-def _exit_on_failure(
-    status: str, error: dict[str, Any] | None
-) -> None:
+def _exit_for_status(status: str, payload: dict[str, Any] | None) -> None:
+    """Map a terminal task status to the CLI's exit code contract.
+
+    ``succeeded`` → no-op (caller already rendered the report);
+    ``failed`` → exit 1; ``cancelled`` → exit 130 (POSIX SIGINT).
+    """
     if status == "succeeded":
         return
+    if status == "cancelled":
+        console.print("[yellow]task cancelled[/yellow]")
+        raise typer.Exit(code=_EXIT_CANCELLED)
     console.print(f"[red]task {status}[/red]")
-    if error:
-        console.print(f"[dim]{error}[/dim]")
-    raise typer.Exit(code=1)
+    if payload:
+        console.print(f"[dim]{payload}[/dim]")
+    raise typer.Exit(code=_EXIT_FAILED)
 
 
 @app.command(
@@ -780,7 +857,20 @@ def ingest_cmd(
             help=(
                 "Exit non-zero if any file errored during ingest. "
                 "Default behaviour treats per-file errors as warnings "
-                "so a single bad file doesn't fail a CI run."
+                "so a single bad file doesn't fail a CI run. Implies "
+                "``--wait`` since the per-file error list only exists "
+                "after the task finishes."
+            ),
+        ),
+    ] = False,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            help=(
+                "Block until the task finishes; render the IngestReport "
+                "and map the final status to the standard exit code "
+                "(succeeded=0, failed=1, cancelled=130)."
             ),
         ),
     ] = False,
@@ -793,25 +883,35 @@ def ingest_cmd(
 ) -> None:
     """Run ingest against the server's ``<base>/sources/`` tree.
 
-    Sources are imported separately via ``dikw client import``.
+    Sources are imported separately via ``dikw client import``. Default
+    is async — the command submits the task and prints a JSON handle
+    so agents can move on; pass ``--wait`` to block until terminal.
     """
 
     async def _go() -> None:
+        # ``--strict`` only makes sense alongside the final IngestReport,
+        # which the async-default path doesn't fetch. Inside
+        # ``serve-and-run`` (no ``--keep-alive``) the temporary server
+        # dies on inner exit, so an async-default submit would orphan
+        # the task — auto-wait there too.
+        should_wait = wait or strict or _serve_and_run_forces_wait()
         async with Transport.from_config(_resolve(server, token)) as t:
-            status, result, error = await _follow_task(
-                t,
-                submit_path="/v1/ingest",
-                body={"no_embed": no_embed},
-                plain=plain,
+            handle = await t.post_json(
+                "/v1/ingest", json_body={"no_embed": no_embed}
             )
-        if status == "succeeded" and result is not None:
-            render_ingest_report(console, result)
-            errors = result.get("errors") or []
+            task_id = str(handle["task_id"])
+            if not should_wait:
+                _print_task_handle(task_id, str(handle.get("status") or "pending"))
+                return
+            status, payload = await _wait_and_render(t, task_id, plain=plain)
+        if status == "succeeded" and payload is not None:
+            render_ingest_report(console, payload)
+            errors = payload.get("errors") or []
             if errors:
                 render_ingest_errors(console, errors)
                 if strict:
-                    raise typer.Exit(code=1)
-        _exit_on_failure(status, error)
+                    raise typer.Exit(code=_EXIT_FAILED)
+        _exit_for_status(status, payload)
 
     _run(_go())
 
@@ -832,6 +932,16 @@ def synth_cmd(
             help="Skip embedding the generated K-layer pages.",
         ),
     ] = False,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            help=(
+                "Block until the task finishes; render the SynthReport "
+                "and map the final status to the standard exit code."
+            ),
+        ),
+    ] = False,
     plain: Annotated[
         bool,
         typer.Option("--plain", help="Disable progress widget."),
@@ -839,19 +949,25 @@ def synth_cmd(
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
-    """Synthesise K-layer wiki pages from D-layer sources."""
+    """Synthesise K-layer wiki pages from D-layer sources.
+
+    Default is async — submit + print JSON task handle. Use ``--wait``
+    to block + render + exit with task status."""
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
-            status, result, error = await _follow_task(
-                t,
-                submit_path="/v1/synth",
-                body={"force_all": force_all, "no_embed": no_embed},
-                plain=plain,
+            handle = await t.post_json(
+                "/v1/synth",
+                json_body={"force_all": force_all, "no_embed": no_embed},
             )
-        if status == "succeeded" and result is not None:
-            render_synth_report(console, result)
-        _exit_on_failure(status, error)
+            task_id = str(handle["task_id"])
+            if not wait and not _serve_and_run_forces_wait():
+                _print_task_handle(task_id, str(handle.get("status") or "pending"))
+                return
+            status, payload = await _wait_and_render(t, task_id, plain=plain)
+        if status == "succeeded" and payload is not None:
+            render_synth_report(console, payload)
+        _exit_for_status(status, payload)
 
     _run(_go())
 
@@ -865,6 +981,16 @@ def distill_cmd(
             help="K-layer pages packed into one distill LLM call.",
         ),
     ] = 8,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            help=(
+                "Block until the task finishes; render the DistillReport "
+                "and map the final status to the standard exit code."
+            ),
+        ),
+    ] = False,
     plain: Annotated[
         bool,
         typer.Option("--plain", help="Disable progress widget."),
@@ -872,24 +998,29 @@ def distill_cmd(
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
-    """Propose W-layer candidates from current K-layer pages."""
+    """Propose W-layer candidates from current K-layer pages.
+
+    Default is async — submit + print JSON task handle. Use ``--wait``
+    to block + render + exit with task status."""
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
-            status, result, error = await _follow_task(
-                t,
-                submit_path="/v1/distill",
-                body={"pages_per_call": pages_per_call},
-                plain=plain,
+            handle = await t.post_json(
+                "/v1/distill", json_body={"pages_per_call": pages_per_call}
             )
-        if status == "succeeded" and result is not None:
-            render_distill_report(console, result)
-            if int(result.get("candidates_added") or 0):
+            task_id = str(handle["task_id"])
+            if not wait and not _serve_and_run_forces_wait():
+                _print_task_handle(task_id, str(handle.get("status") or "pending"))
+                return
+            status, payload = await _wait_and_render(t, task_id, plain=plain)
+        if status == "succeeded" and payload is not None:
+            render_distill_report(console, payload)
+            if int(payload.get("candidates_added") or 0):
                 console.print(
                     "Review with [cyan]dikw client review list[/cyan] / "
                     "[cyan]dikw client review approve <id>[/cyan]."
                 )
-        _exit_on_failure(status, error)
+        _exit_for_status(status, payload)
 
     _run(_go())
 
@@ -960,6 +1091,18 @@ def eval_cmd(
             help="Render rich tables instead of NDJSON (default).",
         ),
     ] = False,
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait",
+            help=(
+                "Block until the task finishes; render the EvalReport "
+                "and map the final status to the standard exit code "
+                "(succeeded=0 with gate=pass, failed=1 / gate=fail, "
+                "cancelled=130, ``--eval synth`` ungated=2)."
+            ),
+        ),
+    ] = False,
     plain: Annotated[
         bool,
         typer.Option("--plain", help="Disable progress widget."),
@@ -967,14 +1110,16 @@ def eval_cmd(
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
-    """Run an eval dataset on the server (retrieval and/or synth)."""
+    """Run an eval dataset on the server (retrieval and/or synth).
+
+    Default is async — submit + print JSON task handle. Use ``--wait``
+    to block + render + exit with task / gate status."""
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
-            status, result, error = await _follow_task(
-                t,
-                submit_path="/v1/eval",
-                body={
+            handle = await t.post_json(
+                "/v1/eval",
+                json_body={
                     "dataset": dataset,
                     "mode": mode,
                     "cache_mode": cache_mode,
@@ -982,12 +1127,16 @@ def eval_cmd(
                     "judge": judge,
                     "judge_sample": judge_sample,
                 },
-                plain=plain,
             )
-        if status == "succeeded" and result is not None:
-            _render_eval_result(result, pretty=pretty)
-            if not bool(result.get("passed", True)):
-                raise typer.Exit(code=1)
+            task_id = str(handle["task_id"])
+            if not wait and not _serve_and_run_forces_wait():
+                _print_task_handle(task_id, str(handle.get("status") or "pending"))
+                return
+            status, payload = await _wait_and_render(t, task_id, plain=plain)
+        if status == "succeeded" and payload is not None:
+            _render_eval_result(payload, pretty=pretty)
+            if not bool(payload.get("passed", True)):
+                raise typer.Exit(code=_EXIT_FAILED)
             # An explicit ``--eval synth`` request must have at least
             # one gated synth report — otherwise the user asked for a
             # K-layer gate run and the dataset declared no synth
@@ -995,7 +1144,7 @@ def eval_cmd(
             # "no gate ran" from "gate ran and passed" (exit 0) and
             # "gate failed" (exit 1).
             if eval_modes and "synth" in eval_modes:
-                synth_reports = _synth_reports(result)
+                synth_reports = _synth_reports(payload)
                 if synth_reports and not any(
                     r.get("gated") for r in synth_reports
                 ):
@@ -1006,7 +1155,7 @@ def eval_cmd(
                         markup=True,
                     )
                     raise typer.Exit(code=2)
-        _exit_on_failure(status, error)
+        _exit_for_status(status, payload)
 
     _run(_go())
 
@@ -1542,57 +1691,136 @@ def tasks_list_cmd(
     _run(_go())
 
 
-@tasks_app.command("show")
-def tasks_show_cmd(
+@tasks_app.command("status")
+def tasks_status_cmd(
     task_id: Annotated[str, typer.Argument(help="Task id (12-char hex).")],
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
     """Print the JSON snapshot of a task row.
 
-    Uses ``console.print_json`` so long values (timestamps, queue
-    identifiers, error messages) don't get rich's soft-wrap injected
-    mid-string — agent parsers need clean JSON regardless of terminal
-    width.
+    Uses ``print(json.dumps(...))`` instead of rich's ``print_json`` so
+    long values (timestamps, queue identifiers, error messages) don't
+    get rich's soft-wrap injected mid-string — agent parsers need clean
+    JSON regardless of terminal width.
     """
 
     async def _go() -> None:
         async with Transport.from_config(_resolve(server, token)) as t:
             row = await t.get_json(f"/v1/tasks/{task_id}")
-        console.print_json(json.dumps(row, ensure_ascii=False))
+        print(json.dumps(row, ensure_ascii=False))
 
     _run(_go())
 
 
-@tasks_app.command("follow")
-def tasks_follow_cmd(
+@tasks_app.command("events")
+def tasks_events_cmd(
     task_id: Annotated[str, typer.Argument(help="Task id (12-char hex).")],
     from_seq: Annotated[
-        int, typer.Option("--from-seq", help="Resume from this seq number.")
+        int,
+        typer.Option(
+            "--from-seq",
+            help="First seq to return (cursor).",
+            min=0,
+        ),
     ] = 0,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            help="Cap on events in this page (1..1000).",
+            min=1,
+            max=1000,
+        ),
+    ] = 100,
+    wait: Annotated[
+        int,
+        typer.Option(
+            "--wait",
+            help=(
+                "Server hold time in seconds (0..60). 0 is a snapshot; "
+                ">0 long-polls until a new event lands or the timeout "
+                "fires server-side."
+            ),
+            min=0,
+            max=60,
+        ),
+    ] = 0,
+    server: Annotated[str | None, _server_option()] = None,
+    token: Annotated[str | None, _token_option()] = None,
+) -> None:
+    """Fetch one ``EventsPage`` from a task's cursor endpoint.
+
+    The agent paging primitive: one HTTP call, raw JSON to stdout,
+    exit 0 regardless of task status. Agents script their own
+    cursor-advance loop on top; humans usually want ``tasks wait``
+    instead."""
+
+    async def _go() -> None:
+        async with Transport.from_config(_resolve(server, token)) as t:
+            page = await t.get_task_events_page(
+                task_id, from_seq=from_seq, limit=limit, wait=wait
+            )
+        print(json.dumps(page, ensure_ascii=False))
+
+    _run(_go())
+
+
+@tasks_app.command("wait")
+def tasks_wait_cmd(
+    task_id: Annotated[str, typer.Argument(help="Task id (12-char hex).")],
+    poll_wait: Annotated[
+        int,
+        typer.Option(
+            "--poll-wait",
+            help=(
+                "Per-HTTP-call hold time in seconds (clamped to server "
+                "cap 60). Default 30."
+            ),
+            min=1,
+            max=60,
+        ),
+    ] = 30,
+    total_timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout",
+            help=(
+                "Client-side total budget in seconds. On expiry the "
+                "command exits 124; the task is NOT auto-cancelled "
+                "(chain ``dikw client tasks cancel`` if needed)."
+            ),
+        ),
+    ] = None,
     plain: Annotated[
         bool, typer.Option("--plain", help="Disable progress widget.")
     ] = False,
     server: Annotated[str | None, _server_option()] = None,
     token: Annotated[str | None, _token_option()] = None,
 ) -> None:
-    """Subscribe to a task's NDJSON event stream."""
+    """Block until the task reaches a terminal state.
+
+    Renders a rich progress widget to a TTY (or one tidy plain-text
+    line per progress tick under ``--plain``), then maps the final
+    status to the standard exit code: succeeded=0, failed=1,
+    cancelled=130, client-side timeout=124."""
 
     async def _go() -> None:
-        renderer = TaskProgressRenderer(console, plain=plain)
         async with Transport.from_config(_resolve(server, token)) as t:
-            with renderer.live():
-                async with t.stream_ndjson(
-                    "GET",
-                    f"/v1/tasks/{task_id}/events",
-                    params={"from_seq": from_seq} if from_seq else None,
-                ) as events:
-                    final = await renderer.run(events)
-        if final.status != "succeeded":
-            console.print(f"[yellow]task {final.status}[/yellow]")
-            if final.error:
-                console.print(f"[dim]{final.error}[/dim]")
-            raise typer.Exit(code=1)
+            try:
+                status, payload = await _wait_and_render(
+                    t,
+                    task_id,
+                    plain=plain,
+                    poll_wait=poll_wait,
+                    total_timeout=total_timeout,
+                )
+            except TimeoutError:
+                console.print(
+                    f"[yellow]timeout[/yellow] — task {task_id} still running"
+                )
+                raise typer.Exit(code=_EXIT_TIMEOUT) from None
+        _exit_for_status(status, payload)
 
     _run(_go())
 

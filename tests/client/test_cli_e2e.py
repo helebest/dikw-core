@@ -168,7 +168,10 @@ def test_ingest_default_treats_file_errors_as_warnings(
     _drop_broken_markdown(rt)
     patch_transport_factory()
 
-    result = _run(["ingest", "--no-embed", "--plain"])
+    # Op commands default to async-by-default since the task-first
+    # CLI flip; ``--wait`` makes the test see the IngestReport + errors
+    # surface that this assertion is gated on.
+    result = _run(["ingest", "--no-embed", "--plain", "--wait"])
     assert result.exit_code == 0, result.stdout
     assert "file error" in result.stdout.lower()
     assert "broken.md" in result.stdout
@@ -570,7 +573,7 @@ def test_distill_runs_through_task_pipeline(
     monkeypatch.setattr(synth_op, "build_llm", lambda _cfg, **_kw: FakeLLM())
     monkeypatch.setattr(synth_op, "build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    result = _run(["distill", "--plain"])
+    result = _run(["distill", "--plain", "--wait"])
     assert result.exit_code == 0, result.stdout
     assert "K pages read" in result.stdout
     assert "candidates added" in result.stdout

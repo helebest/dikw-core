@@ -73,11 +73,16 @@ Repository = "https://github.com/OpenDIKW/dikw-core"
 packages = ["src/dikw_core"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/dikw_core/storage/migrations" = "dikw_core/storage/migrations"
-"src/dikw_core/prompts" = "dikw_core/prompts"
 # Packaged eval datasets. Top-level `evals/datasets/` is the canonical source
 # of truth; this mapping copies it into the wheel so `dikw eval` works after
 # `pip install` without requiring users to clone the repo.
+#
+# `src/dikw_core/{storage/migrations,prompts}` are NOT listed here even
+# though they ship non-.py assets (schema.sql, prompt .md) — they live
+# inside the package tree, so `packages = ["src/dikw_core"]` already
+# picks them up via hatchling's default file discovery. Adding them
+# here used to produce duplicate zipfile entries that PyPI rejects
+# with "Duplicate filename in local headers" on `twine upload`.
 "evals/datasets" = "dikw_core/eval/datasets"
 
 [tool.ruff]

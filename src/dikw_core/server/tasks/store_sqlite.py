@@ -382,6 +382,20 @@ def _row_to_task(row: tuple[Any, ...]) -> TaskRow:
         result,
         error,
     ) = row
+    if status is None:
+        # Schema is ``status TEXT NOT NULL`` and every write path goes
+        # through ``_create_sync`` / ``_update_status_sync`` with a
+        # required ``TaskStatus`` arg — a NULL here is "should never
+        # happen" territory. Suspected cause is racing-cursor cross-
+        # talk on the shared ``sqlite3.Connection`` (only writes hold
+        # ``self._lock`` today; reads bypass it). Raising a descriptive
+        # error here is strictly better than the cryptic
+        # ``ValueError: None is not a valid TaskStatus`` that surfaced
+        # in CI; the next sighting carries enough context to act on.
+        raise TaskStoreError(
+            f"task row {task_id!r} read back with NULL status — "
+            "likely sqlite shared-connection threading bug"
+        )
     return TaskRow(
         task_id=task_id,
         op=op,

@@ -270,9 +270,19 @@ async def test_events_long_poll_wakes_on_append(
 async def test_events_long_poll_returns_on_terminal(
     server_client: httpx.AsyncClient,
 ) -> None:
-    """``wait>0`` returns when the task transitions terminal — the
-    final-event append fires the notify, the handler re-reads, sees
-    terminal status, and returns within notify latency."""
+    """``wait>0`` wakes up promptly when a task is in flight + emits a
+    new event, and the task eventually reaches terminal.
+
+    The test does NOT assert the long-poll *response* carries terminal
+    status — the cursor handler is "return on any new event" by design,
+    and that event can be a non-terminal ``partial`` whose append
+    *precedes* the manager's ``update_status(SUCCEEDED)`` by a few
+    microseconds. Two decoupled assertions instead:
+
+    1. Long-poll resolves well before the 5s deadline (i.e. the
+       ``Condition.notify_all`` wake-up path actually fires).
+    2. The task eventually reaches a terminal state.
+    """
     import asyncio
     import time
 
@@ -281,7 +291,8 @@ async def test_events_long_poll_returns_on_terminal(
     )
     task_id = submit.json()["task_id"]
     # Get a cursor that's likely past task_started + the one progress
-    # already emitted, so the long-poll genuinely waits for the final.
+    # already emitted, so the long-poll genuinely waits for the next
+    # event (partial or final).
     await asyncio.sleep(0.05)
     snap = await server_client.get(
         f"/v1/tasks/{task_id}/events", params={"from_seq": 0, "wait": 0}
@@ -296,9 +307,23 @@ async def test_events_long_poll_returns_on_terminal(
     elapsed = time.monotonic() - start
     assert resp.status_code == 200
     body = resp.json()
+    # Assertion 1: wake-up actually fired (not the 5s timeout).
     assert elapsed < 2.0
-    # Task finished while we were waiting — task_status reflects that.
-    assert body["task_status"] in {"succeeded", "failed", "cancelled"}
+    # Body returned at least one new event past the cursor.
+    assert body["events"], "long-poll returned with no events"
+
+    # Assertion 2: task eventually reaches terminal — poll until then.
+    deadline = time.monotonic() + 2.0
+    final_status: str | None = None
+    while time.monotonic() < deadline:
+        row_resp = await server_client.get(f"/v1/tasks/{task_id}")
+        final_status = row_resp.json()["status"]
+        if final_status in {"succeeded", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.02)
+    assert final_status in {"succeeded", "failed", "cancelled"}, (
+        f"task did not reach terminal within 2s; last status={final_status!r}"
+    )
 
 
 @pytest.mark.asyncio

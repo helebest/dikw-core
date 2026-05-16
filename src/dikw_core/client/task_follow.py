@@ -28,6 +28,7 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
@@ -83,16 +84,23 @@ async def follow_to_terminal(
     final_status: str | None = None
     final_payload: dict[str, Any] | None = None
     # Consecutive pages where the server reported a terminal
-    # ``task_status`` but the tape had no ``final`` event. The manager's
-    # ``finally`` block makes this window narrow in the happy path, but a
-    # server crash between ``update_status(terminal)`` and
-    # ``emit_raw(final)``, or any ``append_event`` failure after the row
-    # update, would leave the tape permanently missing its final and the
-    # loop would otherwise spin forever. After this many quiet
-    # confirmations we fall back to the row's terminal status so the
-    # caller still gets a deterministic exit instead of hanging.
+    # ``task_status`` but the tape had no ``final`` event. In the
+    # happy path the manager's ``finally`` block notifies waiters
+    # *after* emitting ``final``, so the next paged read picks it up.
+    # But the server short-circuits long-poll on terminal status, so
+    # three back-to-back terminal pages can race the still-in-flight
+    # ``emit_raw(final)`` if its ``append_event`` is slow. Each
+    # iteration sleeps before re-polling and ultimately falls back to
+    # ``GET /v1/tasks/{id}/result`` (which reads the row, where the
+    # result/error was written *before* ``emit_raw``) — guaranteeing
+    # a deterministic payload even when the tape is permanently
+    # missing its final event.
     terminal_without_final_polls = 0
     _MAX_TERMINAL_WITHOUT_FINAL_POLLS = 3
+    # Backoff between terminal-without-final retries. Tuned to the
+    # typical ``append_event`` latency on sqlite (~ms) so a slow
+    # commit still lands inside the budget before fallback fires.
+    _TERMINAL_BACKOFF_SECONDS = 0.2
 
     while True:
         remaining = deadline - time.monotonic() if deadline is not None else None
@@ -144,13 +152,40 @@ async def follow_to_terminal(
             terminal_without_final_polls += 1
             if terminal_without_final_polls >= _MAX_TERMINAL_WITHOUT_FINAL_POLLS:
                 # Tape is permanently missing the final event (server
-                # crash, append_event failure). Surface the row's
-                # terminal status with no payload — caller can fetch
-                # ``/v1/tasks/{id}/result`` if it wants the recovered
-                # result/error.
-                return task_status, None
+                # crash, ``append_event`` failure). The row itself
+                # has the result/error — fetch via ``/result`` so the
+                # caller still sees a payload.
+                return await _row_terminal_fallback(transport, task_id)
+            # Sleep before re-polling so a slow ``append_event``
+            # commit has time to land. Each iteration costs at most
+            # ``_TERMINAL_BACKOFF_SECONDS`` of wall-clock.
+            await asyncio.sleep(_TERMINAL_BACKOFF_SECONDS)
         else:
             terminal_without_final_polls = 0
+
+
+async def _row_terminal_fallback(
+    transport: Transport, task_id: str
+) -> tuple[str, dict[str, Any] | None]:
+    """Recover a terminal task's status + payload via ``/v1/tasks/{id}/result``.
+
+    Used when ``follow_to_terminal`` saw repeated terminal-without-
+    final pages. The server writes ``result`` / ``error`` into the row
+    *before* emitting the ``final`` event, so the row endpoint has
+    the recovered payload even if the tape is permanently missing
+    its final.
+    """
+    body = await transport.get_json(f"/v1/tasks/{task_id}/result")
+    if not isinstance(body, dict):
+        return "failed", None
+    status = str(body.get("status") or "failed")
+    result = body.get("result")
+    error = body.get("error")
+    if isinstance(result, dict):
+        return status, result
+    if isinstance(error, dict):
+        return status, error
+    return status, None
 
 
 __all__ = ["follow_to_terminal"]

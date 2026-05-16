@@ -63,7 +63,10 @@ dikw client pages links wiki/Foo.md          # JSON: {outgoing, incoming}
 dikw client graph get                        # JSON: full base graph in one call
 dikw client assets get <asset_id> --output f # streams bytes to a local file; metadata to stdout JSON
 dikw client import ./local-sources           # pre-flights + imports md packages
-dikw client ingest                           # rendered progress; NOT pipeable
+dikw client ingest                           # async-default: prints task-handle JSON, exits 0
+dikw client ingest --wait                    # rendered progress + report; succeeded=0 / failed=1 / cancelled=130
+dikw client tasks wait <task_id>             # block + render on an existing task_id (same exit-code map)
+dikw client tasks events <task_id>           # raw EventsPage JSON for a single cursor page
 ```
 
 `retrieve` consumes the NDJSON event stream server-side and emits the

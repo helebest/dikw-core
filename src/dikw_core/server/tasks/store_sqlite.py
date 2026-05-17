@@ -3,6 +3,19 @@
 Pattern mirrors ``storage/sqlite.py``: stdlib ``sqlite3`` wrapped in
 ``asyncio.to_thread`` so the rest of the engine stays async without
 pulling in aiosqlite.
+
+Connection lifecycle: **per-call** (not shared). Each ``_xxx_sync``
+opens a fresh ``sqlite3.Connection``, performs the op, and closes it.
+Earlier revisions held one ``sqlite3.Connection`` per store and shared
+it across ``asyncio.to_thread`` workers via ``check_same_thread=False``;
+under CI's concurrent submit + long-poll + cancel mix, that produced
+``InterfaceError('bad parameter or other API misuse')`` and phantom
+rows (``status=NULL`` reads on a ``NOT NULL`` column). The cure was
+worse than the disease — wrapping reads in ``asyncio.Lock`` deadlocked
+against the per-task ``asyncio.Condition`` used by long-poll, hanging
+CI for 6h. Per-call conn removes the shared state entirely; WAL +
+``busy_timeout`` lets SQLite serialize writes at the engine level
+with full reader parallelism.
 """
 
 from __future__ import annotations
@@ -54,9 +67,7 @@ CREATE TABLE IF NOT EXISTS task_events (
 
 
 class SqliteTaskStore:
-    """SQLite TaskStore. Holds a single connection per process; all
-    methods funnel through ``asyncio.to_thread`` so the engine event loop
-    stays unblocked.
+    """SQLite TaskStore using per-call connections.
 
     The DB file is created on ``init()`` if missing — callers don't need
     to pre-create the parent dir as long as they pass an absolute path
@@ -66,12 +77,6 @@ class SqliteTaskStore:
     def __init__(self, path: str | Path, *, instance_id: str = "") -> None:
         self._path = Path(path)
         self._instance_id = instance_id
-        self._conn: sqlite3.Connection | None = None
-        # One re-entrant lock guards conn writes — sqlite is one-writer,
-        # the lock keeps async coroutines from interleaving inside one
-        # transaction (e.g. append_event must read the max seq + insert
-        # atomically).
-        self._lock = asyncio.Lock()
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -80,60 +85,58 @@ class SqliteTaskStore:
 
     def _init_sync(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(
-            str(self._path),
-            isolation_level=None,  # autocommit; we manage txn explicitly
-            check_same_thread=False,
-            timeout=30.0,
-        )
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.executescript(_SCHEMA_DDL)
-        # Bring older DBs up to schema. SQLite ALTER TABLE ADD COLUMN
-        # got IF NOT EXISTS in 3.36; older runtimes raise OperationalError
-        # on the duplicate which we swallow.
+        conn = self._open_conn()
         try:
-            conn.execute(
-                "ALTER TABLE tasks ADD COLUMN instance_id TEXT NOT NULL DEFAULT ''"
-            )
-        except sqlite3.OperationalError as e:
-            if "duplicate column" not in str(e).lower():
-                raise
-        self._conn = conn
+            # ``journal_mode = WAL`` is a *persistent* PRAGMA written to
+            # the DB file header — set it once here and every subsequent
+            # ``_open_conn`` sees WAL automatically.
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.executescript(_SCHEMA_DDL)
+            # Bring older DBs up to schema. SQLite ALTER TABLE ADD COLUMN
+            # got IF NOT EXISTS in 3.36; older runtimes raise OperationalError
+            # on the duplicate which we swallow.
+            try:
+                conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN instance_id TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+        finally:
+            conn.close()
 
     async def close(self) -> None:
-        await asyncio.to_thread(self._close_sync)
-
-    def _close_sync(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        # Per-call conn pattern: nothing to close at the store level.
+        # Kept for Protocol compatibility + lifecycle symmetry.
+        return None
 
     # ---- task rows ------------------------------------------------------
 
     async def create(self, row: TaskRow) -> None:
-        async with self._lock:
-            await asyncio.to_thread(self._create_sync, row)
+        await asyncio.to_thread(self._create_sync, row)
 
     def _create_sync(self, row: TaskRow) -> None:
-        conn = self._require_conn()
-        conn.execute(
-            "INSERT INTO tasks(task_id, op, status, created_at, started_at, "
-            "finished_at, params_digest, result, error, instance_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                row.task_id,
-                row.op,
-                row.status.value,
-                row.created_at,
-                row.started_at,
-                row.finished_at,
-                row.params_digest,
-                json.dumps(row.result) if row.result is not None else None,
-                json.dumps(row.error) if row.error is not None else None,
-                self._instance_id,
-            ),
-        )
+        conn = self._open_conn()
+        try:
+            conn.execute(
+                "INSERT INTO tasks(task_id, op, status, created_at, started_at, "
+                "finished_at, params_digest, result, error, instance_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row.task_id,
+                    row.op,
+                    row.status.value,
+                    row.created_at,
+                    row.started_at,
+                    row.finished_at,
+                    row.params_digest,
+                    json.dumps(row.result) if row.result is not None else None,
+                    json.dumps(row.error) if row.error is not None else None,
+                    self._instance_id,
+                ),
+            )
+        finally:
+            conn.close()
 
     async def get(self, task_id: str) -> TaskRow | None:
         return await asyncio.to_thread(self._get_sync, task_id)
@@ -143,15 +146,18 @@ class SqliteTaskStore:
         # In single-server SQLite (the default) the filter matches all
         # rows; in any future shared-DB sqlite scenario it scopes reads
         # the same way Postgres does.
-        conn = self._require_conn()
-        cur = conn.execute(
-            "SELECT task_id, op, status, created_at, started_at, finished_at, "
-            "params_digest, result, error FROM tasks "
-            "WHERE task_id = ? AND instance_id = ?",
-            (task_id, self._instance_id),
-        )
-        row = cur.fetchone()
-        return _row_to_task(row) if row is not None else None
+        conn = self._open_conn()
+        try:
+            cur = conn.execute(
+                "SELECT task_id, op, status, created_at, started_at, finished_at, "
+                "params_digest, result, error FROM tasks "
+                "WHERE task_id = ? AND instance_id = ?",
+                (task_id, self._instance_id),
+            )
+            row = cur.fetchone()
+            return _row_to_task(row) if row is not None else None
+        finally:
+            conn.close()
 
     async def list_tasks(
         self,
@@ -168,25 +174,28 @@ class SqliteTaskStore:
         op: str | None,
         limit: int,
     ) -> list[TaskRow]:
-        conn = self._require_conn()
-        clauses: list[str] = ["instance_id = ?"]
-        params: list[Any] = [self._instance_id]
-        if status is not None:
-            clauses.append("status = ?")
-            params.append(status.value)
-        if op is not None:
-            clauses.append("op = ?")
-            params.append(op)
-        where = " WHERE " + " AND ".join(clauses)
-        params.append(int(limit))
-        cur = conn.execute(
-            "SELECT task_id, op, status, created_at, started_at, finished_at, "
-            "params_digest, result, error FROM tasks"
-            + where
-            + " ORDER BY created_at DESC LIMIT ?",
-            params,
-        )
-        return [_row_to_task(r) for r in cur.fetchall()]
+        conn = self._open_conn()
+        try:
+            clauses: list[str] = ["instance_id = ?"]
+            params: list[Any] = [self._instance_id]
+            if status is not None:
+                clauses.append("status = ?")
+                params.append(status.value)
+            if op is not None:
+                clauses.append("op = ?")
+                params.append(op)
+            where = " WHERE " + " AND ".join(clauses)
+            params.append(int(limit))
+            cur = conn.execute(
+                "SELECT task_id, op, status, created_at, started_at, finished_at, "
+                "params_digest, result, error FROM tasks"
+                + where
+                + " ORDER BY created_at DESC LIMIT ?",
+                params,
+            )
+            return [_row_to_task(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
 
     async def list_running(self) -> list[TaskRow]:
         return await asyncio.to_thread(self._list_running_sync)
@@ -197,18 +206,21 @@ class SqliteTaskStore:
         # instance pointed at the same task DB. With the default
         # ``instance_id=""`` (single-server / tests) this matches all
         # rows for that wiki, preserving the previous behaviour.
-        conn = self._require_conn()
-        cur = conn.execute(
-            "SELECT task_id, op, status, created_at, started_at, finished_at, "
-            "params_digest, result, error FROM tasks "
-            "WHERE status IN (?, ?) AND instance_id = ?",
-            (
-                TaskStatus.PENDING.value,
-                TaskStatus.RUNNING.value,
-                self._instance_id,
-            ),
-        )
-        return [_row_to_task(r) for r in cur.fetchall()]
+        conn = self._open_conn()
+        try:
+            cur = conn.execute(
+                "SELECT task_id, op, status, created_at, started_at, finished_at, "
+                "params_digest, result, error FROM tasks "
+                "WHERE status IN (?, ?) AND instance_id = ?",
+                (
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                    self._instance_id,
+                ),
+            )
+            return [_row_to_task(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
 
     async def update_status(
         self,
@@ -220,16 +232,15 @@ class SqliteTaskStore:
         result: dict[str, Any] | None = None,
         error: dict[str, Any] | None = None,
     ) -> None:
-        async with self._lock:
-            await asyncio.to_thread(
-                self._update_status_sync,
-                task_id,
-                status,
-                started_at,
-                finished_at,
-                result,
-                error,
-            )
+        await asyncio.to_thread(
+            self._update_status_sync,
+            task_id,
+            status,
+            started_at,
+            finished_at,
+            result,
+            error,
+        )
 
     def _update_status_sync(
         self,
@@ -240,69 +251,75 @@ class SqliteTaskStore:
         result: dict[str, Any] | None,
         error: dict[str, Any] | None,
     ) -> None:
-        conn = self._require_conn()
-        sets = ["status = ?"]
-        params: list[Any] = [status.value]
-        if started_at is not None:
-            sets.append("started_at = ?")
-            params.append(started_at)
-        if finished_at is not None:
-            sets.append("finished_at = ?")
-            params.append(finished_at)
-        if result is not None:
-            sets.append("result = ?")
-            params.append(json.dumps(result))
-        if error is not None:
-            sets.append("error = ?")
-            params.append(json.dumps(error))
-        params.extend([task_id, self._instance_id])
-        cur = conn.execute(
-            f"UPDATE tasks SET {', '.join(sets)} "
-            "WHERE task_id = ? AND instance_id = ?",
-            params,
-        )
-        if cur.rowcount == 0:
-            raise TaskNotFound(task_id)
+        conn = self._open_conn()
+        try:
+            sets = ["status = ?"]
+            params: list[Any] = [status.value]
+            if started_at is not None:
+                sets.append("started_at = ?")
+                params.append(started_at)
+            if finished_at is not None:
+                sets.append("finished_at = ?")
+                params.append(finished_at)
+            if result is not None:
+                sets.append("result = ?")
+                params.append(json.dumps(result))
+            if error is not None:
+                sets.append("error = ?")
+                params.append(json.dumps(error))
+            params.extend([task_id, self._instance_id])
+            cur = conn.execute(
+                f"UPDATE tasks SET {', '.join(sets)} "
+                "WHERE task_id = ? AND instance_id = ?",
+                params,
+            )
+            if cur.rowcount == 0:
+                raise TaskNotFound(task_id)
+        finally:
+            conn.close()
 
     # ---- event tape -----------------------------------------------------
 
     async def append_event(
         self, task_id: str, event: dict[str, Any]
     ) -> int:
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._append_event_sync, task_id, event
-            )
+        return await asyncio.to_thread(self._append_event_sync, task_id, event)
 
     def _append_event_sync(
         self, task_id: str, event: dict[str, Any]
     ) -> int:
-        conn = self._require_conn()
+        conn = self._open_conn()
         # Atomic: read max(seq) + insert in a single transaction so two
         # concurrent appenders to the *same* task can't collide on seq.
-        # The asyncio.Lock above prevents in-process collision; this txn
-        # is the cross-process safety net (multi-worker uvicorn).
+        # ``BEGIN IMMEDIATE`` acquires the file-level write lock up
+        # front; ``busy_timeout`` (set in ``_open_conn``) makes parallel
+        # writers wait cleanly instead of spinning on SQLITE_BUSY. With
+        # per-call connections this is also the cross-coroutine + cross-
+        # process safety net rolled into one — no app-level lock needed.
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            cur = conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) FROM task_events WHERE task_id = ?",
-                (task_id,),
-            )
-            (max_seq,) = cur.fetchone()
-            seq = int(max_seq) + 1
-            ts = event.pop("ts", None) or _isoformat()
-            event["seq"] = seq
-            event["ts"] = ts
-            body = {k: v for k, v in event.items() if k not in ("seq", "ts")}
-            conn.execute(
-                "INSERT INTO task_events(task_id, seq, ts, body) VALUES (?, ?, ?, ?)",
-                (task_id, seq, ts, json.dumps(body)),
-            )
-            conn.execute("COMMIT")
-        except sqlite3.Error as e:
-            conn.execute("ROLLBACK")
-            raise TaskStoreError(f"append_event failed for {task_id}: {e}") from e
-        return seq
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) FROM task_events WHERE task_id = ?",
+                    (task_id,),
+                )
+                (max_seq,) = cur.fetchone()
+                seq = int(max_seq) + 1
+                ts = event.pop("ts", None) or _isoformat()
+                event["seq"] = seq
+                event["ts"] = ts
+                body = {k: v for k, v in event.items() if k not in ("seq", "ts")}
+                conn.execute(
+                    "INSERT INTO task_events(task_id, seq, ts, body) VALUES (?, ?, ?, ?)",
+                    (task_id, seq, ts, json.dumps(body)),
+                )
+                conn.execute("COMMIT")
+            except sqlite3.Error as e:
+                conn.execute("ROLLBACK")
+                raise TaskStoreError(f"append_event failed for {task_id}: {e}") from e
+            return seq
+        finally:
+            conn.close()
 
     async def list_events(
         self,
@@ -321,53 +338,73 @@ class SqliteTaskStore:
         # Same instance gate as the Postgres impl — keeps the cross-store
         # contract identical so a future shared-DB sqlite scenario doesn't
         # surprise the operator.
-        conn = self._require_conn()
-        sql = (
-            "SELECT seq, ts, body FROM task_events "
-            "WHERE task_id = ? AND seq >= ? "
-            "AND EXISTS (SELECT 1 FROM tasks "
-            "            WHERE task_id = ? AND instance_id = ?) "
-            "ORDER BY seq"
-        )
-        params: tuple[Any, ...] = (
-            task_id,
-            int(from_seq),
-            task_id,
-            self._instance_id,
-        )
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (*params, int(limit))
-        cur = conn.execute(sql, params)
-        out: list[dict[str, Any]] = []
-        for seq, ts, body in cur.fetchall():
-            event = json.loads(body)
-            event["seq"] = int(seq)
-            event["ts"] = ts
-            out.append(event)
-        return out
+        conn = self._open_conn()
+        try:
+            sql = (
+                "SELECT seq, ts, body FROM task_events "
+                "WHERE task_id = ? AND seq >= ? "
+                "AND EXISTS (SELECT 1 FROM tasks "
+                "            WHERE task_id = ? AND instance_id = ?) "
+                "ORDER BY seq"
+            )
+            params: tuple[Any, ...] = (
+                task_id,
+                int(from_seq),
+                task_id,
+                self._instance_id,
+            )
+            if limit is not None:
+                sql += " LIMIT ?"
+                params = (*params, int(limit))
+            cur = conn.execute(sql, params)
+            out: list[dict[str, Any]] = []
+            for seq, ts, body in cur.fetchall():
+                event = json.loads(body)
+                event["seq"] = int(seq)
+                event["ts"] = ts
+                out.append(event)
+            return out
+        finally:
+            conn.close()
 
     async def max_seq(self, task_id: str) -> int:
         return await asyncio.to_thread(self._max_seq_sync, task_id)
 
     def _max_seq_sync(self, task_id: str) -> int:
-        conn = self._require_conn()
-        cur = conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) FROM task_events "
-            "WHERE task_id = ? "
-            "AND EXISTS (SELECT 1 FROM tasks "
-            "            WHERE task_id = ? AND instance_id = ?)",
-            (task_id, task_id, self._instance_id),
-        )
-        row = cur.fetchone()
-        return int(row[0]) if row else 0
+        conn = self._open_conn()
+        try:
+            cur = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM task_events "
+                "WHERE task_id = ? "
+                "AND EXISTS (SELECT 1 FROM tasks "
+                "            WHERE task_id = ? AND instance_id = ?)",
+                (task_id, task_id, self._instance_id),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
 
     # ---- internals ------------------------------------------------------
 
-    def _require_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            raise TaskStoreError("SqliteTaskStore.init() must be called first")
-        return self._conn
+    def _open_conn(self) -> sqlite3.Connection:
+        # Fresh conn per call. ``isolation_level=None`` means autocommit;
+        # txns are managed explicitly via ``BEGIN IMMEDIATE`` / ``COMMIT``.
+        # ``check_same_thread`` defaults to True — that's fine, each conn
+        # is born and dies inside one ``to_thread`` worker.
+        # ``busy_timeout`` makes concurrent writers wait up to 30s on the
+        # file-level write lock instead of raising SQLITE_BUSY immediately.
+        # ``foreign_keys`` is per-connection (default OFF in sqlite) so
+        # we need to enable it every time to keep the FK cascade from
+        # ``task_events`` → ``tasks`` working.
+        conn = sqlite3.connect(
+            str(self._path),
+            isolation_level=None,
+            timeout=30.0,
+        )
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
 
 def _row_to_task(row: tuple[Any, ...]) -> TaskRow:

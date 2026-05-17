@@ -119,7 +119,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-ra -q --cov=src/dikw_core --cov-report=term --cov-report=xml"
+addopts = "-ra -q"
 markers = [
     "perf: wallclock-budget tests (skip with `-m 'not perf'` if CI is noisy)",
     "slow: tests that spawn real subprocesses or wait on network bind (skip with `-m 'not slow'` for the fast inner loop)",

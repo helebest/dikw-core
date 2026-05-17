@@ -40,17 +40,15 @@ jobs:
         run: uv run mypy src
 
       - name: Pytest (fast, excludes slow + perf)
-        run: uv run pytest -v -m "not slow and not perf"
+        run: uv run pytest -v -m "not slow and not perf" --cov=src/dikw_core --cov-report=xml
 
       - name: Upload coverage to Codecov
-        # Tokenless OIDC for public repos (Codecov v4+, GA Apr 2024).
-        # Only 3.12 uploads — 3.13's coverage is near-identical and a
-        # duplicate upload just doubles the PR-comment noise.
+        # Avoid duplicate upload; 3.13 coverage is identical.
         if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4
         with:
           files: coverage.xml
-          fail_ci_if_error: false   # report-only; coverage is data, not a gate
+          fail_ci_if_error: false
           flags: unit
 
   server-e2e:

@@ -12,6 +12,11 @@ concurrency:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
+    # Hard wall-clock cap. Normal runs are 5–8 min; a 6h sqlite-conn deadlock
+    # in PR #97's early commits burned a full Actions minute budget before
+    # someone noticed. 20 min is 2–3x the realistic ceiling so genuine slow
+    # tests still pass but any hang gets killed cheaply.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +47,7 @@ jobs:
   server-e2e:
     name: Server e2e (serve-and-run)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -68,6 +74,7 @@ jobs:
   postgres-contract:
     name: Postgres contract tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -84,6 +91,11 @@ jobs:
           --health-retries 10
     env:
       DIKW_TEST_POSTGRES_DSN: postgresql://dikw:dikw@localhost:5432/dikw
+      # Task store PG contract has its own env var so the wiki-DB DSN
+      # and the tasks-DB DSN can diverge in production (per Phase-0
+      # decision in store_postgres.py). For CI we point both at the
+      # same instance — different schemas, no cross-talk.
+      DIKW_TEST_POSTGRES_TASKS_DSN: postgresql://dikw:dikw@localhost:5432/dikw
     steps:
       - uses: actions/checkout@v4
 
@@ -109,5 +121,50 @@ jobs:
           echo "postgres failed to become ready" >&2
           exit 1
 
-      - name: Run storage contract tests against Postgres
-        run: uv run pytest -v tests/test_storage_contract.py
+      - name: Run storage + task-store contract tests against Postgres
+        # Two contract suites against one PG instance:
+        #   - test_storage_contract.py: D/I/K storage adapter
+        #   - test_task_store_contract.py: server async-task persistence
+        # Before this they shared the env var DIKW_TEST_POSTGRES_DSN but only
+        # the storage suite was wired up; task-store cases auto-skipped on
+        # missing DIKW_TEST_POSTGRES_TASKS_DSN, so the PG TaskStore adapter
+        # had zero CI coverage. This brings it into the gate.
+        run: |
+          uv run pytest -v \
+            tests/test_storage_contract.py \
+            tests/server/test_task_store_contract.py
+
+  wheel-smoke:
+    name: Wheel install smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Build wheel + sdist
+        run: uv build
+
+      - name: Install wheel in a fresh venv
+        # Mirrors what ``pip install dikw-core`` does for an end user. The
+        # uv-managed dev venv has the source tree bind-mounted, so anything
+        # missing from the wheel (force-include misconfig, datasets not
+        # packaged, schema.sql excluded, etc.) is invisible there.
+        # v0.0.2's first PyPI upload was rejected for duplicate wheel
+        # entries — this job would have caught it pre-tag.
+        run: |
+          python -m venv /tmp/dikw-test
+          /tmp/dikw-test/bin/pip install --upgrade pip
+          /tmp/dikw-test/bin/pip install dist/*.whl
+
+      - name: Smoke test installed CLI
+        run: |
+          /tmp/dikw-test/bin/dikw --help
+          /tmp/dikw-test/bin/dikw version

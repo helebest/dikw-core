@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Python deps: repo-level Dependabot security updates only
+  # (event-driven, no monthly noise).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+      include: scope

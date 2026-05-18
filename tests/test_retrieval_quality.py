@@ -1,7 +1,7 @@
 """MVP retrieval-quality gate.
 
 Thin wrapper over ``dikw_core.eval.runner`` — the same machinery behind
-``dikw eval --dataset mvp`` so the pytest gate and the CLI can never drift.
+``dikw client eval --dataset mvp`` so the pytest gate and the CLI can never drift.
 Data + thresholds live in ``evals/datasets/mvp/``; this file only asserts
 "pass at the configured thresholds".
 """

@@ -10,7 +10,7 @@ test only verifies the runner wires up correctly, every K-layer
 metric is present and in ``[0, 1]`` range, and the report's
 structural invariants hold (``n_pages > 0``, ``threshold_results``
 matches declared thresholds, etc.). Realistic thresholds get
-calibrated separately by ``dikw eval mvp --eval synth`` against the
+calibrated separately by ``dikw client eval mvp --eval synth`` against the
 real LLM in Step 8 dogfood.
 """
 

@@ -515,7 +515,7 @@ async def test_synth_rejects_source_with_changed_body_after_ingest(
     assert report.created == 2
 
     # Verify the stale source did NOT get a source_done marker → next
-    # synth will retry it (after the user re-runs `dikw ingest`).
+    # synth will retry it (after the user re-runs `dikw client ingest`).
     _cfg, _root, storage = await api._with_storage(wiki_with_fixtures)
     try:
         entries = await storage.list_wiki_log()

@@ -2,7 +2,7 @@
 
 The Codex protocol is hard-bound to ``https://chatgpt.com/backend-api/codex``;
 unlike ``openai_compat`` / ``anthropic_compat`` it does not have a sensible
-SDK default. The validator surfaces this at config-load time so ``dikw check``
+SDK default. The validator surfaces this at config-load time so ``dikw client check``
 fails before any LLM call is attempted, with a message that tells the user
 what to paste into ``dikw.yml``.
 """

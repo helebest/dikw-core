@@ -1,13 +1,13 @@
 """Top-level CLI tests for the local-only commands.
 
-After Phase 5 of the client/server migration the only commands that run
-in-process are ``version``, ``init``, and ``serve``; everything else is
-a thin wrapper around an HTTP call to a running ``dikw serve``.
+The only top-level commands that run in-process are ``version``,
+``init``, ``serve`` and the ``auth`` subgroup. Every HTTP-bound command
+lives under ``dikw client *`` — there are no top-level aliases.
 
-The remote command surface (``status``, ``query``, ``ingest`` …) is
-exercised end-to-end against an in-memory ASGI server in
+The remote command surface (``dikw client status``, ``dikw client
+ingest`` …) is exercised end-to-end against an in-memory ASGI server in
 ``tests/client/test_cli_e2e.py``. This file's job is to keep the
-local-only commands honest.
+local-only commands honest and to guard against splice regressions.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ import pytest
 from typer.testing import CliRunner
 
 from dikw_core.cli import app
+
+from .conftest import removed_top_level_short_names
 
 runner = CliRunner()
 
@@ -71,11 +73,32 @@ def test_serve_help_lists_options(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--port" in out
 
 
-def test_top_level_status_alias_present() -> None:
-    """Top-level ``dikw status`` should exist as an alias for
-    ``dikw client status`` — its presence in the command list is what
-    keeps muscle memory working post-migration."""
+def test_top_level_help_lists_only_local_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``dikw --help`` must list only the local-only commands plus the
+    ``client`` subgroup — never any of the HTTP-bound short names.
+
+    Forces a wide terminal so rich/typer doesn't visually wrap command
+    names across lines (a narrow shell would split ``serve-and-run``
+    and a naïve substring search would miss it)."""
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("TERM", "dumb")
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "status" in result.stdout
-    assert "client" in result.stdout
+    out = result.stdout
+    for expected in ("version", "init", "serve", "auth", "client"):
+        assert expected in out, f"missing local command {expected!r} in --help"
+    # First whitespace-delimited token on each help row is a command name
+    # (or a section header / option flag — both safe). Forbidden names
+    # appearing as a row's leading token mean the splice resurrected.
+    cmd_starts = {
+        stripped.split(" ", 1)[0]
+        for line in out.splitlines()
+        if (stripped := line.strip())
+    }
+    for forbidden in removed_top_level_short_names():
+        assert forbidden not in cmd_starts, (
+            f"HTTP-bound short name {forbidden!r} leaked into top-level "
+            f"--help; got command-row tokens: {sorted(cmd_starts)}"
+        )

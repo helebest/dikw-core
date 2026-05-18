@@ -1,5 +1,5 @@
 """``follow_to_terminal`` — the client-side long-poll loop that drives
-every ``--wait`` flag on op commands and the ``dikw tasks wait`` UX.
+every ``--wait`` flag on op commands and the ``dikw client tasks wait`` UX.
 
 Contract under test:
 

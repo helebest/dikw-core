@@ -23,7 +23,7 @@ Everything else is plumbing.
 
 The W layer is the differentiator. Every item must cite **≥ 2 pieces of
 evidence** drawn from the K or D layers, and every state change passes
-through the review flow (`dikw review approve|reject`). Approved items
+through the review flow (`dikw client review approve|reject`). Approved items
 are exposed to agents (via `GET /v1/wisdom/applicable?q=...`, PR-5)
 so the agent can inject them into its own LLM prompt; dikw-core itself
 no longer performs answer synthesis.
@@ -89,8 +89,8 @@ src/dikw_core/
 ├── logging.py             init_logging() — DIKW_LOG_LEVEL + httpx/httpcore/urllib3 clamp
 ├── md_inspect.py          standalone markdown preflight (frontmatter + image-ref extraction)
 └── cli.py                 top-level Typer app: version, init, serve, auth subgroup, dikw client subgroup
-                           (client commands are also spliced as top-level aliases — `dikw status`,
-                           `dikw retrieve`, `dikw serve-and-run`, …)
+                           (HTTP-bound commands live exclusively under `dikw client <verb>` — there
+                           are no top-level short aliases)
 ```
 
 ## Seams on purpose
@@ -226,7 +226,7 @@ stages, all deterministic:
    whose index entry holds two or more distinct paths (e.g., `Tesla`
    the company and `tesla` the SI unit both normalize to `tesla`),
    we **refuse to guess** and return the link as `UnresolvedLink`.
-   `dikw lint` then surfaces the ambiguity to the user. Wrong-merge
+   `dikw client lint` then surfaces the ambiguity to the user. Wrong-merge
    is irreversible; missed-resolve is a fixable lint warning — so
    we tolerate the latter to avoid the former.
 

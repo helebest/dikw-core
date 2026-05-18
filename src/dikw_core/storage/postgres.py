@@ -70,7 +70,7 @@ _REBUILD_HINT = (
     "dikw-core is pre-alpha — the on-disk format is allowed to change, "
     "and there is no in-place upgrade path. Drop the configured Postgres "
     "schema (e.g. ``DROP SCHEMA <schema> CASCADE``) and re-run "
-    "``dikw ingest`` to rebuild."
+    "``dikw client ingest`` to rebuild."
 )
 
 

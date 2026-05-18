@@ -16,7 +16,7 @@ RUN apt-get update \
 RUN pip install --no-cache-dir --upgrade "pip>=26.1"
 
 # Bump in lockstep with each release tag.
-ARG DIKW_VERSION=0.0.2
+ARG DIKW_VERSION=0.1.0
 RUN pip install --no-cache-dir "dikw-core[postgres]==${DIKW_VERSION}"
 
 RUN useradd --create-home --uid 1000 dikw

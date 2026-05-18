@@ -45,11 +45,11 @@ def test_tasks_status_returns_row_json(
 ) -> None:
     monkeypatch.setattr("dikw_core.api.build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    submit = _run(["ingest", "--no-embed"])
+    submit = _run(["client", "ingest", "--no-embed"])
     assert submit.exit_code == 0, submit.stdout
     task_id = json.loads(submit.stdout)["task_id"]
 
-    result = _run(["tasks", "status", task_id])
+    result = _run(["client", "tasks", "status", task_id])
     assert result.exit_code == 0, result.stdout
     row = json.loads(result.stdout)
     assert row["task_id"] == task_id
@@ -72,7 +72,7 @@ def test_tasks_show_removed(
     command" so scripts blindly using the old name fail loudly instead
     of silently dropping."""
     patch_transport_factory()
-    r = _run(["tasks", "show", "anything"])
+    r = _run(["client", "tasks", "show", "anything"])
     assert r.exit_code != 0
 
 
@@ -90,13 +90,13 @@ def test_tasks_events_single_page_json(
     without committing to the blocking ``tasks wait`` shape."""
     monkeypatch.setattr("dikw_core.api.build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    submit = _run(["ingest", "--no-embed"])
+    submit = _run(["client", "ingest", "--no-embed"])
     task_id = json.loads(submit.stdout)["task_id"]
     # Make sure the task has had time to land at least task_started.
-    _run(["tasks", "wait", task_id])
+    _run(["client", "tasks", "wait", task_id])
 
     result = _run(
-        ["tasks", "events", task_id, "--from-seq", "0", "--limit", "5", "--wait", "0"]
+        ["client", "tasks", "events", task_id, "--from-seq", "0", "--limit", "5", "--wait", "0"]
     )
     assert result.exit_code == 0, result.stdout
     page = json.loads(result.stdout)
@@ -125,10 +125,10 @@ def test_tasks_wait_exits_with_terminal_status(
     server-side runner."""
     monkeypatch.setattr("dikw_core.api.build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    submit = _run(["ingest", "--no-embed"])
+    submit = _run(["client", "ingest", "--no-embed"])
     task_id = json.loads(submit.stdout)["task_id"]
 
-    result = _run(["tasks", "wait", task_id, "--plain"])
+    result = _run(["client", "tasks", "wait", task_id, "--plain"])
     # 0 (succeeded) or 130 (cancelled by CliRunner loop teardown).
     # The wiring is what matters: the command resolves to a terminal
     # status and returns a stable exit code from the mapping table.
@@ -143,5 +143,5 @@ def test_tasks_follow_removed(
     when a TTY); Typer must reject the old name so scripts blindly
     using it fail loudly."""
     patch_transport_factory()
-    r = _run(["tasks", "follow", "anything"])
+    r = _run(["client", "tasks", "follow", "anything"])
     assert r.exit_code != 0

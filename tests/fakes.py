@@ -1,7 +1,7 @@
 """Test doubles for LLM + embedding providers.
 
 ``FakeEmbeddings`` lives in ``src/dikw_core/eval/fake_embedder.py`` so it
-ships with the wheel for ``dikw eval``. This module re-exports it for
+ships with the wheel for ``dikw client eval``. This module re-exports it for
 backward compatibility with existing ``from tests.fakes import FakeEmbeddings``
 imports; new code should reach into ``dikw_core.eval.fake_embedder``.
 """

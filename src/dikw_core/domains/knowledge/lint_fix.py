@@ -488,7 +488,7 @@ async def run_lint_apply(
     PR1 scope: write/unlink files + reconcile outgoing wikilinks for
     updated/created pages + ``deactivate_document`` for deletes. We
     intentionally do not re-chunk / re-embed — that's a follow-up
-    ``dikw ingest``'s job (it'll see ``doc.hash`` mismatch and
+    ``dikw client ingest``'s job (it'll see ``doc.hash`` mismatch and
     re-index). Keeping apply provider-free means a heuristic-only
     proposal can land without an embedder configured.
 
@@ -854,7 +854,7 @@ async def _apply_one_op(
     if op.kind == "delete_page":
         # Soft-delete: storage purge first, then move the file to
         # ``<base>/trash/wiki/<rel>``. If the trash move fails after the
-        # storage row is gone, the next ``dikw ingest`` re-creates the
+        # storage row is gone, the next ``dikw client ingest`` re-creates the
         # doc row from the file still sitting at the original path
         # (ingest is idempotent on hash). The reverse order would leave
         # an orphaned doc row pointing at a missing file — irrecoverable
@@ -966,7 +966,7 @@ def _move_to_trash(
         # Roll back the trash copy so we never leave the same page in
         # BOTH wiki/ and trash/. After rollback the page stays in wiki/
         # and storage already purged the doc row — the next
-        # ``dikw ingest`` re-creates the row from the file (ingest is
+        # ``dikw client ingest`` re-creates the row from the file (ingest is
         # idempotent on hash), so the user recovers without manual SQL.
         with contextlib.suppress(OSError):
             dest.unlink()

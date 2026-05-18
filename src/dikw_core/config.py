@@ -50,7 +50,7 @@ class ProviderConfig(BaseModel):
     # Gitee AI caps at ~25. Keep the default safe for OpenAI and drop it
     # via config when hitting a stricter backend.
     embedding_batch_size: int = 64
-    # Optional free-form display label surfaced in ``dikw check`` output
+    # Optional free-form display label surfaced in ``dikw client check`` output
     # (e.g., "gitee-ai", "openai", "azure-east"). Describes which vendor
     # the embedding endpoint points at; purely for human diagnostics.
     embedding_provider_label: str | None = None
@@ -89,7 +89,7 @@ class ProviderConfig(BaseModel):
         # endpoint — Codex models live on chatgpt.com/backend-api/codex
         # exclusively. Surface a missing or blank ``llm_base_url`` at
         # config-load time rather than at first ``complete()`` call so
-        # ``dikw check`` fails fast and the error message tells the user
+        # ``dikw client check`` fails fast and the error message tells the user
         # what to paste. ``None`` and empty/whitespace strings are both
         # rejected — yaml ``llm_base_url: ""`` would otherwise reach the
         # SDK as a malformed URL and surface as a low-level connection
@@ -120,7 +120,7 @@ class RetrievalConfig(BaseModel):
     terminology) should raise ``bm25_weight`` back toward 1.0 — the
     SciFact tuning over-favours dense semantics and will under-rank
     exact-term matches. Tune per-corpus with
-    ``dikw eval --retrieval all --dump-raw`` +
+    ``dikw client eval --retrieval all --dump-raw`` +
     ``evals/tools/sweep_rrf.py``. See ``evals/BASELINES.md`` for the
     full sweep table.
     """
@@ -148,7 +148,7 @@ class RetrievalConfig(BaseModel):
     # AND drives the chunker's token budget so long Chinese paragraphs
     # split. Required for Chinese corpora; ``unicode61`` otherwise splits
     # per-character and collapses BM25 to single-char IDF. ``jieba`` is
-    # the default so ``dikw ingest`` does the right thing on Chinese
+    # the default so ``dikw client ingest`` does the right thing on Chinese
     # input without configuration; install via ``uv sync --extra cjk``
     # (or rely on the char-based fallback in ``count_tokens`` when the
     # extra is absent). **Locked at first ingest** — same shape as
@@ -217,7 +217,7 @@ class SourceConfig(BaseModel):
 
 
 class SynthConfig(BaseModel):
-    """Knobs for the K-layer ``dikw synth`` pipeline.
+    """Knobs for the K-layer ``dikw client synth`` pipeline.
 
     Synth consumes the D-layer chunks already produced by ``ingest`` —
     ``target_tokens_per_group`` controls how many adjacent chunks the engine

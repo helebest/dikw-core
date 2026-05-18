@@ -169,6 +169,11 @@ def build_server_command(opts: ServeAndRunOptions) -> list[str]:
 
 
 def build_inner_command(inner_cmd: list[str]) -> list[str]:
+    # Inner argv targets the spawned server, so it's always a ``dikw
+    # client …`` invocation — auto-prefix bare verbs, pass through if
+    # already explicit.
+    if inner_cmd and inner_cmd[0] != "client":
+        inner_cmd = ["client", *inner_cmd]
     return [*_PYTHON_M_DIKW, *inner_cmd]
 
 
@@ -206,7 +211,7 @@ def build_inner_env(
     if token is not None:
         env[ENV_SERVER_TOKEN] = token
     if not keep_alive:
-        # Signal to async-default op commands ("dikw ingest" etc.) that
+        # Signal to async-default op commands ("dikw client ingest" etc.) that
         # the temporary server dies the moment they exit, so they must
         # auto-wait instead of fire-and-forget. ``--keep-alive`` mode
         # leaves the server up and the agent contract holds — the user
@@ -215,7 +220,7 @@ def build_inner_env(
     return env
 
 
-# When ``dikw serve-and-run`` spawns an inner CLI without ``--keep-alive``,
+# When ``dikw client serve-and-run`` spawns an inner CLI without ``--keep-alive``,
 # this env var is set in the inner process so op commands know to
 # auto-wait — otherwise async-default would print a handle, exit 0, and
 # the temporary server would be torn down with the task still running.

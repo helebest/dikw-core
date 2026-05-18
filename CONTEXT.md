@@ -28,7 +28,7 @@ _Avoid_: source (which is the file on disk before it has been indexed)
 
 **import**:
 Take files **outside** the base and commit them into `<base>/sources/`. Markdown inputs (`.md`) pass through after frontmatter + asset validation. Non-markdown single-file inputs (`.pdf`, `.epub`, …) are first converted to md+assets by an installed **client-side converter plugin** (see [`docs/converters.md`](docs/converters.md)); without a plugin for the file's extension the input is rejected. Conversion happens in the client process — the server never loads converter dependencies. Validates frontmatter + assets, packs as multipart, server stages then atomically replaces into place. Does **not** chunk, embed, or touch the D/I layer.
-_CLI_: `dikw client import <path>` (top-level: `dikw import`); `--converter=<name>` overrides the default engine for non-md inputs.
+_CLI_: `dikw client import <path>`; `--converter=<name>` overrides the default engine for non-md inputs.
 _HTTP_: `POST /v1/import`
 _Avoid_: upload (transport-layer term — only correct when describing the HTTP wire), add, push
 

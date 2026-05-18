@@ -2,15 +2,15 @@
 
 Top-level commands fall into two groups:
 
-* **Local** — ``version``, ``init``, ``serve``. These run entirely in
-  this process; no server connection required. ``init`` scaffolds a
-  fresh wiki on disk so you can run it before any server exists;
-  ``serve`` starts the HTTP server itself.
+* **Local** — ``version``, ``init``, ``serve``, and the ``auth``
+  subgroup. These run entirely in this process; no server connection
+  required. ``init`` scaffolds a fresh base on disk so you can run it
+  before any server exists; ``serve`` starts the HTTP server itself;
+  ``auth`` manages the local OAuth token store.
 * **Remote** (``dikw client *``) — every other operation talks to a
-  running ``dikw serve`` instance over HTTP + NDJSON. The full surface
-  lives under the ``client`` subcommand group, and the most common
-  commands are also exposed as top-level aliases so existing muscle
-  memory (``dikw status``, ``dikw retrieve "…"``) keeps working.
+  running ``dikw serve`` instance over HTTP + NDJSON. There are no
+  top-level aliases: agent-friendly callers should always spell out
+  ``dikw client <verb>`` so the local/HTTP boundary is unambiguous.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ def init_cmd(
     console.print(
         "Next: add markdown under [cyan]sources/[/cyan], "
         "run [cyan]dikw serve --base .[/cyan] in another terminal, "
-        "then [cyan]dikw status[/cyan]."
+        "then [cyan]dikw client status[/cyan]."
     )
 
 
@@ -177,24 +177,7 @@ app.add_typer(auth_app, name="auth")
 # ---- mount remote CLI commands -----------------------------------------
 
 
-# Full ``dikw client *`` surface.
 app.add_typer(client_app, name="client")
-
-# Top-level aliases for muscle memory: ``dikw status`` ≡ ``dikw client status``.
-# We splice the client app's already-registered commands and subgroups onto
-# the parent so the same callable surfaces under both prefixes without
-# duplicating definitions. Names that already exist at the top level
-# (``init``, currently — the local scaffold should always win because it
-# runs before any server exists) are skipped here so Typer doesn't end up
-# with two same-name entries.
-_existing_command_names = {c.name for c in app.registered_commands}
-_existing_group_names = {g.name for g in app.registered_groups}
-for cmd in client_app.registered_commands:
-    if cmd.name not in _existing_command_names:
-        app.registered_commands.append(cmd)
-for group in client_app.registered_groups:
-    if group.name not in _existing_group_names:
-        app.registered_groups.append(group)
 
 
 def main() -> None:  # pragma: no cover - entry point shim

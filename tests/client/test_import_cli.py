@@ -118,21 +118,6 @@ def test_import_cross_directory_asset(
     assert (rt.root / "sources" / "shared" / "logo.png").exists()
 
 
-def test_top_level_alias_dikw_import(
-    asgi_client: tuple[Any, ServerRuntime],
-    patch_transport_factory: Callable[[], None],
-    tmp_path: Path,
-) -> None:
-    """``dikw import`` (no ``client`` prefix) must resolve via the splice
-    in ``cli.py`` — same machinery as ``dikw status``, ``dikw query``."""
-    patch_transport_factory()
-    note = tmp_path / "alpha.md"
-    note.write_text("# A\nbody\n", encoding="utf-8")
-
-    result = _run(["import", str(note)])
-    assert result.exit_code == 0, result.stdout
-
-
 # ---- pre-flight rejection (exit 2) -------------------------------------
 
 

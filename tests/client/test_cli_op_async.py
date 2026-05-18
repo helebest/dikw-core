@@ -52,7 +52,7 @@ def test_ingest_default_async_prints_task_handle_exit_zero(
     it."""
     monkeypatch.setattr("dikw_core.api.build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    result = _run(["ingest", "--no-embed"])
+    result = _run(["client", "ingest", "--no-embed"])
     assert result.exit_code == 0, result.stdout
     handle = json.loads(result.stdout)
     assert isinstance(handle.get("task_id"), str) and handle["task_id"]
@@ -72,7 +72,7 @@ def test_synth_default_async_prints_task_handle(
     monkeypatch.setattr(synth_op, "build_llm", lambda _cfg, **_kw: FakeLLM())
     monkeypatch.setattr(synth_op, "build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    result = _run(["synth"])
+    result = _run(["client", "synth"])
     assert result.exit_code == 0, result.stdout
     handle = json.loads(result.stdout)
     assert handle.get("task_id")
@@ -87,7 +87,7 @@ def test_distill_default_async_prints_task_handle(
     monkeypatch.setattr(synth_op, "build_llm", lambda _cfg, **_kw: FakeLLM())
     monkeypatch.setattr(synth_op, "build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    result = _run(["distill"])
+    result = _run(["client", "distill"])
     assert result.exit_code == 0, result.stdout
     handle = json.loads(result.stdout)
     assert handle.get("task_id")
@@ -98,7 +98,7 @@ def test_lint_propose_default_async_prints_task_handle(
     patch_transport_factory: Callable[[], None],
 ) -> None:
     patch_transport_factory()
-    result = _run(["lint", "propose", "--rule", "broken_wikilink"])
+    result = _run(["client", "lint", "propose", "--rule", "broken_wikilink"])
     assert result.exit_code == 0, result.stdout
     handle = json.loads(result.stdout)
     assert handle.get("task_id")
@@ -116,7 +116,7 @@ def test_ingest_wait_renders_report_exits_zero(
     ``IngestReport`` table, and maps ``succeeded`` to exit 0."""
     monkeypatch.setattr("dikw_core.api.build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    result = _run(["ingest", "--no-embed", "--wait", "--plain"])
+    result = _run(["client", "ingest", "--no-embed", "--wait", "--plain"])
     assert result.exit_code == 0, result.stdout
     # Report table renders the standard metric labels.
     assert "scanned" in result.stdout.lower()
@@ -130,6 +130,6 @@ def test_distill_wait_renders_report(
     monkeypatch.setattr(synth_op, "build_llm", lambda _cfg, **_kw: FakeLLM())
     monkeypatch.setattr(synth_op, "build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    result = _run(["distill", "--wait", "--plain"])
+    result = _run(["client", "distill", "--wait", "--plain"])
     assert result.exit_code == 0, result.stdout
     assert "K pages read" in result.stdout

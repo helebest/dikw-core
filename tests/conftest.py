@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 import pytest
 
+from dikw_core.client.cli_app import app as _client_app
 from dikw_core.client.config import ClientConfig
 from dikw_core.client.transport import Transport
 from dikw_core.providers.codex_auth import dikw_auth_path
@@ -38,6 +39,18 @@ from .fakes import init_test_wiki
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+def removed_top_level_short_names() -> list[str]:
+    """Every name that used to be spliced from ``dikw client *`` to the
+    top level pre-0.1.0. Derived from the live ``client_app`` registry so
+    a future HTTP command added under ``dikw client`` is auto-covered by
+    both the help-text guard (``tests/test_cli.py``) and the runtime
+    smoke (``tests/client/test_cli_e2e.py``)."""
+    return sorted(
+        [c.name for c in _client_app.registered_commands if c.name]
+        + [g.name for g in _client_app.registered_groups if g.name]
+    )
 
 
 @pytest.fixture(

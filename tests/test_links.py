@@ -57,7 +57,7 @@ def test_resolve_links_flags_unresolved_wikilinks() -> None:
 # trailing the title, etc. PR1 adds a deterministic L1 (NFKC + casefold +
 # punctuation strip) + L2 (trailing s/es/ies stem) normalize that fires
 # *after* exact + case-insensitive miss. Collision-on-normalize must NOT
-# resolve — falling back to broken_wikilink keeps `dikw lint` honest.
+# resolve — falling back to broken_wikilink keeps `dikw client lint` honest.
 
 
 def test_resolve_fuzzy_plural_variant() -> None:
@@ -88,7 +88,7 @@ def test_resolve_fuzzy_punctuation_strip() -> None:
 
 def test_resolve_fuzzy_collision_returns_unresolved() -> None:
     # "Tesla" the company and "tesla" the SI magnetic flux unit normalize to
-    # the same key. We refuse to guess — leave broken so `dikw lint` reports.
+    # the same key. We refuse to guess — leave broken so `dikw client lint` reports.
     body = "Note about [[TESLA]] in the Maxwell paper."
     links = parse_links(body)
     resolved, unresolved = resolve_links(

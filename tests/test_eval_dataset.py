@@ -49,7 +49,7 @@ def _write_valid_dataset(root: Path, *, name: str = "toy") -> Path:
 
 def test_iter_packaged_datasets_returns_known_names() -> None:
     """The packaged datasets directory ships at least one dataset; the
-    enumerator powers ``dikw eval`` (no-arg) on the server."""
+    enumerator powers ``dikw client eval`` (no-arg) on the server."""
     names = iter_packaged_datasets()
     # Known packaged datasets at the time of writing (kept loose so a
     # future addition doesn't break the assertion).

@@ -161,7 +161,7 @@ def test_provider_config_round_trips_embedding_dim() -> None:
 
 
 def test_provider_config_round_trips_embedding_provider_label() -> None:
-    """Display label for ``dikw check`` travels with the wiki, not env.
+    """Display label for ``dikw client check`` travels with the wiki, not env.
 
     Before this refactor the label was read from ``DIKW_EMBEDDING_PROVIDER``
     at probe time. That meant "what embedding vendor am I pointed at?" was

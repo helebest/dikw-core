@@ -6,7 +6,7 @@ Single source of truth for wiki-page indexing. Two callers today:
   ``text_version_id`` so chunk embeddings land in the per-version
   ``vec_chunks_v<id>`` table.
 * ``run_lint_apply`` (lint-fix path) — passes ``embedder=None`` to keep
-  apply provider-free; the next ``dikw ingest`` reconciles embeddings
+  apply provider-free; the next ``dikw client ingest`` reconciles embeddings
   via ``doc.hash`` drift.
 
 The caller MUST have written ``page`` to disk before calling — we
@@ -68,7 +68,7 @@ async def persist_wiki_page(
 
     When ``embedder`` is ``None`` (lint-apply) we skip the embedding
     stream entirely — apply stays provider-free and embeddings
-    reconcile on the next ``dikw ingest`` via ``doc.hash`` drift.
+    reconcile on the next ``dikw client ingest`` via ``doc.hash`` drift.
 
     Returns ``(unresolved_count, resolved_title)`` so callers can fold
     the unresolved count into reports and update an incremental

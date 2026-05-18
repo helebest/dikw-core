@@ -154,7 +154,7 @@ async def test_persist_wiki_page_returns_unresolved_wikilink_count(
     so the synth caller can fold it into ``SynthReport.unresolved_wikilinks``.
 
     Without this signal, broken wikilinks are only visible after a
-    separate ``dikw lint`` pass; surfacing the count at synth time gives
+    separate ``dikw client lint`` pass; surfacing the count at synth time gives
     users an immediate "did the LLM emit references that don't land
     anywhere?" health check.
     """

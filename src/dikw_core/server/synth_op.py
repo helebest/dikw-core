@@ -120,7 +120,7 @@ def make_eval_runner(
     the live engine uses. ``dataset`` may be a registered name (resolved
     under the packaged datasets root), an explicit path, or ``None`` to
     run every packaged dataset back-to-back — preserving the
-    ``dikw eval`` (no-arg) workflow that the in-process CLI shipped with.
+    ``dikw client eval`` (no-arg) workflow that the in-process CLI shipped with.
 
     ``eval_modes`` (optional) restricts which families run per dataset.
     ``None`` keeps the legacy contract — retrieval-only, even on
@@ -147,7 +147,7 @@ def make_eval_runner(
         cfg = load_config(wiki_root / CONFIG_FILENAME)
 
         if dataset is None:
-            # No-arg ``dikw eval`` ran every packaged dataset; preserve
+            # No-arg ``dikw client eval`` ran every packaged dataset; preserve
             # that by enumerating them here. ``iter_packaged_datasets``
             # yields names suitable for ``load_dataset``.
             specs = []

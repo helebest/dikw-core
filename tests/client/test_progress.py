@@ -188,7 +188,7 @@ def test_render_health_report_renders_all_blocks() -> None:
     )
     out = console.export_text()
     # Every block should land at least its title in the captured output.
-    assert "dikw health" in out
+    assert "dikw client health" in out
     assert "layer counts" in out
     assert "providers" in out
     assert "multimodal embedding" in out

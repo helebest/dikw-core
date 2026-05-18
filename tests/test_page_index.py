@@ -69,7 +69,7 @@ async def test_persist_wiki_page_skips_embedding_when_embedder_none(
     parametrized_storage: Storage, tmp_path: Path,
 ) -> None:
     """Lint-apply caller passes embedder=None to keep apply provider-free.
-    Document + chunks must still land; the next ``dikw ingest`` will
+    Document + chunks must still land; the next ``dikw client ingest`` will
     reconcile embeddings via ``doc.hash`` drift."""
     storage = parametrized_storage
     page = build_page(title="X", body="body\n", type_="concept")

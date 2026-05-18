@@ -1,14 +1,14 @@
 """Deterministic bag-of-words embedder for hermetic eval.
 
 Ships inside the package (unlike the test-only ``tests/fakes.py``) so
-``dikw eval`` can run without API keys or network access. The algorithm is
+``dikw client eval`` can run without API keys or network access. The algorithm is
 trivial on purpose: tokenise, hash each word to a fixed-size bucket, L2
 normalise the count vector. Semantically similar inputs (overlapping
 bag-of-words) cluster together, which is enough to exercise the retrieval
 pipeline deterministically at <1ms per doc.
 
 **Not** a replacement for a real embedder — quality is far below any
-production model. Use ``--embedder provider`` on ``dikw eval`` to switch
+production model. Use ``--embedder provider`` on ``dikw client eval`` to switch
 to the wiki's configured provider for real-vector evaluation.
 """
 

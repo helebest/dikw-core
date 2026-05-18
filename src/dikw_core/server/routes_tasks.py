@@ -163,8 +163,8 @@ class EvalSubmit(BaseModel):
 
     ``dataset`` accepts a registered dataset name (resolved under the
     packaged datasets root) or a directory path — same surface as
-    ``dikw eval``. Omit it to run every packaged dataset back-to-back
-    (preserves the in-process ``dikw eval`` no-arg workflow).
+    ``dikw client eval``. Omit it to run every packaged dataset back-to-back
+    (preserves the in-process ``dikw client eval`` no-arg workflow).
     ``mode`` and ``cache_mode`` mirror ``run_eval`` knobs.
 
     ``eval_modes`` selects which eval families to run for each dataset:

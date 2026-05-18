@@ -20,7 +20,7 @@ For one-shot commands without keeping a server running, use
 `serve-and-run`:
 
 ```bash
-uv run dikw serve-and-run --base ./my-base -- ingest --no-embed
+uv run dikw client serve-and-run --base ./my-base -- ingest --no-embed
 ```
 
 ## Wire shape
@@ -255,18 +255,3 @@ Error codes:
 Schema-level failures return 4xx; per-package failures return 200 with
 the failing packages listed in `rejected` so the client can retry just
 those.
-
-## Disabling lifecycle endpoints
-
-For production bases whose tree should never be re-scaffolded by a
-client:
-
-```bash
-export DIKW_SERVER_DISABLE_INIT=1
-uv run dikw serve --base /var/lib/dikw/prod
-```
-
-`POST /v1/init` then returns `409 Conflict {"code":"init_disabled"}`
-regardless of whether the base tree exists. The CLI's `dikw client init`
-falls through cleanly; the local-only `dikw init` (which writes files
-directly) is unaffected.

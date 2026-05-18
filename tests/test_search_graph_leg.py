@@ -267,7 +267,7 @@ async def test_layer_filter_propagates_to_graph_leg(parametrized_storage) -> Non
 @pytest.mark.asyncio
 async def test_graph_leg_skipped_in_bm25_mode(linked_wiki) -> None:
     """Single-leg modes (``bm25`` / ``vector``) are diagnostic
-    ablations used by ``dikw eval --retrieval all`` to compare against
+    ablations used by ``dikw client eval --retrieval all`` to compare against
     published baselines. The graph leg must NOT activate in those
     modes — even with ``graph_enabled=True`` — or the bm25 / vector
     numbers stop being pure-leg measurements. ``vector`` mode shares

@@ -24,7 +24,7 @@ Choose exactly one `type` for each page from `{allowed_types}`:
 
 1. Preserve facts faithfully. Do not invent claims absent from the source.
 2. Be concise. A good K-page is a few paragraphs with sharp headings, not a copy of the source.
-3. Link to any entity, concept, or other wiki page referenced — use `[[Wikilink Title]]`. If the target page does not yet exist, still write the wikilink; it will be flagged by `dikw lint`.
+3. Link to any entity, concept, or other wiki page referenced — use `[[Wikilink Title]]`. If the target page does not yet exist, still write the wikilink; it will be flagged by `dikw client lint`.
 4. Pick 2–5 short tags per page.
 
 ## Output language

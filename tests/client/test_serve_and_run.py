@@ -180,6 +180,28 @@ def test_terminate_is_a_noop_for_already_exited_process() -> None:
     sar.terminate(proc)
 
 
+def test_build_inner_command_prefixes_bare_verb_with_client() -> None:
+    """Inner argv against the spawned server is always a ``dikw client``
+    invocation by definition, so a bare verb must be auto-prefixed.
+    Otherwise the README quickstart ``dikw client serve-and-run --
+    ingest --no-embed`` would spawn ``python -m dikw_core.cli ingest``
+    and crash with ``No such command`` (top-level short names are gone
+    in 0.1.0)."""
+    argv = sar.build_inner_command(["ingest", "--no-embed"])
+    # Tail must be the rewritten inner argv, head is the python-m shim.
+    assert argv[-3:] == ["client", "ingest", "--no-embed"]
+    assert argv[:3] == [sys.executable, "-m", "dikw_core.cli"]
+
+
+def test_build_inner_command_preserves_explicit_client_prefix() -> None:
+    """If the caller already spelled out ``client``, don't double-prefix.
+    Power users (and our slow integration tests) pass the explicit form."""
+    argv = sar.build_inner_command(["client", "info"])
+    assert argv[-2:] == ["client", "info"]
+    # Sanity: no double prefix, exactly one ``client`` token in the inner argv.
+    assert argv.count("client") == 1
+
+
 def test_run_refuses_empty_inner_cmd(tmp_path: Path) -> None:
     """No inner command is a usage error, not an implicit no-op."""
     init_test_wiki(tmp_path / "wiki", description="empty inner cmd")

@@ -78,7 +78,7 @@ def empty_wiki(tmp_path: Path) -> Path:
 async def test_orphan_page_suppressed_by_frontmatter(empty_wiki: Path) -> None:
     """A page with ``lint: {skip: [orphan_page]}`` must not appear in
     the orphan_page issue list. The acknowledged_leaves bucket records
-    the path so it stays visible in audit / `dikw lint --format json`."""
+    the path so it stays visible in audit / `dikw client lint --format json`."""
     path = await _seed_page(
         wiki_root=empty_wiki,
         title="Intentional Leaf",

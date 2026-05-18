@@ -23,7 +23,7 @@ Design notes:
 * ``total_timeout`` is a *client-side* budget; expiry raises
   :class:`TimeoutError` and the CLI maps it to exit 124. The task
   itself is *not* auto-cancelled — agents that wanted that chain a
-  ``dikw tasks cancel`` themselves.
+  ``dikw client tasks cancel`` themselves.
 """
 
 from __future__ import annotations

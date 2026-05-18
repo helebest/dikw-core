@@ -10,7 +10,7 @@ revisited when the triggers at the bottom fire.
 
 ## What we measure today
 
-Eval is a first-class CLI subcommand — `dikw eval` — driven by the
+Eval is a first-class CLI subcommand — `dikw client eval` — driven by the
 runner at `src/dikw_core/eval/runner.py`. It ingests a dataset's corpus
 into a temp wiki with deterministic `FakeEmbeddings`, runs the queries
 through `HybridSearcher`, and compares aggregate `hit@3`, `hit@10`, and
@@ -28,7 +28,7 @@ same runner, so the CLI and the gate can never drift.
   storage-adapter regressions.
 - **What's not.** Generation is not measured. The two engine-internal LLM
   legs (K-layer synth, W-layer distill) get partial coverage via
-  `dikw eval --eval synth` (added 2026-05-12; seven quantified metrics —
+  `dikw client eval --eval synth` (added 2026-05-12; seven quantified metrics —
   `fact_grounding_ratio`, `atomicity_score`, `duplicate_ratio_max`,
   `wikilink_resolved_ratio`, `expected_coverage`, `language_fidelity`,
   `page_density`). Agent-side answer synthesis (which lives outside
@@ -103,7 +103,7 @@ or non-destructiveness. Two gates:
    broken down by issue kind, and (for atomicity tweaks) a 5+5 sample
    judgement of TP/FP rates.
 
-   **Also run** `dikw eval mvp --eval synth --pretty` (and
+   **Also run** `dikw client eval mvp --eval synth --pretty` (and
    `--judge --judge-sample 5` once an LLM budget allows the soft layer)
    to capture the seven quantified K-layer metrics — `fact_grounding_ratio`,
    `atomicity_score`, `duplicate_ratio_max`, `wikilink_resolved_ratio`,
@@ -145,7 +145,7 @@ judge harness.
 
 Phase A also covers comparing dikw's retriever against published BEIR
 / CMTEB baselines via [`evals/tools/convert_{beir,cmteb}.py`](../evals/README.md#public-benchmarks)
-+ `dikw eval --retrieval {bm25,vector,hybrid,all}`. The framing is
++ `dikw client eval --retrieval {bm25,vector,hybrid,all}`. The framing is
 **calibration, not reproduction** — five things make exact-number
 parity impossible (and not actually useful):
 
@@ -169,7 +169,7 @@ parity impossible (and not actually useful):
    because equal-weight left hybrid 0.037 nDCG@10 behind vector-only
    on BEIR/SciFact — dragged down by a ~0.10-nDCG-weaker BM25 leg. The
    sweep + tuning path is reproducible for any corpus:
-   `dikw eval --retrieval all --dump-raw path.jsonl` +
+   `dikw client eval --retrieval all --dump-raw path.jsonl` +
    `evals/tools/sweep_rrf.py --raw-dump path.jsonl`. Keyword-heavy
    corpora (code, rare identifiers) likely want `bm25_weight ≥ 1.0` —
    override via `retrieval:` block in `dikw.yml`. Full sweep table:

@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS meta_kv (
 -- ``path`` carries the user's spelling (display path); ``path_key`` is
 -- the engine's NFC + casefold lookup key. Splitting the two lets the
 -- same logical file under different macOS NFD / NTFS-case spellings
--- resolve to a single row while ``dikw status`` still shows whichever
+-- resolve to a single row while ``dikw client status`` still shows whichever
 -- spelling is on disk. Uniqueness lives on ``path_key``; ``path`` stays
 -- NOT NULL but plain so a rename-with-case-change updates the display
 -- value in place. See data/path_norm.py.

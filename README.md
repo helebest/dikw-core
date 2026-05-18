@@ -39,10 +39,10 @@ uv sync
 uv run dikw init my-base --description "my research base"
 cd my-base
 # Drop some markdown into sources/, then run any single command via
-# `serve-and-run` — it spawns a local server, runs the inner command,
-# and tears it down.
-uv run dikw serve-and-run -- ingest --no-embed
-uv run dikw serve-and-run -- retrieve "What does Karpathy mean by deterministic scoping?"
+# `dikw client serve-and-run` — it spawns a local server, runs the
+# inner command, and tears it down.
+uv run dikw client serve-and-run -- ingest --no-embed
+uv run dikw client serve-and-run -- retrieve "What does Karpathy mean by deterministic scoping?"
 ```
 
 For interactive sessions or long iterations, run `dikw serve` once and
@@ -59,8 +59,8 @@ uv run dikw client review approve W-abcdef123456
 uv run dikw client retrieve "What does Karpathy mean by deterministic scoping?"
 ```
 
-> Top-level aliases (`dikw status`, `dikw retrieve`, …) are kept as shortcuts and
-> route through the same client. **`dikw-core` no longer ships an in-engine
+> Every HTTP-bound command is spelled out as `dikw client <verb>`; there
+> are no top-level short aliases. **`dikw-core` no longer ships an in-engine
 > answer-synthesis path** — `retrieve` returns ranked chunks + page refs and
 > the agent (Claude Code, ChatGPT, your own script) feeds them into its own
 > LLM. See [`AGENTS.md`](./AGENTS.md).
@@ -84,10 +84,10 @@ Local-only commands run in this process:
 | `dikw version`              | print the package version                                                     |
 | `dikw init <path>`          | scaffold a dikw base (sources / wiki / wisdom / `.dikw/` + `dikw.yml`)        |
 | `dikw serve --base <path>`  | start the FastAPI + NDJSON server bound to one base                           |
-| `dikw serve-and-run -- <cmd>` | spawn a local server, run an inner client command against it, tear it down |
 
-Everything else lives under `dikw client *` and talks to a running server
-(top-level aliases keep the old muscle memory):
+Everything else lives under `dikw client *` and talks to a running server.
+There are **no** top-level short aliases — spelling out the `client` prefix
+keeps the local-vs-HTTP boundary unambiguous for both agents and humans:
 
 | command                     | does                                                                          |
 | --------------------------- | ----------------------------------------------------------------------------- |
@@ -107,7 +107,7 @@ Everything else lives under `dikw client *` and talks to a running server
 | `dikw client assets get <id> --output <file>` | download a content-addressed asset by sha256 id              |
 | `dikw client eval [--dataset]` | run retrieval-quality evaluation against packaged or custom datasets       |
 | `dikw client tasks {list,show,follow,cancel}` | inspect running / past async tasks on the server               |
-| `dikw client serve-and-run -- <cmd>` | same as the top-level shortcut — one-shot server + inner command + teardown |
+| `dikw client serve-and-run -- <cmd>` | one-shot server + inner command + teardown (no long-lived `dikw serve` needed) |
 
 The `dikw auth {login,import,status,list,logout}` subgroup is **local** —
 it manages OAuth tokens in `<base>/.dikw/auth.json` without talking to a

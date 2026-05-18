@@ -7,7 +7,7 @@ Parses three kinds of links out of markdown bodies:
   fuzzy normalize (NFKC + casefold + punctuation strip + trailing-plural
   stem). When normalize maps the link to a key that resolves to **two or
   more** distinct pages, we refuse to guess and let the wikilink stay
-  broken so ``dikw lint`` can surface the ambiguity.
+  broken so ``dikw client lint`` can surface the ambiguity.
 * ``[text](relative/path.md)`` — standard Markdown links. URLs and
   fragment-only references are classified as ``url`` or dropped.
 * Bare URLs in the body — captured as ``url`` links with no target
@@ -257,7 +257,7 @@ def resolve_links(
     exact title match → fuzzy normalize match (NFKC + casefold +
     punctuation strip + ASCII trailing-plural stem) → collision refusal
     (two-or-more normalize-equivalent paths leave the link broken so
-    ``dikw lint`` surfaces the ambiguity rather than letting us guess).
+    ``dikw client lint`` surfaces the ambiguity rather than letting us guess).
 
     ``fuzzy_index`` is the output of ``build_fuzzy_index(title_to_path)``;
     callers persisting many pages against the same title set should hoist

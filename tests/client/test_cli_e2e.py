@@ -25,6 +25,7 @@ from dikw_core.schemas import DocumentRecord, Layer, LinkRecord, LinkType
 from dikw_core.server import synth_op
 from dikw_core.server.runtime import ServerRuntime
 
+from ..conftest import removed_top_level_short_names
 from ..fakes import FakeEmbeddings, FakeLLM
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "notes"
@@ -34,19 +35,17 @@ def _run(args: list[str]) -> Any:
     return CliRunner().invoke(app, args)
 
 
-def test_status_routes_through_client(
-    asgi_client: tuple[Any, ServerRuntime],
-    patch_transport_factory: Callable[[], None],
-) -> None:
-    """Top-level ``dikw status`` aliases to ``dikw client status`` and
-    emits parseable JSON by default."""
-
-    patch_transport_factory()
-    result = _run(["status"])  # top-level alias → client.status
-    assert result.exit_code == 0, result.stdout
-    payload = json.loads(result.stdout)
-    assert "chunks" in payload
-    assert "documents_by_layer" in payload
+@pytest.mark.parametrize("name", removed_top_level_short_names())
+def test_top_level_short_names_removed(name: str) -> None:
+    """Every HTTP-bound command must live under ``dikw client *``; no
+    top-level aliases. Regression-proofs the splice loop in
+    ``cli.py`` never gets resurrected.
+    """
+    result = _run([name, "--help"])
+    assert result.exit_code != 0, (
+        f"`dikw {name}` should not resolve as a top-level command; "
+        f"got exit_code=0 with output: {result.stdout}"
+    )
 
 
 def test_client_status_explicit_subcommand(
@@ -68,24 +67,9 @@ def test_lint_clean_on_fresh_wiki(
     patch_transport_factory: Callable[[], None],
 ) -> None:
     patch_transport_factory()
-    result = _run(["lint"])
+    result = _run(["client", "lint"])
     assert result.exit_code == 0, result.stdout
     assert "lint" in result.stdout.lower()
-
-
-def test_client_init_treats_already_initialised_as_success(
-    asgi_client: tuple[Any, ServerRuntime],
-    patch_transport_factory: Callable[[], None],
-) -> None:
-    """The server's runtime won't even start without a ``dikw.yml``, so
-    the only way ``POST /v1/init`` lands in normal use is the
-    ``wiki_already_initialised`` 409. The CLI must surface that as an
-    exit-0 no-op (matching its docstring) instead of a non-zero
-    failure that would break any "init then ingest" bootstrap script."""
-    patch_transport_factory()
-    result = _run(["client", "init"])
-    assert result.exit_code == 0, result.stdout
-    assert "already initialized" in result.stdout.lower()
 
 
 def test_health_default_emits_json(
@@ -116,7 +100,7 @@ def test_health_table_mode_renders_tables(
     result = _run(["client", "health", "--format", "table"])
     assert result.exit_code == 0, result.stdout
     out = result.stdout
-    assert "dikw health" in out
+    assert "dikw client health" in out
     assert "layer counts" in out
     assert "providers" in out
 
@@ -171,7 +155,7 @@ def test_ingest_default_treats_file_errors_as_warnings(
     # Op commands default to async-by-default since the task-first
     # CLI flip; ``--wait`` makes the test see the IngestReport + errors
     # surface that this assertion is gated on.
-    result = _run(["ingest", "--no-embed", "--plain", "--wait"])
+    result = _run(["client", "ingest", "--no-embed", "--plain", "--wait"])
     assert result.exit_code == 0, result.stdout
     assert "file error" in result.stdout.lower()
     assert "broken.md" in result.stdout
@@ -189,7 +173,7 @@ def test_ingest_strict_exits_one_when_any_file_errors(
     _drop_broken_markdown(rt)
     patch_transport_factory()
 
-    result = _run(["ingest", "--no-embed", "--plain", "--strict"])
+    result = _run(["client", "ingest", "--no-embed", "--plain", "--strict"])
     assert result.exit_code == 1, result.stdout
     assert "broken.md" in result.stdout
 
@@ -409,7 +393,7 @@ def test_review_list_empty_on_fresh_wiki(
     patch_transport_factory: Callable[[], None],
 ) -> None:
     patch_transport_factory()
-    result = _run(["review", "list"])
+    result = _run(["client", "review", "list"])
     assert result.exit_code == 0, result.stdout
     assert "no candidates" in result.stdout
 
@@ -419,7 +403,7 @@ def test_tasks_list_empty_on_fresh_server(
     patch_transport_factory: Callable[[], None],
 ) -> None:
     patch_transport_factory()
-    result = _run(["tasks", "list"])
+    result = _run(["client", "tasks", "list"])
     assert result.exit_code == 0, result.stdout
     assert "no tasks" in result.stdout
 
@@ -427,10 +411,10 @@ def test_tasks_list_empty_on_fresh_server(
 @pytest.mark.parametrize(
     "argv",
     [
-        ["status", "--format", "json"],
-        ["lint", "--format", "json"],
-        ["tasks", "list", "--format", "json"],
-        ["review", "list", "--format", "json"],
+        ["client", "status", "--format", "json"],
+        ["client", "lint", "--format", "json"],
+        ["client", "tasks", "list", "--format", "json"],
+        ["client", "review", "list", "--format", "json"],
     ],
     ids=["status", "lint", "tasks-list", "review-list"],
 )
@@ -466,7 +450,7 @@ def test_check_unavailable_provider_exits_one(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("DIKW_EMBEDDING_API_KEY", raising=False)
     patch_transport_factory()
-    result = _run(["check"])
+    result = _run(["client", "check"])
     # Either both legs fail (exit 1) or the LLM probe passes
     # incidentally on the test image; in both cases the CLI must not
     # crash with a traceback.
@@ -573,7 +557,7 @@ def test_distill_runs_through_task_pipeline(
     monkeypatch.setattr(synth_op, "build_llm", lambda _cfg, **_kw: FakeLLM())
     monkeypatch.setattr(synth_op, "build_embedder", lambda _cfg: FakeEmbeddings())
     patch_transport_factory()
-    result = _run(["distill", "--plain", "--wait"])
+    result = _run(["client", "distill", "--plain", "--wait"])
     assert result.exit_code == 0, result.stdout
     assert "K pages read" in result.stdout
     assert "candidates added" in result.stdout

@@ -15,7 +15,11 @@ RUN apt-get update \
 # an older pip with known CVEs (CVE-2025-8869, CVE-2026-6357).
 RUN pip install --no-cache-dir --upgrade "pip>=26.1"
 
-# Bump in lockstep with each release tag.
+# Tracks the latest version already published to PyPI — bump only AFTER
+# the release tag pushes a new wheel (the trusted-publishing workflow in
+# .github/workflows/release.yml). Bumping it before publish wedges the
+# Trivy scan job, which builds this image from scratch on every PR and
+# would `pip install` a version that doesn't exist yet.
 ARG DIKW_VERSION=0.0.2
 RUN pip install --no-cache-dir "dikw-core[postgres]==${DIKW_VERSION}"
 

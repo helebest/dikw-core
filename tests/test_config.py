@@ -215,7 +215,7 @@ sources: []
 
 
 def test_retrieval_config_cjk_tokenizer_defaults_to_jieba() -> None:
-    """Defaulting to ``jieba`` makes ``dikw ingest`` correctly chunk and
+    """Defaulting to ``jieba`` makes ``dikw client ingest`` correctly chunk and
     index Chinese content out of the box; ``has_cjk`` short-circuits
     ASCII inputs so all-ASCII corpora pay no segmentation cost. Users
     who want the legacy whitespace behaviour set ``cjk_tokenizer: none``

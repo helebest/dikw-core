@@ -254,7 +254,7 @@ async def test_synth_existing_pages_truncates_to_retrieval_top_k(
 
 @pytest.mark.asyncio
 async def test_synth_force_all_skips_existing_pages_section(tmp_path: Path) -> None:
-    """``dikw synth --all`` is the documented "regenerate after a
+    """``dikw client synth --all`` is the documented "regenerate after a
     prompt/model change" path. Showing the LLM the OLD output of the
     SAME source would, combined with the zero-block-on-duplicate rule,
     cause the model to skip the regeneration the user explicitly

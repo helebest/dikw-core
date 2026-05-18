@@ -7,7 +7,7 @@ would be artificially punitive. ``ndcg_at_k`` / ``recall_at_k`` exposed
 for BEIR/CMTEB calibration.
 
 K-layer metrics quantify synth output without an LLM judge. The
-``atomicity_score`` shares ``check_atomicity`` with ``dikw lint`` so
+``atomicity_score`` shares ``check_atomicity`` with ``dikw client lint`` so
 one heuristic governs both interactive surfacing and the hard gate.
 
 The two embedding-driven K-layer metrics (``fact_grounding_ratio`` /

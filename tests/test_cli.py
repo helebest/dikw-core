@@ -1,13 +1,13 @@
 """Top-level CLI tests for the local-only commands.
 
-After Phase 5 of the client/server migration the only commands that run
-in-process are ``version``, ``init``, and ``serve``; everything else is
-a thin wrapper around an HTTP call to a running ``dikw serve``.
+The only top-level commands that run in-process are ``version``,
+``init``, ``serve`` and the ``auth`` subgroup. Every HTTP-bound command
+lives under ``dikw client *`` — there are no top-level aliases.
 
-The remote command surface (``status``, ``query``, ``ingest`` …) is
-exercised end-to-end against an in-memory ASGI server in
+The remote command surface (``dikw client status``, ``dikw client
+ingest`` …) is exercised end-to-end against an in-memory ASGI server in
 ``tests/client/test_cli_e2e.py``. This file's job is to keep the
-local-only commands honest.
+local-only commands honest and to guard against splice regressions.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ import pytest
 from typer.testing import CliRunner
 
 from dikw_core.cli import app
+
+from .conftest import removed_top_level_short_names
 
 runner = CliRunner()
 
@@ -71,11 +73,21 @@ def test_serve_help_lists_options(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--port" in out
 
 
-def test_top_level_status_alias_present() -> None:
-    """Top-level ``dikw status`` should exist as an alias for
-    ``dikw client status`` — its presence in the command list is what
-    keeps muscle memory working post-migration."""
-    result = runner.invoke(app, ["--help"])
-    assert result.exit_code == 0
-    assert "status" in result.stdout
-    assert "client" in result.stdout
+def test_top_level_app_registers_only_local_commands() -> None:
+    """The top-level Typer app must register exactly the four local-only
+    commands + the ``client`` subgroup — never any HTTP-bound verb.
+
+    Inspects the live registry instead of parsing ``--help`` text;
+    Rich's box-drawing glyphs make text scraping fragile, and the
+    registry is the actual source of truth Typer dispatches against.
+    """
+    top_level = {c.name for c in app.registered_commands if c.name} | {
+        g.name for g in app.registered_groups if g.name
+    }
+    assert top_level == {"version", "init", "serve", "auth", "client"}, (
+        f"unexpected top-level surface: {sorted(top_level)}"
+    )
+    for forbidden in removed_top_level_short_names():
+        assert forbidden not in top_level, (
+            f"HTTP-bound short name {forbidden!r} leaked into top-level app"
+        )

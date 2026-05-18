@@ -210,7 +210,7 @@ def render_retrieve_table(
     """
     chunks = result.get("chunks") or []
     chunks_table = Table(
-        title="dikw retrieve · chunks",
+        title="dikw client retrieve · chunks",
         show_header=True,
         header_style="bold",
     )
@@ -243,7 +243,7 @@ def render_retrieve_table(
     page_refs = result.get("page_refs") or []
     if isinstance(page_refs, list) and page_refs:
         refs_table = Table(
-            title="dikw retrieve · page_refs",
+            title="dikw client retrieve · page_refs",
             show_header=True,
             header_style="bold",
         )
@@ -269,7 +269,7 @@ def render_retrieve_table(
 
 
 def render_ingest_report(console: Console, report: Mapping[str, Any]) -> None:
-    table = Table(title="dikw ingest", show_header=True, header_style="bold")
+    table = Table(title="dikw client ingest", show_header=True, header_style="bold")
     table.add_column("metric", justify="left")
     table.add_column("count", justify="right")
     for key in ("scanned", "added", "updated", "unchanged"):
@@ -320,7 +320,7 @@ def render_import_report(
     rejected = list(report.get("rejected") or [])
 
     summary = Table(
-        title="dikw import", show_header=True, header_style="bold"
+        title="dikw client import", show_header=True, header_style="bold"
     )
     summary.add_column("metric", justify="left")
     summary.add_column("count", justify="right")
@@ -360,7 +360,7 @@ def render_import_report(
 
 
 def render_synth_report(console: Console, report: Mapping[str, Any]) -> None:
-    table = Table(title="dikw synth", show_header=True, header_style="bold")
+    table = Table(title="dikw client synth", show_header=True, header_style="bold")
     table.add_column("metric", justify="left")
     table.add_column("count", justify="right")
     for key in (
@@ -376,7 +376,7 @@ def render_synth_report(console: Console, report: Mapping[str, Any]) -> None:
 
 
 def render_distill_report(console: Console, report: Mapping[str, Any]) -> None:
-    table = Table(title="dikw distill", show_header=True, header_style="bold")
+    table = Table(title="dikw client distill", show_header=True, header_style="bold")
     table.add_column("metric", justify="left")
     table.add_column("count", justify="right")
     table.add_row("K pages read", str(int(report.get("pages_read") or 0)))
@@ -527,7 +527,7 @@ def render_health_report(console: Console, report: Mapping[str, Any]) -> None:
     Used by ``dikw client health --format table``; the JSON-default path
     is the agent contract and skips this renderer.
     """
-    overview = Table(title="dikw health", show_header=True, header_style="bold")
+    overview = Table(title="dikw client health", show_header=True, header_style="bold")
     overview.add_column("field", justify="left")
     overview.add_column("value", justify="left")
     overview.add_row("status", str(report.get("status") or ""))
@@ -599,7 +599,7 @@ def render_health_report(console: Console, report: Mapping[str, Any]) -> None:
 
 
 def render_status(console: Console, counts: Mapping[str, Any]) -> None:
-    table = Table(title="dikw status", show_header=True, header_style="bold")
+    table = Table(title="dikw client status", show_header=True, header_style="bold")
     table.add_column("layer", justify="left")
     table.add_column("count", justify="right")
     layers = counts.get("documents_by_layer") or {}
@@ -623,7 +623,7 @@ def render_status(console: Console, counts: Mapping[str, Any]) -> None:
 
 
 def render_check_report(console: Console, report: Mapping[str, Any]) -> None:
-    table = Table(title="dikw check", show_header=True, header_style="bold")
+    table = Table(title="dikw client check", show_header=True, header_style="bold")
     table.add_column("provider", justify="left")
     table.add_column("target", justify="left")
     table.add_column("status", justify="left")
@@ -653,7 +653,7 @@ def render_synth_eval_report(
     ``passed`` flag (``synth/duplicate_ratio_max`` is ≤, others are ≥),
     so we don't replay the direction logic in the renderer."""
     name = str(report.get("dataset_name") or report.get("dataset") or "synth eval")
-    title = f"dikw eval — {name} (mode: synth)"
+    title = f"dikw client eval — {name} (mode: synth)"
     table = Table(title=title, show_header=True, header_style="bold")
     table.add_column("metric")
     table.add_column("value", justify="right")
@@ -764,7 +764,7 @@ def render_eval_report(console: Console, report: Mapping[str, Any]) -> None:
     flow we'll add when there's user demand.
     """
     name = str(report.get("dataset_name") or "eval")
-    title = f"dikw eval — {name}"
+    title = f"dikw client eval — {name}"
     metrics = report.get("metrics") or {}
     if not isinstance(metrics, dict):
         metrics = {}

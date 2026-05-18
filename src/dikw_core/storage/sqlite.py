@@ -61,7 +61,7 @@ _REBUILD_HINT = (
     "dikw-core is pre-alpha — the on-disk format is allowed to change, "
     "and there is no in-place upgrade path. Delete the SQLite database "
     "file (the path SQLiteStorage was constructed with, typically "
-    "``.dikw/dikw.sqlite``) and re-run ``dikw ingest`` to rebuild."
+    "``.dikw/dikw.sqlite``) and re-run ``dikw client ingest`` to rebuild."
 )
 
 # vec0 defaults to L2; we want cosine for parity with the legacy

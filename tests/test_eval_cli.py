@@ -1,6 +1,6 @@
 """CLI integration for ``dikw client eval`` against the in-memory server.
 
-Phase 5 collapses the in-process ``dikw eval`` command into a thin
+Phase 5 collapses the in-process ``dikw client eval`` command into a thin
 client wrapper that submits ``POST /v1/eval`` and follows the task
 event stream. The previous CLI surface (``--dump-raw``, ``--embedder
 fake|provider``, ``--retrieval all``, no-arg auto-discovery) lived
@@ -80,7 +80,7 @@ def test_dataset_path_passes_thresholds(
     ds = _write_toy_dataset(tmp_path)
     patch_transport_factory()
     result = CliRunner().invoke(
-        app, ["eval", "--dataset", str(ds), "--plain", "--wait"]
+        app, ["client", "eval", "--dataset", str(ds), "--plain", "--wait"]
     )
     assert result.exit_code == 0, result.stdout
     assert "toy" in result.stdout
@@ -110,7 +110,7 @@ def test_dataset_path_fails_when_thresholds_unmet(
     )
     patch_transport_factory()
     result = CliRunner().invoke(
-        app, ["eval", "--dataset", str(ds), "--plain", "--wait"]
+        app, ["client", "eval", "--dataset", str(ds), "--plain", "--wait"]
     )
     assert result.exit_code == 1, result.stdout
 
@@ -155,6 +155,6 @@ def test_missing_dataset_returns_non_zero(
     patch_transport_factory()
     result = CliRunner().invoke(
         app,
-        ["eval", "--dataset", str(tmp_path / "missing"), "--plain", "--wait"],
+        ["client", "eval", "--dataset", str(tmp_path / "missing"), "--plain", "--wait"],
     )
     assert result.exit_code != 0, result.stdout

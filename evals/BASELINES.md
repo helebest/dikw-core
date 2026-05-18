@@ -4,7 +4,7 @@ Archive of real-embedder benchmark runs. Each entry pins a reproducible
 configuration and the observed numbers, so future runs can tell a
 regression from a re-run variance.
 
-Newest first. `dikw eval` thresholds in each dataset's `dataset.yaml`
+Newest first. `dikw client eval` thresholds in each dataset's `dataset.yaml`
 are calibrated ~2-3 % below the most recent canonical-mode run.
 
 ## 2026-05-13 — broken_wikilink `--enable-llm` evidence-backed (#83)
@@ -109,7 +109,7 @@ Rationale stamped on the proposal:
   proposal-side guarantees above make that a foregone conclusion.
 ## 2026-05-13 — K-layer orphan-page governance (lint-fix PR3)
 
-Issue #82: `dikw lint propose --rule orphan_page` previously skipped
+Issue #82: `dikw client lint propose --rule orphan_page` previously skipped
 every orphan because `FIXER_REGISTRY` lacked an entry — 250 orphans
 on the elon-musk validation base produced 0 applicable proposals.
 This PR registers `OrphanPageFixer` with four strategies (delete /
@@ -231,7 +231,7 @@ uv run dikw client lint proposals --format json > props.json
   already clustering source material) than to bolt onto lint.
 - `wiki/index.md` promotion to a real K-page — conflicts with
   `indexgen.py`'s rewrite contract.
-- Wire orphan score into `dikw eval` metrics — current baseline table
+- Wire orphan score into `dikw client eval` metrics — current baseline table
   is good enough for first iteration.
 
 ## 2026-05-13 — fact_grounding_ratio tau sweep + claim-filter fix
@@ -345,7 +345,7 @@ sources only and these numbers will need re-baselining.
 Observed metrics:
 
 ```
-dikw eval — mvp (mode: synth)
+dikw client eval — mvp (mode: synth)
 metric                          value   direction
 synth/atomicity_score           1.000   min
 synth/duplicate_ratio_max       0.006   max
@@ -674,7 +674,7 @@ The original plan's acceptance gate ("graph leg must lift nDCG@10 by
   storage **only inside K-layer page persistence**
   (`api.py:_persist_wiki_page` → `parse_links` → `storage.upsert_link`).
 - Retrieval eval datasets (SciFact, cmteb, mvp, wiki-mini-mm) only
-  ingest as D-layer sources — `dikw eval` never invokes synth, so the
+  ingest as D-layer sources — `dikw client eval` never invokes synth, so the
   `links` table stays empty regardless of `[[...]]` syntax in corpus.
 - Therefore `neighbor_chunks_via_links` always returns `[]` on these
   datasets and the graph leg silently contributes nothing — equivalent
@@ -935,7 +935,7 @@ async refuses to run on it. The replay was driven by a thin
 `WindowsSelectorEventLoopPolicy` before importing
 `run_phase15_from_snapshot`. This is a dev-host scaffolding gap, not
 a server-side patch; production Linux deploys are unaffected. If we
-want PG ingest to work via `dikw serve` / `dikw serve-and-run` on
+want PG ingest to work via `dikw serve` / `dikw client serve-and-run` on
 Windows, the server's startup needs the same policy pin.
 
 ### Follow-ups (priority-ordered)
@@ -960,7 +960,7 @@ Windows, the server's startup needs the same policy pin.
 3. **Windows uvicorn event-loop pin** — `dikw serve` should
    `asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())`
    on Windows before uvicorn starts, so PG-backed wikis work via
-   `dikw serve-and-run` without the dev-host wrapper. One-liner in
+   `dikw client serve-and-run` without the dev-host wrapper. One-liner in
    `cli.py`'s serve subcommand.
 
 ## 2026-05-01 — wiki-mini-mm: chunk + asset views, real Qwen3-VL-Embedding-8B
@@ -983,7 +983,7 @@ measurable.
   fusion (`bm25_weight=0.3`, `vector_weight=1.5`, `rrf_k=60`),
   `cjk_tokenizer=jieba`. CLI:
   ```
-  dikw eval --dataset wiki-mini-mm --embedder provider \
+  dikw client eval --dataset wiki-mini-mm --embedder provider \
             --path <wiki-with-mm-cfg> --no-cache
   ```
 - **Walltime:** ~3 min including image embed pass (6 images × Qwen3-VL-8B
@@ -992,7 +992,7 @@ measurable.
 ### Results (canonical hybrid mode)
 
 ```
-              dikw eval — wiki-mini-mm  (real Qwen3-VL-Embedding-8B)
+              dikw client eval — wiki-mini-mm  (real Qwen3-VL-Embedding-8B)
 ┌─────────────────────┬───────┐
 │ metric              │ value │
 ├─────────────────────┼───────┤
@@ -1043,7 +1043,7 @@ mkdir -p "$WIKI/sources" && dikw init --path "$WIKI"
 # assets.multimodal: { provider: gitee_multimodal,
 #   model: Qwen3-VL-Embedding-8B, dim: 1024, base_url: https://ai.gitee.com/v1 }
 set -a && source .env && set +a
-dikw eval --dataset wiki-mini-mm --embedder provider \
+dikw client eval --dataset wiki-mini-mm --embedder provider \
           --path "$WIKI" --no-cache
 ```
 
@@ -1200,7 +1200,7 @@ floor).
    0.6B native). Configured in
    `tests/fixtures/live-minimax-gitee.dikw.yml` and the two scratch
    wikis at `/tmp/dikw-phase15-{cmteb,scifact}/dikw.yml`. Verified
-   via `dikw check --embed-only` (cold response 2.4 s, dim=1024 as
+   via `dikw client check --embed-only` (cold response 2.4 s, dim=1024 as
    expected). Motivation: 0.6B is dramatically cheaper / faster on
    Gitee in throttle-prone windows; we wanted to know if it's
    equivalent on quality.
@@ -1408,7 +1408,7 @@ The fix landed across four commits on `feat/fts5-cjk-tokenizer`:
    `_sanitize_fts` preprocesses the query identically. Locked at
    first ingest (same shape as `embedding_dimensions`).
 4. CLI fix (`699abb6`, surfaced by the first v2 run producing
-   identical numbers to v1): `dikw eval --embedder provider` now
+   identical numbers to v1): `dikw client eval --embedder provider` now
    forwards `cfg.retrieval` from the scratch wiki to `run_eval`. The
    original CLI only threaded `cfg.provider` and silently dropped
    the retrieval block — the first v2 rerun wasted ~4h + ~¥0.5
@@ -1418,7 +1418,7 @@ The fix landed across four commits on `feat/fts5-cjk-tokenizer`:
 ### Results
 
 ```
-dikw eval — cmteb-t2-subset  (retrieval ablation, v2 defaults + jieba)
+dikw client eval — cmteb-t2-subset  (retrieval ablation, v2 defaults + jieba)
 ┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
 │ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
 ├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
@@ -1568,7 +1568,7 @@ pre-pass.
 ### Results
 
 ```
-dikw eval — cmteb-t2-subset  (retrieval ablation: bm25 / vector / hybrid)
+dikw client eval — cmteb-t2-subset  (retrieval ablation: bm25 / vector / hybrid)
 ┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
 │ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
 ├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
@@ -1724,7 +1724,7 @@ landed in three layers:
    been equal-weight).
 2. `RetrievalConfig` in `dikw.yml` exposes `rrf_k` + `bm25_weight` +
    `vector_weight` so users can tune per-corpus.
-3. `dikw eval --retrieval all --dump-raw` + `evals/tools/sweep_rrf.py`
+3. `dikw client eval --retrieval all --dump-raw` + `evals/tools/sweep_rrf.py`
    re-fuse a single dump at arbitrary weights offline — no re-embedding.
 
 ### Weight sweep (offline, same dump as v1)
@@ -1765,7 +1765,7 @@ Why this point and not the grid top:
 ### Results (shipped defaults)
 
 ```
-dikw eval — scifact  (retrieval ablation, v2 defaults)
+dikw client eval — scifact  (retrieval ablation, v2 defaults)
 ┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
 │ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
 ├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤
@@ -1836,7 +1836,7 @@ the fair comparison point for any future fusion work.
 ### Results
 
 ```
-dikw eval — scifact  (retrieval ablation: bm25 / vector / hybrid)
+dikw client eval — scifact  (retrieval ablation: bm25 / vector / hybrid)
 ┌────────┬──────────┬───────────┬───────┬────────────┬───────────────┐
 │ mode   │ hit_at_3 │ hit_at_10 │   mrr │ ndcg_at_10 │ recall_at_100 │
 ├────────┼──────────┼───────────┼───────┼────────────┼───────────────┤

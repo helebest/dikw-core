@@ -3,7 +3,7 @@ based on a :class:`FixProposalReport`.
 
 PR1 design: apply only touches disk + outgoing-link reconciliation. It
 intentionally skips re-chunking / re-embedding so apply stays
-provider-free; a follow-up ``dikw ingest`` reconciles ``doc.hash``
+provider-free; a follow-up ``dikw client ingest`` reconciles ``doc.hash``
 and chunks/embeddings on the next pass.
 
 Storage-touching tests are parametrised over the ``parametrized_storage``
@@ -432,7 +432,7 @@ async def test_move_to_trash_rolls_back_when_unlink_fails(
     """If ``src_abs.unlink()`` fails after ``dest.write_text`` succeeds,
     the function must roll back by deleting the new trash copy and
     re-raising — leaving the page in exactly one place (wiki/) so the
-    next ``dikw ingest`` re-creates the storage row from disk.
+    next ``dikw client ingest`` re-creates the storage row from disk.
 
     Regression for codex R2-1: the previous flow left the file in
     BOTH ``wiki/`` and ``trash/`` on a partial filesystem failure."""
@@ -1040,7 +1040,7 @@ async def test_apply_then_lint_does_not_re_report_broken_wikilink(
 ) -> None:
     """End-to-end regression: apply ``create_page`` → immediately
     ``run_lint`` → the original ``broken_wikilink`` should NOT reappear
-    (no need for a separate ``dikw ingest`` to bridge the gap)."""
+    (no need for a separate ``dikw client ingest`` to bridge the gap)."""
     from dikw_core.domains.knowledge.lint import run_lint
 
     storage = parametrized_storage

@@ -9,9 +9,11 @@ DIKW pyramid (**D**ata → **I**nformation → **K**nowledge → **W**isdom).
 Status: **pre-alpha** — APIs and on-disk formats will change.
 
 Architecture is **client/server**: a `dikw serve` process (FastAPI + NDJSON)
-hosts the engine; `dikw client …` (the default user surface, plus top-level
-aliases like `dikw status`) talks to it over HTTP. The local-only commands
-are `dikw version`, `dikw init`, and `dikw serve` itself.
+hosts the engine; every HTTP-bound command lives under `dikw client …`,
+spelled out — there are no top-level short aliases. The only top-level
+commands that run in-process are `dikw version`, `dikw init`, `dikw serve`,
+and the `dikw auth {login,import,status,list,logout}` subgroup (local OAuth
+token management for the `openai_codex` provider).
 
 Canonical docs (read these before designing changes):
 - `docs/design.md` — approved design doc, source of truth for intent

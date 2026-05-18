@@ -253,7 +253,7 @@ The logical model is backend-agnostic; the SQL below is the **SQLite reference s
 -- ``path`` carries the user's spelling (display path); ``path_key`` is
 -- the engine's NFC + casefold lookup key. Splitting the two lets the
 -- same logical file under different macOS NFD / NTFS-case spellings
--- resolve to a single row while ``dikw status`` still shows whichever
+-- resolve to a single row while ``dikw client status`` still shows whichever
 -- spelling is on disk. ``data/path_norm.normalize_path`` is the single
 -- source of truth for the transformation.
 CREATE TABLE documents (
@@ -421,7 +421,7 @@ re-ask many times.
 2. Retrieve: top-K K-layer pages + their wikilinked neighbors via the link graph.
 3. Prompt the LLM with `prompts/distill.md` — asks for candidate claims + evidence excerpts + kind + confidence.
 4. Persist each candidate as `wisdom/_candidates/<slug>.md` AND as a row in `wisdom_items(status='candidate')`.
-5. Never auto-promote. A candidate becomes approved only via `dikw review`.
+5. Never auto-promote. A candidate becomes approved only via `dikw client review`.
 
 **Surfacing to agents** (`wisdom/apply.py`):
 - Exposes `pick_applicable(q, limit)` as a pure function over approved wisdom items: lexical overlap + a cheap semantic pass against the question.
@@ -568,10 +568,10 @@ Each phase is a landable slice: CI green, tests added, docs updated.
 
 1. `uv sync` resolves cleanly; `uv run pytest` green; `uv run ruff check` + `uv run mypy src` clean.
 2. `uv run dikw init examples/personal-wiki && cd examples/personal-wiki` scaffolds the expected tree.
-3. Populate `sources/` with ~20 markdown notes (fixtures); `uv run dikw ingest`; confirm FTS and vec rows via a diagnostic `dikw status`.
+3. Populate `sources/` with ~20 markdown notes (fixtures); `uv run dikw client ingest`; confirm FTS and vec rows via a diagnostic `dikw client status`.
 4. `uv run dikw client retrieve "what is DIKW?" --format json` returns at least one chunk hit with `path`, `text`, and `score`; LLM synthesis on top of these chunks is the agent's responsibility.
-5. `uv run dikw synth`; check `wiki/index.md` and `wiki/log.md` updated, at least one `entities/`/`concepts/` page created, all wikilinks resolve in `lint`.
-6. `uv run dikw distill --recent` creates ≥1 candidate in `wisdom/_candidates/`; `uv run dikw review` accepts one; the corresponding `wisdom_items.status` flips to `approved` and a rendered page exists in `wisdom/principles.md` (or kind-appropriate file).
+5. `uv run dikw client synth`; check `wiki/index.md` and `wiki/log.md` updated, at least one `entities/`/`concepts/` page created, all wikilinks resolve in `lint`.
+6. `uv run dikw client distill --recent` creates ≥1 candidate in `wisdom/_candidates/`; `uv run dikw client review` accepts one; the corresponding `wisdom_items.status` flips to `approved` and a rendered page exists in `wisdom/principles.md` (or kind-appropriate file).
 7. `uv run dikw client wisdom applicable "what principles apply when choosing retrieval over a wiki?" --format json` lists the approved wisdom item; the agent injects it into its own LLM prompt to produce a wisdom-grounded answer.
 8. `uv run dikw serve --base .` launches; a `GET /v1/wisdom/applicable?q=...` round-trip from any HTTP client returns the same wisdom items as step 7, and a `POST /v1/retrieve` round-trip returns chunks consumable by any HTTP agent.
 9. Swap provider in `dikw.yml` from Anthropic to OpenAI-compatible (pointed at Ollama locally or OpenAI) and repeat step 4 — works unchanged.

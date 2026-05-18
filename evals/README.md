@@ -1,7 +1,7 @@
 # evals
 
 Retrieval-quality evaluation for `dikw-core`. Datasets live here as a
-filesystem convention; `dikw eval` runs any of them.
+filesystem convention; `dikw client eval` runs any of them.
 
 ## The three-file contract
 
@@ -15,7 +15,7 @@ evals/datasets/<name>/
 └── queries.yaml       # {q, expect_any: [doc_stem, …]} pairs
 ```
 
-Missing any piece → `dikw eval` prints a specific error and exits 2.
+Missing any piece → `dikw client eval` prints a specific error and exits 2.
 
 ### `dataset.yaml`
 
@@ -55,9 +55,9 @@ and requiring *all* stems would be artificially punitive.
 ## Usage
 
 ```bash
-uv run dikw eval                         # run every packaged dataset
-uv run dikw eval --dataset mvp           # run by name (under evals/datasets/)
-uv run dikw eval --dataset ./my-corpus   # run an arbitrary directory
+uv run dikw client eval                         # run every packaged dataset
+uv run dikw client eval --dataset mvp           # run by name (under evals/datasets/)
+uv run dikw client eval --dataset ./my-corpus   # run an arbitrary directory
 ```
 
 Exit codes: `0` all passed, `1` any threshold failed, `2` bad spec /
@@ -70,7 +70,7 @@ dim, <1s) with no network or API keys. For real-vector evaluation
 against a configured provider, point at a wiki:
 
 ```bash
-uv run --env-file .env dikw eval --dataset mvp --embedder provider --path ./my-wiki
+uv run --env-file .env dikw client eval --dataset mvp --embedder provider --path ./my-wiki
 ```
 
 The runner reads `provider.embedding_*` from the wiki's `dikw.yml` and
@@ -85,7 +85,7 @@ Three steps:
 2. Drop markdown files into `corpus/`; write `queries.yaml` with 5-20
    Q/A pairs (4 exact-fact + 3 paraphrase + 3 synthesis is a reasonable
    mix for retrieval).
-3. First run: `uv run dikw eval --dataset <name>` — skip thresholds in
+3. First run: `uv run dikw client eval --dataset <name>` — skip thresholds in
    `dataset.yaml` or leave them loose. Observe the numbers, then edit
    `dataset.yaml` to leave ~1-2 queries of slack below the observed
    values so corpus tweaks don't flake the gate while a real regression
@@ -95,7 +95,7 @@ Three steps:
 
 Two converters under [`tools/`](./tools/) materialise public bundles
 into the three-file shape above. Once the directory exists,
-`dikw eval` picks it up automatically — there is no runtime format
+`dikw client eval` picks it up automatically — there is no runtime format
 plugin.
 
 ### BEIR (English) — e.g., SciFact
@@ -145,7 +145,7 @@ comparison against published BM25 baselines:
 
 ```bash
 uv run --env-file scratch-bench-wiki/.env \
-    dikw eval --dataset scifact --embedder provider \
+    dikw client eval --dataset scifact --embedder provider \
     --path ./scratch-bench-wiki --retrieval all
 ```
 
@@ -155,7 +155,7 @@ embedder for benchmark-scale work).
 
 ### Tuning RRF for your corpus
 
-`dikw eval --retrieval all --dump-raw path.jsonl` + `evals/tools/sweep_rrf.py`
+`dikw client eval --retrieval all --dump-raw path.jsonl` + `evals/tools/sweep_rrf.py`
 re-fuses the same ranked lists at arbitrary `(rrf_k, bm25_weight,
 vector_weight)` combinations offline — no re-embedding, milliseconds
 per sweep. Pin the winning row into your wiki's `dikw.yml`:

@@ -1,4 +1,4 @@
-"""Evaluation surface — metrics, datasets, and runner for ``dikw eval``.
+"""Evaluation surface — metrics, datasets, and runner for ``dikw client eval``.
 
 Public re-exports are deliberately narrow; the CLI and tests pull from the
 submodules directly.

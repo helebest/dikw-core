@@ -1,4 +1,4 @@
-"""``dikw check`` — verifiable config tool.
+"""``dikw client check`` — verifiable config tool.
 
 Connects to the configured LLM + embedding providers with one tiny call
 each and reports whether each leg roundtripped. Used by operators after
@@ -96,7 +96,7 @@ def test_cli_check_exits_nonzero_on_failure(
     monkeypatch.setattr("dikw_core.api.build_llm", lambda cfg, **_kw: BrokenLLM())
     monkeypatch.setattr("dikw_core.api.build_embedder", lambda cfg: FakeEmbeddings())
     patch_transport_factory()
-    result = CliRunner().invoke(app, ["check"])
+    result = CliRunner().invoke(app, ["client", "check"])
     assert result.exit_code == 1, result.stdout
 
 
@@ -110,7 +110,7 @@ def test_cli_check_exits_zero_on_success(
         "dikw_core.api.build_embedder", lambda _cfg: FakeEmbeddings()
     )
     patch_transport_factory()
-    result = CliRunner().invoke(app, ["check"])
+    result = CliRunner().invoke(app, ["client", "check"])
     assert result.exit_code == 0, result.stdout
 
 
@@ -187,7 +187,7 @@ def test_cli_check_llm_only_exits_zero_when_embed_would_fail(
 
     monkeypatch.setattr("dikw_core.api.build_embedder", _boom)
     patch_transport_factory()
-    result = CliRunner().invoke(app, ["check", "--llm-only"])
+    result = CliRunner().invoke(app, ["client", "check", "--llm-only"])
     assert result.exit_code == 0, result.stdout
 
 
@@ -197,7 +197,7 @@ def test_cli_check_rejects_both_only_flags(
 ) -> None:
     patch_transport_factory()
     result = CliRunner().invoke(
-        app, ["check", "--llm-only", "--embed-only"]
+        app, ["client", "check", "--llm-only", "--embed-only"]
     )
     assert result.exit_code == 2, result.stdout
 
@@ -230,7 +230,7 @@ def test_cli_check_embed_only_shows_provider_label_when_yaml_set(
     rt.cfg, _ = load_wiki(rt.root)
 
     patch_transport_factory()
-    result = CliRunner().invoke(app, ["check", "--embed-only"])
+    result = CliRunner().invoke(app, ["client", "check", "--embed-only"])
     assert result.exit_code == 0, result.stdout
     assert "gitee-ai" in result.stdout
 

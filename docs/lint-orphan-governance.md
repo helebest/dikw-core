@@ -27,7 +27,7 @@ Triggered when the orphan's body (after frontmatter strip) is **under
 
 Apply moves the file to `<base>/trash/wiki/<original-rel-path>` and
 purges its storage rows. **Recovery**: drag the file back into `wiki/`
-and rerun `dikw ingest`. A `trashed: { at, reason, proposal_id }`
+and rerun `dikw client ingest`. A `trashed: { at, reason, proposal_id }`
 block is injected into the frontmatter on the way to trash for audit;
 strip it by hand on the way back.
 

@@ -2,7 +2,7 @@
 
 This walkthrough takes a blank directory to a queryable knowledge base with a
 curated Wisdom layer in about five minutes. It only needs Python 3.12+ and
-`uv`; LLM keys are optional until you hit `dikw synth` or `dikw distill`
+`uv`; LLM keys are optional until you hit `dikw client synth` or `dikw client distill`
 (the engine-internal authoring legs). Plain `dikw client retrieve` runs
 without any LLM key.
 
@@ -53,8 +53,9 @@ uv run dikw serve --base .
 # bound to http://127.0.0.1:8765 — no auth on loopback
 ```
 
-Leave it running. Every `dikw <op>` shown below is a top-level alias for
-`dikw client <op>` and routes through this server.
+Leave it running. Every `dikw client <op>` shown below routes through
+this server — top-level short aliases like `dikw status` were removed in
+0.1.0, so always spell out the `client` prefix.
 
 ## 3. Add source material and ingest
 
@@ -72,35 +73,35 @@ Two steps:
 # pre-flight rejects bad frontmatter, missing assets, and orphan
 # files BEFORE the network round trip. ``import`` commits the bytes
 # into ``<base>/sources/``; it does NOT chunk or embed.
-uv run dikw import ./my-notes
+uv run dikw client import ./my-notes
 
 # ``ingest`` is the next step: scans ``<base>/sources/``, chunks the
 # markdown, and writes the D/I layer. Offline mode indexes FTS only,
 # no API calls. Async-by-default: prints a ``{task_id, ...}`` handle
 # and exits 0 so an agent can move on; add ``--wait`` to block + render
 # the IngestReport + map the final status to the exit code.
-uv run dikw ingest --no-embed --wait
+uv run dikw client ingest --no-embed --wait
 
 # Or with embeddings (requires DIKW_EMBEDDING_API_KEY on any OpenAI-compatible
 # endpoint — OpenAI, Gitee AI, Ollama, vLLM, …).
 export DIKW_EMBEDDING_API_KEY=sk-...
-uv run dikw ingest --wait
+uv run dikw client ingest --wait
 
 # Fire-and-forget (default): submit + capture the task_id; follow up
 # later with ``dikw client tasks wait <id>`` or page events via
 # ``dikw client tasks events <id> --from-seq 0 --limit 100``.
-uv run dikw ingest
+uv run dikw client ingest
 ```
 
 `import` and `ingest` are two halves of one user intent: import handles
 **outside the base** → `sources/`; ingest handles `sources/` →
 **chunks + embeddings**. If the server runs on the same machine as your
 notes, you can also drop / edit markdown directly under
-`<base>/sources/` and skip `dikw import` — `dikw ingest` always scans
+`<base>/sources/` and skip `dikw client import` — `dikw client ingest` always scans
 whatever's on disk.
 
-`dikw status --format table` shows document, chunk, and embedding counts
-per DIKW layer in a human-readable table. The default `dikw status`
+`dikw client status --format table` shows document, chunk, and embedding counts
+per DIKW layer in a human-readable table. The default `dikw client status`
 output is JSON so an automation script or agent can pipe it into `jq`
 without extra flags. Subsequent ingests are idempotent: files whose
 content hash hasn't changed are skipped.
@@ -181,11 +182,11 @@ without re-implementing wikilink resolution per client.
 
 ```bash
 # Async-default: submit + print the task handle, exit 0 right away.
-uv run dikw synth
+uv run dikw client synth
 
 # Block until the synth task finishes, render the report, and exit
 # with succeeded=0 / failed=1 / cancelled=130 / timeout=124.
-uv run dikw synth --wait
+uv run dikw client synth --wait
 ```
 
 The LLM reads each source doc and produces a `wiki/<folder>/<slug>.md`
@@ -193,7 +194,7 @@ page, cross-linked via `[[wikilinks]]`. `wiki/index.md` and `wiki/log.md`
 regenerate automatically. Re-running is a no-op until you add new sources
 (or pass `--all` to resynthesise everything).
 
-Run `dikw lint` to check for broken wikilinks, orphans, and duplicate titles.
+Run `dikw client lint` to check for broken wikilinks, orphans, and duplicate titles.
 
 ### Watching synth progress on large sources
 
@@ -224,9 +225,9 @@ need DEBUG to spot one.
 ## 6. Distil Wisdom (the W layer)
 
 ```bash
-uv run dikw distill
-uv run dikw review list
-uv run dikw review approve W-abcdef123456
+uv run dikw client distill
+uv run dikw client review list
+uv run dikw client review approve W-abcdef123456
 ```
 
 `distill` prompts the LLM for principles/lessons/patterns supported by **at
@@ -244,10 +245,10 @@ auto-injects them.
 
 ```bash
 # Default: run all packaged datasets (ships with the MVP dogfood corpus).
-uv run dikw eval
+uv run dikw client eval
 
 # Run against your own corpus: create a 3-file directory and point at it.
-uv run dikw eval --dataset ./my-corpus/
+uv run dikw client eval --dataset ./my-corpus/
 ```
 
 Each query is marked a "hit" at top-k if any `expect_any` doc stem is in
@@ -321,7 +322,7 @@ provider:
   embedding_normalize: true
   embedding_distance: cosine
   embedding_batch_size: 16          # required: Gitee rejects batches >25
-  embedding_provider_label: gitee-ai  # optional; shows up in `dikw check`
+  embedding_provider_label: gitee-ai  # optional; shows up in `dikw client check`
 ```
 
 A working reference copy lives at
@@ -349,16 +350,16 @@ use `uv run --env-file .env dikw …`.
 After editing `dikw.yml` and exporting the env vars, run:
 
 ```bash
-uv run dikw check --format table --llm-only    # just LLM (human-readable)
-uv run dikw check --format table --embed-only  # just embedding
-uv run dikw check --format table               # both legs
+uv run dikw client check --format table --llm-only    # just LLM (human-readable)
+uv run dikw client check --format table --embed-only  # just embedding
+uv run dikw client check --format table               # both legs
 ```
 
 Each variant pings the relevant provider with one tiny request and
 reports endpoint / latency / dim/tokens. Drop `--format table` to get
 the raw JSON probe report (default, agent-friendly). Exit code is 0 on
 success, 1 on any probe failure, 2 when `--llm-only` and `--embed-only`
-are passed together. Do this *before* running `dikw ingest` on a real
+are passed together. Do this *before* running `dikw client ingest` on a real
 corpus so a misconfigured endpoint doesn't burn a full embedding run.
 
 ## Pluggable storage

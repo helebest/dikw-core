@@ -78,14 +78,16 @@ Add more fixtures over time as you verify combinations; PRs welcome.
    - `DIKW_EMBEDDING_API_KEY` → embedding key (same or different vendor).
 3. **If the embedding model dim changed**, delete `.dikw/index.sqlite`
    (see gotcha #1). Reingestion is required.
-4. **Verify**:
+4. **Verify** — `dikw client check` talks to a running server, so use
+   `serve-and-run` for one-shot probes (it spawns a temporary `dikw
+   serve` against `<wiki>`, runs the inner check, tears it down):
    ```bash
-   uv run --env-file .env dikw check --path <wiki> --llm-only
-   uv run --env-file .env dikw check --path <wiki> --embed-only
+   uv run --env-file .env dikw client serve-and-run --base <wiki> -- check --llm-only
+   uv run --env-file .env dikw client serve-and-run --base <wiki> -- check --embed-only
    ```
    Each variant pings one endpoint with one tiny request; failures
    print the error inline. Exit 0/1 is scriptable.
-5. **`uv run dikw ingest`** to re-populate the I layer if you wiped the
+5. **`uv run dikw client ingest`** to re-populate the I layer if you wiped the
    SQLite file.
 
 ## Production gotchas
@@ -101,7 +103,7 @@ different dim afterwards produces a dimension-mismatch error on the
 next insert.
 
 **Only safe migration path today:** delete `.dikw/index.sqlite`, then
-`dikw ingest` fresh. There is no incremental re-embed.
+`dikw client ingest` fresh. There is no incremental re-embed.
 
 ### 2. Batch size varies per vendor
 
@@ -127,7 +129,7 @@ transient network errors but not all 4xx/5xx. You'll see:
 - Gemini 429 rate-limit (project-quota dependent)
 - GLM 5xx occasionally
 
-`dikw check` will print them as red cells; `dikw ingest` aborts on
+`dikw client check` will print them as red cells; `dikw client ingest` aborts on
 first failure *but is idempotent via content hash*, so re-running
 resumes without double-embedding unchanged docs. For production
 automation, wrap the call in your own retry layer (e.g., `tenacity`).
@@ -196,8 +198,7 @@ halves shredded.
 (gotcha #1). The `documents_fts` rows store whatever segmentation was
 in effect when they were written; flipping the config afterwards
 produces a mismatch between indexed and queried tokens, silently
-dropping CJK hits. To change: wipe `.dikw/index.sqlite` and `dikw
-ingest` fresh.
+dropping CJK hits. To change: wipe `.dikw/index.sqlite` and `dikw client ingest` fresh.
 
 ### 8. `openai_codex` self-manages its OAuth tokens (separate from codex CLI)
 
@@ -262,7 +263,7 @@ Reproducible workflow for running BEIR / CMTEB benchmarks against
 dikw's hybrid retriever, using Gitee AI for embeddings (its free /
 low-cost tier makes the 5K–60K passage runs financially trivial). The
 benchmark datasets and the converter scripts live under `evals/`; the
-runner is the same `dikw eval` you use on the dogfood mvp set.
+runner is the same `dikw client eval` you use on the dogfood mvp set.
 
 Setup once:
 
@@ -279,7 +280,7 @@ cd scratch-bench-wiki
 #   embedding_distance: cosine
 #   embedding_batch_size: 16          # gotcha #2 — Gitee caps at 25
 # Then in .env: DIKW_EMBEDDING_API_KEY=<your gitee-ai key>
-uv run --env-file .env dikw check --path . --embed-only
+uv run --env-file .env dikw client serve-and-run --base . -- check --embed-only
 ```
 
 Materialise SciFact (BEIR English, 5K passages, ~1 minute on Gitee AI):
@@ -298,8 +299,8 @@ Run the full ablation and dump per-mode rankings for offline re-fusion:
 
 ```bash
 uv run --env-file scratch-bench-wiki/.env \
-    dikw eval --dataset scifact --embedder provider \
-    --path ./scratch-bench-wiki --retrieval all \
+    dikw client serve-and-run --base ./scratch-bench-wiki -- \
+    eval --dataset scifact --embedder provider --retrieval all \
     --dump-raw /tmp/scifact-raw.jsonl
 ```
 
@@ -436,25 +437,25 @@ uv run --env-file .env dikw auth status openai-codex --wiki .
 # provider     | status   | expires in | last refresh         | account
 # openai-codex | active   | 28m 12s    | 2026-05-06 03:14 UTC | acc-...
 
-uv run --env-file .env dikw check --path . --llm-only
+uv run --env-file .env dikw client serve-and-run --base . -- check --llm-only
 # Expected:
 # LLM | https://chatgpt.com/backend-api/codex | OK | <ms>ms
 ```
 
-If `dikw check` reports `relogin_required`, the OAuth refresh_token has
+If `dikw client check` reports `relogin_required`, the OAuth refresh_token has
 been revoked or consumed elsewhere. Recover with
 `uv run dikw auth login openai-codex --wiki .` (the device-code flow
 mints a fresh pair).
 
 ## Pre-flight checklist for a new vendor
 
-Before running `dikw ingest` against a real corpus with a new vendor
+Before running `dikw client ingest` against a real corpus with a new vendor
 config:
 
 - [ ] `embedding_dim` matches what the model actually returns.
-      Run `dikw check --embed-only` and read `dim=…` from the output.
+      Run `dikw client check --embed-only` and read `dim=…` from the output.
 - [ ] `embedding_batch_size` is ≤ the vendor's observed cap.
-- [ ] `dikw check --llm-only` and `dikw check --embed-only` each exit 0.
+- [ ] `dikw client check --llm-only` and `dikw client check --embed-only` each exit 0.
 - [ ] If you're migrating from another vendor, `.dikw/index.sqlite` is
       deleted (see gotcha #1).
 - [ ] Costs understood: if the LLM leg is `openai_compat`, you pay full
@@ -585,14 +586,14 @@ promote the chunks that reference matching images via
 
 ### Verifying the config end-to-end
 
-`dikw check --embed-only` automatically routes through the multimodal
+`dikw client check --embed-only` automatically routes through the multimodal
 embedder when `assets.multimodal` is present, sending one text + one
 image input in **a single batched request** (no RTT stacking). Both
 modalities probe the same endpoint Gitee will see at ingest time, so a
 green check means real ingest will work:
 
 ```bash
-$ uv run --env-file .env dikw check --path . --embed-only
+$ uv run --env-file .env dikw client serve-and-run --base . -- check --embed-only
 Embedding | (provider default) | OK | 4234ms, dim=1024, modalities=text+image, provider=gitee-ai
 ```
 
@@ -620,7 +621,7 @@ probe (one `"ping"` string) — same as before.
 ### Switching the multimodal model
 
 Change `model` (and `dim` if it differs) in `dikw.yml` and re-run
-`dikw ingest`. The engine sees a new identity tuple, mints a new
+`dikw client ingest`. The engine sees a new identity tuple, mints a new
 version row, creates a fresh `vec_assets_v<new_id>` table, and writes
 to it. The previous version's data stays in `vec_assets_v<old_id>`
 until you run `dikw embed reindex` (v1 ships a stub; v1.5 implements

@@ -53,7 +53,7 @@ from .serve_and_run import ENV_SERVE_AND_RUN_AUTO_WAIT
 from .task_follow import follow_to_terminal
 from .transport import ClientError, Transport
 
-# Exit-code contract for ``--wait`` on op commands and ``dikw tasks
+# Exit-code contract for ``--wait`` on op commands and ``dikw client tasks
 # wait``. Agents script against these — keep them stable.
 _EXIT_FAILED = 1
 _EXIT_CANCELLED = 130  # POSIX SIGINT convention
@@ -62,7 +62,7 @@ _EXIT_TIMEOUT = 124  # POSIX timeout(1) convention
 
 def _serve_and_run_forces_wait() -> bool:
     """True when this CLI invocation is the inner command of a
-    ``dikw serve-and-run`` lifecycle without ``--keep-alive``.
+    ``dikw client serve-and-run`` lifecycle without ``--keep-alive``.
 
     The outer ``serve-and-run`` tears down the temporary server the
     moment the inner exits, so an async-default op command would
@@ -320,51 +320,6 @@ def check_cmd(
         present = [leg for leg in legs if isinstance(leg, dict)]
         if not present or not all(bool(leg.get("ok")) for leg in present):
             raise typer.Exit(code=1)
-
-    _run(_go())
-
-
-@app.command("init")
-def init_cmd(
-    description: Annotated[
-        str | None,
-        typer.Option(
-            "--description",
-            "-d",
-            help="One-line description for dikw.yml on the server.",
-        ),
-    ] = None,
-    server: Annotated[str | None, _server_option()] = None,
-    token: Annotated[str | None, _token_option()] = None,
-) -> None:
-    """Ask the server to scaffold its bound base (no-op when already scaffolded).
-
-    For starting a fresh base *locally*, use the top-level ``dikw init``
-    command — it works without a running server.
-    """
-
-    async def _go() -> None:
-        async with Transport.from_config(_resolve(server, token)) as t:
-            try:
-                payload = await t.post_json(
-                    "/v1/init",
-                    json_body={"description": description}
-                    if description is not None
-                    else {},
-                )
-            except ClientError as e:
-                # The server's own runtime refuses to start without a
-                # ``dikw.yml`` already present, so the only way this 409
-                # fires in normal use is "wiki is already scaffolded" —
-                # treat it as a no-op success per the command's own
-                # docstring instead of exiting non-zero.
-                if e.code == "wiki_already_initialised":
-                    console.print(
-                        "[yellow]base already initialized[/yellow] — no-op"
-                    )
-                    return
-                raise
-        console.print(f"[green]initialized[/green] base at {payload.get('root')}")
 
     _run(_go())
 

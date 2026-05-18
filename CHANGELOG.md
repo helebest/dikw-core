@@ -7,6 +7,44 @@ on each entry call out exactly what shape changes break.
 
 ## Unreleased
 
+## 0.1.0 — 2026-05-18
+
+### BREAKING (CLI): top-level short names for HTTP commands removed
+
+* **All HTTP-bound commands now live exclusively under `dikw client *`.**
+  The splice in `cli.py` that previously exposed `dikw status`,
+  `dikw retrieve`, `dikw ingest`, `dikw synth`, `dikw distill`,
+  `dikw eval`, `dikw lint`, `dikw review`, `dikw pages`, `dikw assets`,
+  `dikw graph`, `dikw tasks`, `dikw info`, `dikw health`, `dikw check`,
+  `dikw import`, and `dikw serve-and-run` is **gone**. Each of those
+  commands now exits non-zero with Typer's `No such command "<name>"`.
+* **Migration**: replace `dikw <verb>` with `dikw client <verb>`
+  everywhere, including `dikw serve-and-run` → `dikw client serve-and-run`.
+* **Why**: the splice gave the appearance that local-only and HTTP-bound
+  commands shared a flat namespace, when in reality they have different
+  failure modes (a missing `dikw serve` only affects HTTP commands).
+  Spelling out the `client` prefix keeps the local/HTTP boundary
+  unambiguous for agents and humans, and matches the agent-friendly
+  default-JSON contract already shipped under `dikw client *`.
+* **Unchanged**: the four local-only top-level surfaces — `dikw version`,
+  `dikw init <path>`, `dikw serve`, and the `dikw auth {login, import,
+  status, list, logout}` subgroup — keep working.
+
+### BREAKING (CLI + HTTP): `dikw client init` and `POST /v1/init` removed
+
+* **CLI**: `dikw client init` is gone. The server's runtime already
+  refuses to start without a `dikw.yml` in place, so the command was a
+  permanent no-op (returning 409 `wiki_already_initialised` on every
+  call). For *local* scaffolding, the top-level `dikw init <path>`
+  command (which writes files directly without contacting any server)
+  is unchanged.
+* **HTTP**: `POST /v1/init` is removed; calling it now returns 404. The
+  `InitRequest` / `InitResponse` DTOs are deleted from `routes_sync.py`.
+* **Env**: `DIKW_SERVER_DISABLE_INIT` is no longer read by anything. The
+  posture it provided ("production base where clients can never trigger
+  rescaffold") is now structurally guaranteed because the endpoint
+  itself doesn't exist.
+
 ### feat(server): `GET /v1/base/graph` exposes the full base graph (#89)
 
 * **Wire (additive)**: new `GET /v1/base/graph` returns the entire base

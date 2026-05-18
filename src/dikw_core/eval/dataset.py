@@ -344,7 +344,7 @@ def iter_packaged_datasets() -> list[str]:
 
     Walks ``datasets_root()`` and returns dataset names — i.e. the
     immediate-subdir names that ``load_dataset`` accepts. Used by the
-    ``dikw eval`` no-arg path that runs every packaged dataset
+    ``dikw client eval`` no-arg path that runs every packaged dataset
     back-to-back. Skips dot-files and any subdir without a
     ``dataset.yaml`` so the discovery never trips on README dirs etc.
     """

@@ -87,7 +87,7 @@ def test_lint_propose_apply_cli_full_loop(
     # 1. propose --rule broken_wikilink — ``--wait`` so the test sees
     # the succeeded summary + ``apply with:`` hint line instead of the
     # async-default task-handle JSON.
-    r1 = _run(["lint", "propose", "--rule", "broken_wikilink", "--plain", "--wait"])
+    r1 = _run(["client", "lint", "propose", "--rule", "broken_wikilink", "--plain", "--wait"])
     assert r1.exit_code == 0, r1.stdout
     assert "succeeded" in r1.stdout.lower()
     assert "apply with:" in r1.stdout.lower()
@@ -103,12 +103,12 @@ def test_lint_propose_apply_cli_full_loop(
     # 2. proposals listing should include the new propose task as not-applied.
     # Use JSON format so the assertion sees the full task_id (the rich
     # Table renderer truncates long UUIDs with ellipses).
-    r2 = _run(["lint", "proposals", "--format", "json"])
+    r2 = _run(["client", "lint", "proposals", "--format", "json"])
     assert r2.exit_code == 0, r2.stdout
     assert task_id in r2.stdout
 
     # 3. apply <task_id> — ``--wait`` so the test sees the apply report.
-    r3 = _run(["lint", "apply", task_id, "--plain", "--wait"])
+    r3 = _run(["client", "lint", "apply", task_id, "--plain", "--wait"])
     assert r3.exit_code == 0, r3.stdout
     assert "applied" in r3.stdout.lower()
 
@@ -184,7 +184,7 @@ def test_lint_orphan_page_propose_apply_roundtrip(
     to include the orphan's backlink."""
     patch_transport_factory()
 
-    r1 = _run(["lint", "propose", "--rule", "orphan_page", "--plain", "--wait"])
+    r1 = _run(["client", "lint", "propose", "--rule", "orphan_page", "--plain", "--wait"])
     assert r1.exit_code == 0, r1.stdout
     assert "succeeded" in r1.stdout.lower()
 
@@ -195,7 +195,7 @@ def test_lint_orphan_page_propose_apply_roundtrip(
             break
     assert task_id is not None, r1.stdout
 
-    r2 = _run(["lint", "apply", task_id, "--plain", "--wait"])
+    r2 = _run(["client", "lint", "apply", task_id, "--plain", "--wait"])
     assert r2.exit_code == 0, r2.stdout
     assert "applied" in r2.stdout.lower()
 
@@ -219,7 +219,7 @@ def test_lint_propose_invalid_rule_rejected_by_server(
     """An unknown --rule value is rejected at the pydantic-body validator
     on the server. The CLI surfaces that as a non-zero exit."""
     patch_transport_factory()
-    r = _run(["lint", "propose", "--rule", "no_such_rule"])
+    r = _run(["client", "lint", "propose", "--rule", "no_such_rule"])
     assert r.exit_code != 0
 
 
@@ -230,6 +230,6 @@ def test_lint_apply_unknown_proposal_id_fails(
     patch_transport_factory()
     # ``--wait`` so the bad-id rejection surfaces as a failed task
     # final + non-zero exit instead of the async-default exit-0 handle.
-    r = _run(["lint", "apply", "no-such-id", "--plain", "--wait"])
+    r = _run(["client", "lint", "apply", "no-such-id", "--plain", "--wait"])
     assert r.exit_code != 0
     assert "failed" in r.stdout.lower() or "not found" in r.stdout.lower()

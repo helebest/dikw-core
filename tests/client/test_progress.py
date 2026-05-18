@@ -16,8 +16,12 @@ from dikw_core.client.progress import (
     render_distill_report,
     render_eval_report,
     render_health_report,
+    render_import_report,
     render_ingest_report,
+    render_retrieve_table,
     render_status,
+    render_synth_eval_report,
+    render_synth_report,
 )
 
 
@@ -194,6 +198,106 @@ def test_render_health_report_renders_all_blocks() -> None:
     assert "multimodal embedding" in out
     # api_key flag rendering: present → ✓, absent → ✗.
     assert "✓" in out and "✗" in out
+
+
+def test_render_retrieve_table_smoke() -> None:
+    """Smoke: ``render_retrieve_table`` produces both chunks and
+    page_refs tables when both are present. Guards the title strings
+    (which were rewritten 0.1.0 to ``dikw client retrieve …``) and
+    catches obvious shape regressions."""
+    console = Console(record=True, width=120, force_terminal=False)
+    render_retrieve_table(
+        console,
+        {
+            "chunks": [
+                {
+                    "layer": "source",
+                    "path": "sources/a.md",
+                    "seq": 0,
+                    "score": 0.91,
+                    "snippet": "alpha snippet",
+                }
+            ],
+            "page_refs": [
+                {
+                    "layer": "source",
+                    "path": "sources/a.md",
+                    "score": 0.88,
+                    "hit_chunk_ids": [0, 1],
+                }
+            ],
+        },
+    )
+    out = console.export_text()
+    assert "dikw client retrieve" in out
+    assert "alpha snippet" in out
+
+
+def test_render_import_report_smoke() -> None:
+    """Smoke: ``render_import_report`` lists the summary block + the
+    rejected-packages table when any rejects are present."""
+    console = Console(record=True, width=120, force_terminal=False)
+    render_import_report(
+        console,
+        {
+            "files_count": 3,
+            "bytes": 4096,
+            "committed": ["pkg-0", "pkg-1"],
+            "rejected": [
+                {"id": 2, "code": "frontmatter_invalid", "detail": "bad yaml"}
+            ],
+        },
+    )
+    out = console.export_text()
+    assert "dikw client import" in out
+    assert "frontmatter_invalid" in out
+
+
+def test_render_synth_report_smoke() -> None:
+    """Smoke: ``render_synth_report`` lists every K-layer counter so
+    the table title rewrite (``dikw synth`` → ``dikw client synth``)
+    can't regress silently."""
+    console = Console(record=True, width=80, force_terminal=False)
+    render_synth_report(
+        console,
+        {
+            "candidates": 4,
+            "created": 2,
+            "updated": 1,
+            "skipped": 1,
+            "errors": 0,
+            "unresolved_wikilinks": 0,
+        },
+    )
+    out = console.export_text()
+    assert "dikw client synth" in out
+    assert "candidates" in out
+
+
+def test_render_synth_eval_report_smoke() -> None:
+    """Smoke: ``render_synth_eval_report`` renders the direction-aware
+    threshold rows + the informational metrics tail."""
+    console = Console(record=True, width=120, force_terminal=False)
+    render_synth_eval_report(
+        console,
+        {
+            "dataset_name": "toy-synth",
+            "threshold_results": [
+                {
+                    "name": "synth/atomicity",
+                    "observed": 0.7,
+                    "threshold": 0.5,
+                    "direction": "min",
+                    "passed": True,
+                }
+            ],
+            "metrics": {"synth/atomicity": 0.7, "synth/coverage": 0.55},
+            "informational": {},
+        },
+    )
+    out = console.export_text()
+    assert "dikw client eval" in out
+    assert "synth/atomicity" in out
 
 
 def test_render_eval_report_marks_failures() -> None:

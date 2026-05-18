@@ -197,7 +197,7 @@ def test_cli_check_rejects_both_only_flags(
 ) -> None:
     patch_transport_factory()
     result = CliRunner().invoke(
-        app, ["check", "--llm-only", "--embed-only"]
+        app, ["client", "check", "--llm-only", "--embed-only"]
     )
     assert result.exit_code == 2, result.stdout
 

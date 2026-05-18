@@ -73,32 +73,21 @@ def test_serve_help_lists_options(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--port" in out
 
 
-def test_top_level_help_lists_only_local_commands(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``dikw --help`` must list only the local-only commands plus the
-    ``client`` subgroup — never any of the HTTP-bound short names.
+def test_top_level_app_registers_only_local_commands() -> None:
+    """The top-level Typer app must register exactly the four local-only
+    commands + the ``client`` subgroup — never any HTTP-bound verb.
 
-    Forces a wide terminal so rich/typer doesn't visually wrap command
-    names across lines (a narrow shell would split ``serve-and-run``
-    and a naïve substring search would miss it)."""
-    monkeypatch.setenv("COLUMNS", "200")
-    monkeypatch.setenv("TERM", "dumb")
-    result = runner.invoke(app, ["--help"])
-    assert result.exit_code == 0
-    out = result.stdout
-    for expected in ("version", "init", "serve", "auth", "client"):
-        assert expected in out, f"missing local command {expected!r} in --help"
-    # First whitespace-delimited token on each help row is a command name
-    # (or a section header / option flag — both safe). Forbidden names
-    # appearing as a row's leading token mean the splice resurrected.
-    cmd_starts = {
-        stripped.split(" ", 1)[0]
-        for line in out.splitlines()
-        if (stripped := line.strip())
+    Inspects the live registry instead of parsing ``--help`` text;
+    Rich's box-drawing glyphs make text scraping fragile, and the
+    registry is the actual source of truth Typer dispatches against.
+    """
+    top_level = {c.name for c in app.registered_commands if c.name} | {
+        g.name for g in app.registered_groups if g.name
     }
+    assert top_level == {"version", "init", "serve", "auth", "client"}, (
+        f"unexpected top-level surface: {sorted(top_level)}"
+    )
     for forbidden in removed_top_level_short_names():
-        assert forbidden not in cmd_starts, (
-            f"HTTP-bound short name {forbidden!r} leaked into top-level "
-            f"--help; got command-row tokens: {sorted(cmd_starts)}"
+        assert forbidden not in top_level, (
+            f"HTTP-bound short name {forbidden!r} leaked into top-level app"
         )
